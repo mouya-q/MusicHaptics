@@ -19,14 +19,14 @@
       "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/build.gradle.kts",
       "selection": {
         "end": {
-          "column": 35,
-          "index": 474,
-          "line": 22
+          "column": 4,
+          "index": 811,
+          "line": 38
         },
         "start": {
-          "column": 35,
-          "index": 474,
-          "line": 22
+          "column": 4,
+          "index": 811,
+          "line": 38
         }
       }
     },
@@ -64,14 +64,14 @@
       "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/AndroidManifest.xml",
       "selection": {
         "end": {
-          "column": 60,
-          "index": 216,
-          "line": 2
+          "column": 8,
+          "index": 1643,
+          "line": 36
         },
         "start": {
-          "column": 60,
-          "index": 216,
-          "line": 2
+          "column": 8,
+          "index": 1643,
+          "line": 36
         }
       }
     },
@@ -109,14 +109,14 @@
       "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/res/drawable/ic_launcher_adaptive.xml",
       "selection": {
         "end": {
-          "column": 0,
-          "index": 343,
-          "line": 8
+          "column": 1,
+          "index": 1,
+          "line": 0
         },
         "start": {
-          "column": 0,
-          "index": 343,
-          "line": 8
+          "column": 1,
+          "index": 1,
+          "line": 0
         }
       }
     },
@@ -124,13 +124,13 @@
       "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/res/drawable/ic_music_haptics_foreground.xml",
       "selection": {
         "end": {
-          "column": 0,
-          "index": 1529,
+          "column": 24,
+          "index": 1544,
           "line": 48
         },
         "start": {
-          "column": 0,
-          "index": 1529,
+          "column": 24,
+          "index": 1544,
           "line": 48
         }
       }
@@ -139,14 +139,14 @@
       "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/res/drawable/ic_foreground_wrapper.xml",
       "selection": {
         "end": {
-          "column": 0,
-          "index": 493,
-          "line": 15
+          "column": 21,
+          "index": 345,
+          "line": 11
         },
         "start": {
-          "column": 0,
-          "index": 493,
-          "line": 15
+          "column": 21,
+          "index": 345,
+          "line": 11
         }
       }
     },
@@ -154,14 +154,14 @@
       "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/MainHook.kt",
       "selection": {
         "end": {
-          "column": 71,
-          "index": 15662,
-          "line": 345
+          "column": 58,
+          "index": 11411,
+          "line": 247
         },
         "start": {
-          "column": 71,
-          "index": 15662,
-          "line": 345
+          "column": 58,
+          "index": 11411,
+          "line": 247
         }
       }
     },
@@ -169,14 +169,14 @@
       "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/MainActivity.kt",
       "selection": {
         "end": {
-          "column": 44,
-          "index": 1380,
-          "line": 43
+          "column": 0,
+          "index": 12064,
+          "line": 338
         },
         "start": {
-          "column": 44,
-          "index": 1380,
-          "line": 43
+          "column": 0,
+          "index": 12064,
+          "line": 338
         }
       }
     },
@@ -184,14 +184,14 @@
       "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/MainUiBuilder.kt",
       "selection": {
         "end": {
-          "column": 2,
-          "index": 30039,
-          "line": 757
+          "column": 0,
+          "index": 30597,
+          "line": 762
         },
         "start": {
-          "column": 2,
-          "index": 30039,
-          "line": 757
+          "column": 0,
+          "index": 30597,
+          "line": 762
         }
       }
     },
@@ -200,13 +200,13 @@
       "selection": {
         "end": {
           "column": 0,
-          "index": 1591,
-          "line": 37
+          "index": 2558,
+          "line": 61
         },
         "start": {
           "column": 0,
-          "index": 1591,
-          "line": 37
+          "index": 2558,
+          "line": 61
         }
       }
     },
@@ -214,14 +214,14 @@
       "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/HapticEngine.kt",
       "selection": {
         "end": {
-          "column": 2,
-          "index": 16719,
-          "line": 451
+          "column": 0,
+          "index": 0,
+          "line": 0
         },
         "start": {
-          "column": 2,
-          "index": 16719,
-          "line": 451
+          "column": 0,
+          "index": 0,
+          "line": 0
         }
       }
     },
@@ -229,17 +229,32 @@
       "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/AudioFifoBuffer.kt",
       "selection": {
         "end": {
-          "column": 2,
-          "index": 1980,
-          "line": 72
+          "column": 0,
+          "index": 3868,
+          "line": 128
         },
         "start": {
-          "column": 2,
-          "index": 1980,
-          "line": 72
+          "column": 0,
+          "index": 3868,
+          "line": 128
+        }
+      }
+    },
+    {
+      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/HapticDashboardActivity.kt",
+      "selection": {
+        "end": {
+          "column": 0,
+          "index": 2219,
+          "line": 64
+        },
+        "start": {
+          "column": 0,
+          "index": 2219,
+          "line": 64
         }
       }
     }
   ],
-  "selectedFile": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/build.gradle.kts"
+  "selectedFile": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/HapticDashboardActivity.kt"
 }

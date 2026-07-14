@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
-<uses-permission android:name="android.permission.VIBRATE"/>
-    <!-- 💥 指向全新的自适应图标 XML 资源，彻底干掉 legacy 缩水模式 -->
+    <uses-permission android:name="android.permission.VIBRATE"/>
+    
+    <!-- 指向全新的自适应图标 XML 资源，彻底干掉 legacy 缩水 -->
     <application 
         android:allowBackup="false"
         android:icon="@drawable/ic_launcher_adaptive"
@@ -16,11 +17,14 @@
 
         <provider android:name="com.itsaky.androidide.logsender.utils.LogSenderInstaller" tools:node="remove" />
         <service android:name="com.itsaky.androidide.logsender.LogSenderService" tools:node="remove" />
-        <!-- ⚡ 注册跨进程共享 Provider，解决所有的 notifyChange 崩溃与警告 -->
+        
+        <!--  注册跨进程共享 Provider，解决所有的 notifyChange 崩溃与警告 -->
         <provider
             android:name=".ConfigProvider"
             android:authorities="com.mouya.musichaptics.provider"
             android:exported="true" />
+            
+        <!-- 主启动页面 -->
         <activity 
             android:name=".MainActivity" 
             android:exported="true">
@@ -29,5 +33,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        
+        
+        
+        <!-- 并入：全新液态模糊高斯物理控制台 ps.听AI吹这个公式很nb -->
+        <activity
+            android:name=".HapticDashboardActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+        </activity>
+
     </application>
 </manifest>

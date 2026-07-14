@@ -1,452 +1,940 @@
+
 package com.mouya.musichaptics
 
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.sqrt
+import java.util.concurrent.PriorityBlockingQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.*
 
 /**
- * (ᗜ ˰ ᗜ) 终极触感发电厂
- * 内部配置了纯天然自适应“会呼吸的阈值线”，管你音量是大是小，只要音乐敢蹦迪，立刻给你更多的电！
+ * High-Performance Electro-Haptic DSP Synthesis Engine (MusicHapticsX Super-Core)
+ * 
+ * Implements real-time audio-to-haptic transduction utilizing:
+ * 1. 4th-Order Linkwitz-Riley (LR4) Active Crossover Network.
+ * 2. Time-Domain Autocorrelation Pitch-Tracking with Parabolic Interpolation.
+ * 3. Dual-Node Lumped-Parameter Voice-Coil Electro-Thermal Simulation.
+ * 4. Piecewise Soft-Knee Dynamic Range Compression (DRC).
+ * 5. Micro-time Scale Pulse-Width Haptic Primitive Synthesizer.
+ * 
+ * Target Architecture: High-fidelity Linear Resonant Actuators (LRA).
  */
 class HapticEngine(
     private val context: Context,
     private val prefs: SharedPreferences
 ) {
     companion object {
-        private const val TAG = "HapticEngineCore"
-        private const val BLOCK_SIZE = 256
-        private const val SIGNAL_SANITY_LIMIT = 2.0f
-        private const val LEAK_FACTOR_FAST = 0.65f
-        private const val LEAK_FACTOR_SLOW = 0.008f
+        private const val TAG = "HapticDSPCore"
+        private const val RING_BUFFER_CAPACITY = 131072
+        private const val FRAME_BLOCK_SIZE = 512
+        private const val MAXIMUM_CHANNELS = 8
+        
+        // Thermal constants for the LRA dual-node RC thermal network simulation
+        private const val AMBIENT_TEMPERATURE_CELSIUS = 25.0f
+        private const val LIMITING_TEMPERATURE_CELSIUS = 80.0f
+        private const val CRITICAL_TEMPERATURE_CELSIUS = 100.0f
     }
 
     var uiBuilder: MainUiBuilder? = null
-    private var sampleRate = 44100
+
+    private var sampleRate = 48000
     private var channels = 2
+    private val audioRingBuffer = ConcurrentAudioRingBuffer(RING_BUFFER_CAPACITY)
+    private val processingFrame = FloatArray(FRAME_BLOCK_SIZE)
 
-    // 严密对齐的特制好茶杯 FIFO 环形积蓄槽
-    private val fifoBuffer = AudioFifoBuffer(16384)
-    private val processingWindow = FloatArray(BLOCK_SIZE)
-    private val vibeController = HighFidelityVibeController(context)
+    // 🟢 优化：预分配分频信号缓冲区，彻底避免音频热路径上的 GC 抖动
+    private val subBassSignal = FloatArray(FRAME_BLOCK_SIZE)
+    private val midBassSignal = FloatArray(FRAME_BLOCK_SIZE)
+    private val presenceSignal = FloatArray(FRAME_BLOCK_SIZE)
 
-    // 🚀 自适应跟踪积分状态机控制变量
-    private var fastEnvelope = 0.0f
-    private var slowBackground = 0.0f
-    private var frameCount = 0
-    private var lastPulseTime = 0L
-    
-    // 故障自愈监测计数器
-    private var nanPanicCounter = 0
-    private var silentFrameCounter = 0
+    // DSP Class Initializations
+    private val crossoverNetwork = ThreeWayCrossover()
+    private val pitchTracker = AutocorrelationPitchEstimator()
+    private val dynamicCompressor = DualKneeCompressor()
+    private val thermalSimulator = DualNodeThermalSimulator()
+    private val hapticScheduler = PrecisionHapticScheduler(context)
+
+    private val isEngineEnabled = AtomicBoolean(true)
+    private val frameIndexCounter = AtomicLong(0)
+    private var lastParameterUpdateTime = 0L
+
+    val telemetryData = TelemetryMonitor()
+
+    init {
+        synchronizeParameters()
+        Log.i(TAG, "Initialization of Electro-Haptic DSP Engine complete. System ready.")
+    }
 
     /**
-     * 判断1-10：运行参数状态自适应重校准矩阵
+     * Synchronizes and updates the filter coefficients and DRC parameters 
+     * based on the latest runtime user preferences.
+     */
+    private fun synchronizeParameters() {
+        val masterState = try { prefs.getBoolean("master_switch", true) } catch (e: Exception) { true }
+        isEngineEnabled.set(masterState)
+
+        val inputGain = try { prefs.getFloat("haptic_gain", 1.0f) } catch (e: Exception) { 1.0f }
+        val outputAmp = try { prefs.getFloat("haptic_amplitude", 1.0f) } catch (e: Exception) { 1.0f }
+        val purityParam = try { prefs.getInt("haptic_bass_purity", 50) } catch (e: Exception) { 50 }
+
+        // Map the purity slider to the LR4 low-pass cutoff frequency [55.0Hz - 320.0Hz]
+        val lowCutoffFreq = 320.0f - (purityParam.coerceIn(0, 100).toFloat() * 2.65f)
+        val highCutoffFreq = lowCutoffFreq * 2.2f // Proportional middle band spacing
+
+        crossoverNetwork.calculateCoefficients(sampleRate.toFloat(), lowCutoffFreq, highCutoffFreq)
+
+        // 🟢 优化：根据当前的块更新速率，动态刷新压缩器的时间常数基准
+        val blockRate = sampleRate.toFloat() / FRAME_BLOCK_SIZE.toFloat()
+        dynamicCompressor.setParameters(
+            thresholdDb = -18.0f,
+            ratio = 4.5f,
+            kneeWidthDb = 6.0f,
+            attackMs = 4.0f,
+            releaseMs = 75.0f,
+            makeupGainDb = 3.5f + (inputGain * 2.0f),
+            blockRate = blockRate
+        )
+
+        telemetryData.lowPassCutoffHz = lowCutoffFreq
+        telemetryData.highPassCutoffHz = highCutoffFreq
+        telemetryData.userAmplitudeScale = outputAmp
+    }
+
+    /**
+     * Reconfigures internal buffer geometry and DSP states upon audio hardware format changes.
      */
     fun reconfigure(newSampleRate: Int, newChannels: Int) {
-        // 判断1：入参合理性过滤一
-        if (newSampleRate <= 0) {
-            Log.w(TAG, "雑魚ね！${newSampleRate}Hz 的采样率你是在糊弄鬼呢？")
+        if (newSampleRate <= 0 || newChannels <= 0 || newChannels > MAXIMUM_CHANNELS) {
+            Log.w(TAG, "Reconfiguration rejected. Invalid audio specification: ${newSampleRate}Hz | $newChannels Ch")
             return
         }
-        // 判断2：入参合理性过滤二
-        if (newChannels <= 0 || newChannels > 8) {
-            Log.w(TAG, "( ⩌⤚⩌) $newChannels 声道？塞不下这么多水，打回原形！")
-            return
-        }
-        // 判断3：状态查重，完全一致则不做任何无用功，避免抖动
+
         if (this.sampleRate == newSampleRate && this.channels == newChannels) {
             return
         }
 
         this.sampleRate = newSampleRate
         this.channels = newChannels
+
+        // Flush signal buffers to prevent discontinuities and transient thermal spikes
+        audioRingBuffer.clear()
+        crossoverNetwork.reset()
+        pitchTracker.initialize(newSampleRate)
+        dynamicCompressor.reset()
         
-        // 判断4：清空积压的陈年旧数据，防止产生跨歌曲切歌时的突发“爆音震动”
-        fifoBuffer.clear()
-        fastEnvelope = 0.0f
-        slowBackground = 0.0f
+        // 🟢 优化：动态注入时间步长，杜绝 44.1k/96k 切换时的热力学模拟曲线畸变
+        val stepTimeSec = FRAME_BLOCK_SIZE.toFloat() / sampleRate.toFloat()
+        thermalSimulator.reset(stepTimeSec)
         
-        val msg = "(ᗜ ˰ ᗜ) 好茶摇一摇配置变动！当前注入规格：${sampleRate}Hz | ${channels}Ch"
-        Log.i(TAG, msg)
-        uiBuilder?.appendLog(msg)
+        hapticScheduler.flush()
+
+        synchronizeParameters()
+
+        val logMessage = "System reconfigured to: ${sampleRate}Hz | $channels Channels"
+        Log.i(TAG, logMessage)
+        uiBuilder?.appendLog(logMessage)
     }
 
     /**
-     * 判断11-50：万能多声道洗刷归一化通道
+     * Entry point for incoming PCM frame streams. Normalizes inter-channel 
+     * interleaved samples to single-channel floating-point formats [-1.0f, 1.0f].
      */
     fun processAudioFrame(pcmData: ShortArray?) {
-        // 判断11：基础防御，进来的数组哪怕是空的也绝对不准崩溃
-        if (pcmData == null || pcmData.isEmpty()) {
+        if (pcmData == null || pcmData.isEmpty() || !isEngineEnabled.get()) {
+            if (!isEngineEnabled.get()) {
+                audioRingBuffer.clear()
+                hapticScheduler.flush()
+            }
             return
         }
 
-        // 判断12：主开关校验，用户要是手动关了，一口电都不给输
-        val isMasterOn = try {
-            prefs.getBoolean("master_switch", true)
-        } catch (e: Exception) {
-            true
-        }
-        if (!isMasterOn) {
-            fifoBuffer.clear()
-            return
-        }
+        val sampleLength = pcmData.size
+        val targetMonoSamples = sampleLength / channels
+        if (targetMonoSamples <= 0) return
 
-        val pcmSize = pcmData.size
-        
-        // 判断13：多声道映射维度安全计算，绝对防止算错溢出
-        val calculatedMonoCount = when (channels) {
-            1 -> pcmSize
-            2 -> pcmSize / 2
-            else -> pcmSize / channels // 多声道降维打击
-        }
-
-        if (calculatedMonoCount <= 0) {
-            return
-        }
-
-        val monoFloatBuffer = FloatArray(calculatedMonoCount)
-        var writePointer = 0
+        val normalizedBuffer = FloatArray(targetMonoSamples)
+        var writerOffset = 0
 
         try {
-            // 判断14：基于声道分布的超级分流多态解析
-            if (channels == 2) {
-                var i = 0
-                // 判断15：立体声双通道交织合并循环，留足多出一帧的安全裕度
-                while (i < pcmSize - 1) {
-                    val left = pcmData[i].toFloat()
-                    val right = pcmData[i + 1].toFloat()
-                    
-                    // 均值融合并归一化到 [-1.0, 1.0]
-                    var mono = (left + right) / 2.0f / 32768.0f
-                    
-                    // 判断16：实时清洗变异产生的非数与无限大值
-                    if (mono.isNaN() || mono.isInfinite()) {
-                        mono = 0.0f
-                        nanPanicCounter++
-                    }
-                    
-                    // 判断17：溢出截断硬核保护
-                    if (mono > SIGNAL_SANITY_LIMIT || mono < -SIGNAL_SANITY_LIMIT) {
-                        mono = if (mono > 0) 1.0f else -1.0f
-                    }
-
-                    if (writePointer < monoFloatBuffer.size) {
-                        monoFloatBuffer[writePointer++] = mono
-                    }
-                    i += 2
-                }
-            } else if (channels == 1) {
-                // 判断18：单声道高速直接清洗注入
-                for (i in 0 until pcmSize) {
-                    var mono = pcmData[i].toFloat() / 32768.0f
-                    if (mono.isNaN() || mono.isInfinite()) {
-                        mono = 0.0f
-                        nanPanicCounter++
-                    }
-                    if (writePointer < monoFloatBuffer.size) {
-                        monoFloatBuffer[writePointer++] = mono
+            when (channels) {
+                1 -> {
+                    val scaleFactor = 1.0f / 32768.0f
+                    for (i in pcmData.indices) {
+                        normalizedBuffer[writerOffset++] = pcmData[i].toFloat() * scaleFactor
                     }
                 }
-            } else {
-                // 判断19：超多声道（5.1、7.1等大厂环绕声特制变体）大合并策略
-                var step = 0
-                while (step < pcmSize - channels + 1) {
-                    var multiSum = 0.0f
-                    for (c in 0 until channels) {
-                        multiSum += pcmData[step + c].toFloat()
+                2 -> {
+                    var i = 0
+                    val scaleFactor = 1.0f / 65536.0f // Merges both channels to prevent clipping
+                    while (i < sampleLength - 1) {
+                        val monoSum = (pcmData[i].toFloat() + pcmData[i + 1].toFloat()) * scaleFactor
+                        normalizedBuffer[writerOffset++] = monoSum
+                        i += 2
                     }
-                    var mono = (multiSum / channels) / 32768.0f
-                    if (mono.isNaN() || mono.isInfinite()) mono = 0.0f
-                    if (writePointer < monoFloatBuffer.size) {
-                        monoFloatBuffer[writePointer++] = mono
+                }
+                else -> {
+                    // Downmix matrix algorithm for multi-channel audio setups
+                    var i = 0
+                    val channelNormalizationFactor = 1.0f / (channels.toFloat() * 32768.0f)
+                    while (i < sampleLength - channels + 1) {
+                        var matrixAccumulator = 0.0f
+                        for (c in 0 until channels) {
+                            matrixAccumulator += pcmData[i + c].toFloat()
+                        }
+                        normalizedBuffer[writerOffset++] = matrixAccumulator * channelNormalizationFactor
+                        i += channels
                     }
-                    step += channels
                 }
             }
-        } catch (t: Throwable) {
-            Log.e(TAG, "💀 音频流清洗合并时发生异常爆破: ${t.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "PCM normalization exception: ${e.message}")
             return
         }
 
-        // 判断20：将清洗干净的灵魂音频数据倒入水杯
-        if (writePointer > 0) {
-            fifoBuffer.write(monoFloatBuffer, writePointer)
-        }
+        audioRingBuffer.write(normalizedBuffer, writerOffset)
 
-        // 判断21：循环消费水杯里的积蓄，积满一个 BLOCK_SIZE 才能触发一次雷电轰击
-        var activeLoops = 0
-        while (fifoBuffer.read(processingWindow, BLOCK_SIZE)) {
-            // 判断22：恶性无尽死循环卡死强制防御，单次投递最多只消费64个窗口
-            if (activeLoops++ > 64) {
+        // Process audio in blocks of FRAME_BLOCK_SIZE to execute the DSP pipeline
+        var processingSafetyIterations = 0
+        while (audioRingBuffer.read(processingFrame, FRAME_BLOCK_SIZE)) {
+            if (processingSafetyIterations++ > 64) {
+                telemetryData.ringBufferOverruns++
                 break
             }
-            evaluateElectricalEnergy(processingWindow)
+            executeDspPipeline(processingFrame)
         }
     }
 
     /**
-     * 判断51-120：数字信号级联积分与呼吸阈值动态判准公式
+     * Executes the sequential stages of the high-fidelity electro-haptic pipeline.
      */
-    private fun evaluateElectricalEnergy(window: FloatArray) {
-        // 判断51：空窗直接弹回
-        if (window.isEmpty()) return
+    private fun executeDspPipeline(block: FloatArray) {
+        val currentTimeMs = SystemClock.elapsedRealtime()
 
-        // 1. 深度求和计算当前块的物理均方根能量 (RMS)
-        var squareAccumulator = 0.0f
-        for (i in 0 until BLOCK_SIZE) {
-            val sample = window[i]
-            squareAccumulator += sample * sample
-        }
-        
-        var currentRms = sqrt(squareAccumulator / BLOCK_SIZE)
-
-        // 判断52：异常信号二次过滤
-        if (currentRms.isNaN() || currentRms.isInfinite()) {
-            currentRms = 0.0f
+        // Sync parameters at a defined interval to minimize synchronization overhead
+        if (currentTimeMs - lastParameterUpdateTime > 600) {
+            synchronizeParameters()
+            lastParameterUpdateTime = currentTimeMs
         }
 
-        // 2. 从用户的界面拖载配置参数，并施加绝对空值及越界安全防御
-        val userGain = try { prefs.getFloat("haptic_gain", 1.0f) } catch (e: Exception) { 1.0f }
-        val userInterval = try { prefs.getInt("haptic_interval", 0).toLong() } catch (e: Exception) { 0L }
-        val userThresholdRaw = try { prefs.getInt("haptic_threshold", 1200).toFloat() / 5000f } catch (e: Exception) { 0.24f }
+        val currentFrameId = frameIndexCounter.incrementAndGet()
 
-        // 注入用户增益乘积
-        val liveWiredEnergy = currentRms * if (userGain <= 0f) 1.0f else userGain
+        // Pitch Tracking
+        val detectedFundamentalFreq = pitchTracker.analyzeSignal(block)
+        telemetryData.fundamentalFrequencyHz = detectedFundamentalFreq
 
-        // 判断53：静音轨监控自愈，如果连续1000帧都是绝对死寂，说明App在挂羊头卖狗肉，强制重置噪底状态
-        if (liveWiredEnergy < 0.0001f) {
-            silentFrameCounter++
-            if (silentFrameCounter > 1000) {
-                slowBackground = 0.0f
-                fastEnvelope = 0.0f
-                silentFrameCounter = 0
+        // Multi-Band Decimation via Linkwitz-Riley crossover
+        // 🟢 优化：直接写入复用字段，彻底消除每帧 3 个局部数组的瞬时堆开销
+        for (i in 0 until FRAME_BLOCK_SIZE) {
+            crossoverNetwork.processSample(block[i])
+            subBassSignal[i] = crossoverNetwork.subBassOutput
+            midBassSignal[i] = crossoverNetwork.midBassOutput
+            presenceSignal[i] = crossoverNetwork.presenceOutput
+        }
+
+        // Root Mean Square (RMS) calculation per band
+        val subBassRms = computeRms(subBassSignal)
+        val midBassRms = computeRms(midBassSignal)
+        val presenceRms = computeRms(presenceSignal)
+
+        // Piecewise Soft-Knee Dynamic Range Compression (DRC)
+        val compressedSub = dynamicCompressor.applyCompression(subBassRms)
+        val compressedMid = dynamicCompressor.applyCompression(midBassRms)
+        val compressedPresence = dynamicCompressor.applyCompression(presenceRms)
+
+        // Electro-Thermal LRA Simulation & Protection Model
+        val electricalPowerPowerSum = (compressedSub * compressedSub) + (compressedMid * compressedMid * 0.4f)
+        val estimatedCoilTemperature = thermalSimulator.updateThermalDynamics(electricalPowerPowerSum)
+        telemetryData.estimatedCoilTemperature = estimatedCoilTemperature
+
+        // Closed-Loop Thermal Mitigation Gain Scaling
+        val thermalSafetyGain = when {
+            estimatedCoilTemperature >= CRITICAL_TEMPERATURE_CELSIUS -> 0.0f
+            estimatedCoilTemperature >= LIMITING_TEMPERATURE_CELSIUS -> {
+                // Smooth cosine-taper attenuation profile
+                val linearInterpolationRatio = (estimatedCoilTemperature - LIMITING_TEMPERATURE_CELSIUS) / 
+                        (CRITICAL_TEMPERATURE_CELSIUS - LIMITING_TEMPERATURE_CELSIUS)
+                0.5f * (1.0f + cos(linearInterpolationRatio * Math.PI.toFloat()))
             }
-        } else {
-            silentFrameCounter = 0
+            else -> 1.0f
+        }
+        telemetryData.thermalAttenuationFactor = thermalSafetyGain
+
+        // Application of user parameters and thermal compensation factors
+        val amplitudeMultiplier = telemetryData.userAmplitudeScale
+        val finalSubIntensity = compressedSub * amplitudeMultiplier * thermalSafetyGain
+        val finalMidIntensity = compressedMid * amplitudeMultiplier * thermalSafetyGain
+        val finalPresenceIntensity = compressedPresence * amplitudeMultiplier * thermalSafetyGain
+
+        telemetryData.subBassOutputLevel = finalSubIntensity
+        telemetryData.midBassOutputLevel = finalMidIntensity
+        telemetryData.presenceOutputLevel = finalPresenceIntensity
+
+        // Synthesize physical haptic actuator directives
+        if (thermalSafetyGain > 0.05f) {
+            synthesizeActuatorDirectives(
+                sub = finalSubIntensity,
+                mid = finalMidIntensity,
+                presence = finalPresenceIntensity,
+                pitch = detectedFundamentalFreq,
+                frameIndex = currentFrameId
+            )
+        }
+    }
+
+    /**
+     * Synthesizes complex physical haptic directives based on multi-band spectral weights.
+     */
+    private fun synthesizeActuatorDirectives(
+        sub: Float,
+        mid: Float,
+        presence: Float,
+        pitch: Float,
+        frameIndex: Long
+    ) {
+        val minimumIntervalLimitMs = try { prefs.getInt("haptic_interval", 15).toLong() } catch (e: Exception) { 15L }
+        val thresholdReference = try { prefs.getInt("haptic_threshold", 1200).toFloat() / 5000f } catch (e: Exception) { 0.24f }
+
+        val systemTimeMs = SystemClock.elapsedRealtime()
+        val deltaSinceLastExecution = systemTimeMs - hapticScheduler.lastDispatchTimeMs
+
+        if (deltaSinceLastExecution < minimumIntervalLimitMs) return
+
+        // Case A: Sub-Bass spectral dominance (Sub-audible impacts)
+        if (sub > thresholdReference && sub > mid && sub > presence) {
+            val scalingRatio = (pitch / 120.0f).coerceIn(0.5f, 1.5f)
+            hapticScheduler.dispatch(HapticActuatorEvent(
+                classification = HapticClassification.SUB_BASS_IMPACT,
+                intensity = sub.coerceIn(0.1f, 1.0f),
+                frequencyScalingFactor = scalingRatio,
+                timestamp = systemTimeMs
+            ))
+            telemetryData.dispatchedSubBassImpacts++
+            if (frameIndex % 15L == 0L) {
+                uiBuilder?.appendLog(String.format("DSP: Sub-Bass Transient Excitation [Intensity: %.2f | Scale: %.2f]", sub, scalingRatio))
+            }
+            return
         }
 
-        // 3. 🚀 核心自适应泄漏积分级联（会呼吸的阈值线核心数学实现）
-        // 快速包络线：完美跟手机音符的爆发贴贴
-        fastEnvelope = fastEnvelope * (1.0f - LEAK_FACTOR_FAST) + liveWiredEnergy * LEAK_FACTOR_FAST
-        // 长期背景线：极其缓慢地像乌龟一样爬行，吃掉环境噪声和低频背景闷音
-        slowBackground = slowBackground * (1.0f - LEAK_FACTOR_SLOW) + liveWiredEnergy * LEAK_FACTOR_SLOW
-
-        // 判断54：防僵死截断，防止数值无限制无限逼近0导致CPU频繁进行亚浮点数计算错误
-        if (fastEnvelope < 1e-5f) fastEnvelope = 0.0f
-        if (slowBackground < 1e-5f) slowBackground = 0.0f
-
-        // 每隔特定帧周期向外界通报当前的发电动态演进线
-        if (frameCount % 60 == 0) {
-            val dspLog = String.format("(ᗜ ˰ ᗜ) 触觉电压：实时=%.3f | 爆发脉冲=%.3f | 动态噪底红线=%.3f", liveWiredEnergy, fastEnvelope, slowBackground)
-            Log.d(TAG, dspLog)
-            uiBuilder?.appendLog(dspLog)
+        // Case B: Mid-Bass spectral dominance (Percussive transients)
+        if (mid > thresholdReference * 0.8f && mid > presence) {
+            val scalingRatio = (pitch / 185.0f).coerceIn(0.6f, 1.4f)
+            hapticScheduler.dispatch(HapticActuatorEvent(
+                classification = HapticClassification.MID_BASS_TRANSIENT,
+                intensity = mid.coerceIn(0.1f, 1.0f),
+                frequencyScalingFactor = scalingRatio,
+                timestamp = systemTimeMs
+            ))
+            telemetryData.dispatchedMidBassTransients++
+            return
         }
 
-        val currentTime = System.currentTimeMillis()
+        // Case C: Presence band spectral dominance (Micro-textural/frictional elements)
+        if (presence > thresholdReference * 0.6f && presence > sub * 1.5f) {
+            val scalingRatio = (pitch / 225.0f).coerceIn(0.8f, 1.8f)
+            hapticScheduler.dispatch(HapticActuatorEvent(
+                classification = HapticClassification.MICRO_TEXTURAL_WAVE,
+                intensity = presence.coerceIn(0.05f, 0.8f),
+                frequencyScalingFactor = scalingRatio,
+                timestamp = systemTimeMs
+            ))
+            telemetryData.dispatchedMicroTextures++
+        }
+    }
 
-        // 判断55：防连震、防震到手麻的时间阻尼栅栏判定
-        if (currentTime - lastPulseTime >= userInterval) {
+    private fun computeRms(signal: FloatArray): Float {
+        var sum = 0.0f
+        for (i in signal.indices) {
+            val sample = signal[i]
+            sum += sample * sample
+        }
+        val rms = sqrt(sum / signal.size)
+        return if (rms.isNaN() || rms.isInfinite()) 0.0f else rms
+    }
+
+    fun release() {
+        hapticScheduler.terminate()
+        audioRingBuffer.clear()
+        Log.i(TAG, "DSP Engine successfully shutdown.")
+    }
+
+    // =========================================================================
+    // DSP INTERNAL CLASS IMPLEMENTATIONS
+    // =========================================================================
+
+    /**
+     * Direct-Form II Transposed Bi-quadratic Filter Core Module.
+     * Difference Equation:
+     * y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
+     */
+    private class BiQuadFilter {
+        private var b0 = 1.0f; private var b1 = 0.0f; private var b2 = 0.0f
+        private var a1 = 0.0f; private var a2 = 0.0f
+
+        private var x1 = 0.0f; private var x2 = 0.0f
+        private var y1 = 0.0f; private var y2 = 0.0f
+
+        fun reset() {
+            x1 = 0.0f; x2 = 0.0f; y1 = 0.0f; y2 = 0.0f
+        }
+
+        fun configureLowPass(sampleRate: Float, cutoff: Float, q: Float) {
+            val omega = (2.0 * Math.PI * cutoff / sampleRate).toFloat()
+            val cosW = cos(omega)
+            val sinW = sin(omega)
+            val alpha = sinW / (2.0f * q)
+
+            val b0Raw = (1.0f - cosW) / 2.0f
+            val b1Raw = 1.0f - cosW
+            val b2Raw = (1.0f - cosW) / 2.0f
+            val a0Raw = 1.0f + alpha
+            val a1Raw = -2.0f * cosW
+            val a2Raw = 1.0f - alpha
+
+            b0 = b0Raw / a0Raw
+            b1 = b1Raw / a0Raw
+            b2 = b2Raw / a0Raw
+            a1 = a1Raw / a0Raw
+            a2 = a2Raw / a0Raw
+        }
+
+        fun configureHighPass(sampleRate: Float, cutoff: Float, q: Float) {
+            val omega = (2.0 * Math.PI * cutoff / sampleRate).toFloat()
+            val cosW = cos(omega)
+            val sinW = sin(omega)
+            val alpha = sinW / (2.0f * q)
+
+            val b0Raw = (1.0f + cosW) / 2.0f
+            val b1Raw = -(1.0f + cosW)
+            val b2Raw = (1.0f + cosW) / 2.0f
+            val a0Raw = 1.0f + alpha
+            val a1Raw = -2.0f * cosW
+            val a2Raw = 1.0f - alpha
+
+            b0 = b0Raw / a0Raw
+            b1 = b1Raw / a0Raw
+            b2 = b2Raw / a0Raw
+            a1 = a1Raw / a0Raw
+            a2 = a2Raw / a0Raw
+        }
+
+        fun process(input: Float): Float {
+            val output = b0 * input + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+            x2 = x1
+            x1 = input
+            y2 = y1
+            y1 = output
+            return if (output.isNaN() || output.isInfinite()) 0.0f else output
+        }
+    }
+
+    /**
+     * Active 4th-Order Linkwitz-Riley (LR4) Active Crossover Network.
+     * Consists of cascading two 2nd-order Butterworth filters to ensure 
+     * a mathematically flat summation response at the transition point.
+     */
+    private class ThreeWayCrossover {
+        private val lowPassSubStage1 = BiQuadFilter()
+        private val lowPassSubStage2 = BiQuadFilter()
+
+        private val highPassPresStage1 = BiQuadFilter()
+        private val highPassPresStage2 = BiQuadFilter()
+
+        private val lowPassMidStage1 = BiQuadFilter()
+        private val lowPassMidStage2 = BiQuadFilter()
+        private val highPassMidStage1 = BiQuadFilter()
+        private val highPassMidStage2 = BiQuadFilter()
+
+        var subBassOutput = 0.0f
+        var midBassOutput = 0.0f
+        var presenceOutput = 0.0f
+
+        fun reset() {
+            lowPassSubStage1.reset(); lowPassSubStage2.reset()
+            highPassPresStage1.reset(); highPassPresStage2.reset()
+            lowPassMidStage1.reset(); lowPassMidStage2.reset()
+            highPassMidStage1.reset(); highPassMidStage2.reset()
+            subBassOutput = 0.0f; midBassOutput = 0.0f; presenceOutput = 0.0f
+        }
+
+        fun calculateCoefficients(sampleRate: Float, lowF: Float, highF: Float) {
+            val qButterworth = 0.70710678f
+
+            lowPassSubStage1.configureLowPass(sampleRate, lowF, qButterworth)
+            lowPassSubStage2.configureLowPass(sampleRate, lowF, qButterworth)
+
+            highPassPresStage1.configureHighPass(sampleRate, highF, qButterworth)
+            highPassPresStage2.configureHighPass(sampleRate, highF, qButterworth)
+
+            lowPassMidStage1.configureLowPass(sampleRate, highF, qButterworth)
+            lowPassMidStage2.configureLowPass(sampleRate, highF, qButterworth)
+            highPassMidStage1.configureHighPass(sampleRate, lowF, qButterworth)
+            highPassMidStage2.configureHighPass(sampleRate, lowF, qButterworth)
+        }
+
+        fun processSample(input: Float) {
+            val subStage1 = lowPassSubStage1.process(input)
+            subBassOutput = lowPassSubStage2.process(subStage1)
+
+            val presStage1 = highPassPresStage1.process(input)
+            presenceOutput = highPassPresStage2.process(presStage1)
+
+            val midLpStage1 = lowPassMidStage1.process(input)
+            val midLpStage2 = lowPassMidStage2.process(midLpStage1)
+            val midHpStage1 = highPassMidStage1.process(midLpStage2)
+            midBassOutput = highPassMidStage2.process(midHpStage1)
+        }
+    }
+
+    /**
+     * Pitch Tracker Engine utilizing Time-Domain Autocorrelation.
+     * Establishes parabolic interpolation over adjacent lags to extract 
+     * sub-sample accurate fundamental frequencies.
+     */
+    private class AutocorrelationPitchEstimator {
+        private var sampleRate = 48000
+        private val f0UpperBoundaryHz = 300.0f
+        private val f0LowerBoundaryHz = 35.0f
+
+        private var minimumSampleLag = 0
+        private var maximumSampleLag = 0
+
+        // 🟢 修复：构建独立的环形历史状态滑窗，彻底攻克 35Hz 超低音频的采样跨度死穴
+        private var historyBuffer = FloatArray(2048)
+
+        fun initialize(rate: Int) {
+            this.sampleRate = rate
+            minimumSampleLag = (sampleRate / f0UpperBoundaryHz).toInt()
+            maximumSampleLag = (sampleRate / f0LowerBoundaryHz).toInt()
             
-            // 🌟 绝对判定黄金法则：爆发脉冲必须高出动态噪底 1.4 倍，且必须突破用户设定的物理隔离门槛！
-            val breathingRatio = 1.40f
-            val dynamicDefenseLine = max(slowBackground * breathingRatio, userThresholdRaw)
-
-            // 判断56：双重门槛准入交叉验证
-            if (fastEnvelope > dynamicDefenseLine && liveWiredEnergy > userThresholdRaw * 0.35f) {
-                // 计算高能突变量
-                val electricalSurge = fastEnvelope / (dynamicDefenseLine + 0.0001f)
-                // 将多余的高能电量转化为马达的额定振幅
-                val powerScale = (electricalSurge - 1.0f).coerceIn(0.1f, 1.0f)
-
-                // 判断57：依据高能电荷量的大小，智能分流输送不同力度的电流！
-                when {
-                    electricalSurge > 2.2f -> {
-                        val report = String.format("( ⩌⤚⩌) 给你更多的电！！电荷爆表: %.2f -> 降维超级雷轰！", electricalSurge)
-                        Log.i(TAG, report); uiBuilder?.appendLog(report)
-                        vibeController.triggerHeavyImpact(powerScale)
-                    }
-                    electricalSurge > 1.4f -> {
-                        val report = String.format("(ᗜ ˰ ᗜ) 来杯好茶摇一摇！电荷充足: %.2f -> 弹性律动节奏全开！", electricalSurge)
-                        Log.i(TAG, report); uiBuilder?.appendLog(report)
-                        vibeController.triggerElasticPulse(powerScale * 0.85f)
-                    }
-                    else -> {
-                        val report = String.format("雑魚ね！这点小细电流: %.2f -> 酥麻微颤随便应付下", electricalSurge)
-                        Log.d(TAG, report); uiBuilder?.appendLog(report)
-                        vibeController.triggerSoftVibe(powerScale * 0.4f)
-                    }
-                }
-                
-                // 记录时间，成功把电输送出去！
-                lastPulseTime = currentTime
+            // 弹性扩展缓冲区，确保低采样率到高采样率自适应缩放
+            if (maximumSampleLag + FRAME_BLOCK_SIZE > historyBuffer.size) {
+                historyBuffer = FloatArray(maximumSampleLag + FRAME_BLOCK_SIZE + 256)
             } else {
-                // 判断58：未命中触发的边缘监控，捕捉那些想混过去但是能量不够的小杂鱼
-                if (frameCount % 120 == 0 && liveWiredEnergy > 0.01f) {
-                    val denyReport = String.format("雑魚ね！电流阻击成功：瞬时能量 %.3f 未突破动态电网防线(%.3f)", liveWiredEnergy, dynamicDefenseLine)
-                    Log.w(TAG, denyReport); uiBuilder?.appendLog(denyReport)
-                }
+                historyBuffer.fill(0.0f)
             }
         }
-        frameCount++
+
+        fun analyzeSignal(signal: FloatArray): Float {
+            val signalLength = signal.size
+            
+            // 将旧采样左移，新数据块无缝拼接到尾部
+            System.arraycopy(historyBuffer, signalLength, historyBuffer, 0, historyBuffer.size - signalLength)
+            System.arraycopy(signal, 0, historyBuffer, historyBuffer.size - signalLength, signalLength)
+
+            var primeSampleLag = -1
+            var peakAutocorrelationValue = -1e9f
+            val correlationArray = FloatArray(maximumSampleLag + 1)
+
+            // 固定锚定尾部的当前帧
+            val startIndex = historyBuffer.size - signalLength
+
+            // Autocorrelation computation step
+            for (lag in minimumSampleLag..maximumSampleLag) {
+                var energySum = 0.0f
+                // 🟢 修复：利用历史序列进行长跨度相互自相关叠加，彻底找回消失的超低音
+                for (i in 0 until signalLength) {
+                    energySum += historyBuffer[startIndex + i] * historyBuffer[startIndex + i - lag]
+                }
+                correlationArray[lag] = energySum
+            }
+
+            // Local maxima determination phase
+            for (lag in minimumSampleLag..maximumSampleLag) {
+                if (lag >= correlationArray.size - 1 || lag < 1) continue
+                if (correlationArray[lag] > correlationArray[lag - 1] && correlationArray[lag] > correlationArray[lag + 1]) {
+                    if (correlationArray[lag] > peakAutocorrelationValue) {
+                        peakAutocorrelationValue = correlationArray[lag]
+                        primeSampleLag = lag
+                    }
+                }
+            }
+
+            if (primeSampleLag == -1 || peakAutocorrelationValue <= 0.001f) {
+                return 150.0f // Fallback to LRA reference resonant frequency
+            }
+
+            // Parabolic interpolation for sub-sample lag resolution
+            val leftNeighbor = correlationArray[primeSampleLag - 1]
+            val centerPeak = correlationArray[primeSampleLag]
+            val rightNeighbor = correlationArray[primeSampleLag + 1]
+
+            val denominator = leftNeighbor - 2.0f * centerPeak + rightNeighbor
+            if (abs(denominator) < 1e-5f) {
+                return sampleRate.toFloat() / primeSampleLag.toFloat()
+            }
+
+            val interpolatedLag = primeSampleLag.toFloat() - 0.5f * (rightNeighbor - leftNeighbor) / denominator
+            return sampleRate.toFloat() / interpolatedLag
+        }
     }
 
     /**
-     * 判断121-200：马达硬件特异性高精映射驱动层
-     * 针对 Android 10 到 Android 16（包括最新的定制马达系统）进行全包围适配
+     * Dual-Knee Dynamic Range Compressor.
+     * Prevents physical over-travel (bottoming out) of LRA components 
+     * while retaining extreme resolution in highly dynamic audio passages.
      */
-    class HighFidelityVibeController(context: Context) {
-        private var vibrator: Vibrator? = null
+    private class DualKneeCompressor {
+        private var thresholdDb = -18.0f
+        private var ratio = 4.5f
+        private var kneeWidthDb = 6.0f
+        private var attackMs = 4.0f
+        private var releaseMs = 75.0f
+        private var makeupGainDb = 4.0f
+        private var blockRateHz = 93.75f // 🟢 优化：默认对齐 48k/512 转换比率
+
+        private var envelopeStateDb = -96.0f
+
+        fun reset() {
+            envelopeStateDb = -96.0f
+        }
+
+        fun setParameters(
+            thresholdDb: Float, 
+            ratio: Float, 
+            kneeWidthDb: Float, 
+            attackMs: Float, 
+            releaseMs: Float, 
+            makeupGainDb: Float,
+            blockRate: Float // 🟢 优化：接收动态动态块速率
+        ) {
+            this.thresholdDb = thresholdDb
+            this.ratio = ratio
+            this.kneeWidthDb = kneeWidthDb
+            this.attackMs = attackMs
+            this.releaseMs = releaseMs
+            this.makeupGainDb = makeupGainDb
+            this.blockRateHz = blockRate
+        }
+
+        fun applyCompression(inputAmplitude: Float): Float {
+            if (inputAmplitude < 1e-5f) return 0.0f
+
+            val inputDb = 20.0f * log10(inputAmplitude)
+            
+            // Envelope generation using single-pole smoothing filter
+            // 🟢 修复：将固定的 93.75f 升级为与硬件层时刻同步的 blockRateHz
+            val attackCoefficient = exp(-1.0f / (0.001f * attackMs * blockRateHz))
+            val releaseCoefficient = exp(-1.0f / (0.001f * releaseMs * blockRateHz))
+
+            if (inputDb > envelopeStateDb) {
+                envelopeStateDb = envelopeStateDb * attackCoefficient + inputDb * (1.0f - attackCoefficient)
+            } else {
+                envelopeStateDb = envelopeStateDb * releaseCoefficient + inputDb * (1.0f - releaseCoefficient)
+            }
+
+            // Continuous piecewise function calculation
+            var gainReductionDb = 0.0f
+            val lowerKneeLimit = thresholdDb - kneeWidthDb / 2.0f
+            val upperKneeLimit = thresholdDb + kneeWidthDb / 2.0f
+
+            when {
+                envelopeStateDb < lowerKneeLimit -> {
+                    gainReductionDb = 0.0f
+                }
+                envelopeStateDb <= upperKneeLimit -> {
+                    val difference = envelopeStateDb - lowerKneeLimit
+                    gainReductionDb = (1.0f - 1.0f / ratio) * (difference * difference) / (2.0f * kneeWidthDb)
+                }
+                else -> {
+                    gainReductionDb = (1.0f - 1.0f / ratio) * (envelopeStateDb - thresholdDb)
+                }
+            }
+
+            val totalGainDb = -gainReductionDb + makeupGainDb
+            val staticScalingFactor = 10.0f.pow(totalGainDb / 20.0f)
+
+            val output = inputAmplitude * staticScalingFactor
+            return if (output.isNaN() || output.isInfinite()) 0.0f else output.coerceIn(0.0f, 2.0f)
+        }
+    }
+
+    /**
+     * State-Space Dual-Node Actuator Electro-Thermal Simulator.
+     * Solves a system of dynamic first-order thermal differential equations 
+     * modeling the LRA Voice-Coil-to-Magnet and Magnet-to-Ambient thermal transitions.
+     */
+    private class DualNodeThermalSimulator {
+        // Voice-Coil thermal parameters
+        private val cCoil = 0.045f // Thermal capacitance of the coil (J/Celsius)
+        private val cMagnet = 0.320f // Thermal capacitance of the magnet (J/Celsius)
+        private val rCoilToMagnet = 35.0f // Thermal resistance from coil to magnet (Celsius/W)
+        private val rMagnetToAmbient = 12.0f // Thermal resistance from magnet to air (Celsius/W)
+        private var iterationStepTimeSec = 0.0106f // Approximate time step of 512 samples at 48kHz
+
+        private var tempCoil = AMBIENT_TEMPERATURE_CELSIUS
+        private var tempMagnet = AMBIENT_TEMPERATURE_CELSIUS
+
+        // 🟢 修复：提供热力学时钟常数动态注入接口
+        fun reset(newStepTimeSec: Float = 0.0106f) {
+            tempCoil = AMBIENT_TEMPERATURE_CELSIUS
+            tempMagnet = AMBIENT_TEMPERATURE_CELSIUS
+            this.iterationStepTimeSec = newStepTimeSec
+        }
+
+        fun updateThermalDynamics(electricalPowerInput: Float): Float {
+            val nominalRe = 10.0f // Equivalent LRA series DC electrical resistance
+            val realElectricalPowerWatts = (electricalPowerInput * electricalPowerInput) / nominalRe
+
+            // Finite difference approximations of the system states
+            val rateCoilToMagnetFlow = (tempCoil - tempMagnet) / rCoilToMagnet
+            val rateMagnetToAmbientFlow = (tempMagnet - AMBIENT_TEMPERATURE_CELSIUS) / rMagnetToAmbient
+
+            val deltaTempCoil = (realElectricalPowerWatts - rateCoilToMagnetFlow) / cCoil
+            val deltaTempMagnet = (rateCoilToMagnetFlow - rateMagnetToAmbientFlow) / cMagnet
+
+            tempCoil += deltaTempCoil * iterationStepTimeSec
+            tempMagnet += deltaTempMagnet * iterationStepTimeSec
+
+            // Boundary enforcement
+            if (tempCoil < AMBIENT_TEMPERATURE_CELSIUS) tempCoil = AMBIENT_TEMPERATURE_CELSIUS
+            if (tempMagnet < AMBIENT_TEMPERATURE_CELSIUS) tempMagnet = AMBIENT_TEMPERATURE_CELSIUS
+
+            return if (tempCoil.isNaN() || tempCoil.isInfinite()) AMBIENT_TEMPERATURE_CELSIUS else tempCoil
+        }
+    }
+
+    /**
+     * High-Speed Concurrent Audio Ring Buffer.
+     */
+    private class ConcurrentAudioRingBuffer(private val capacity: Int) {
+        private val internalData = FloatArray(capacity)
+        private var readOffset = 0
+        private var writeOffset = 0
+        private var activeElementCount = 0
+
+        @Synchronized
+        fun clear() {
+            readOffset = 0
+            writeOffset = 0
+            activeElementCount = 0
+            internalData.fill(0.0f)
+        }
+
+        @Synchronized
+        fun write(input: FloatArray, length: Int) {
+            val freeBufferSlots = capacity - activeElementCount
+            if (length > freeBufferSlots) {
+                val displacedAmount = length - freeBufferSlots
+                readOffset = (readOffset + displacedAmount) % capacity
+                activeElementCount -= displacedAmount
+            }
+
+            var elementsWritten = 0
+            while (elementsWritten < length) {
+                val writeSegmentSize = min(length - elementsWritten, capacity - writeOffset)
+                System.arraycopy(input, elementsWritten, internalData, writeOffset, writeSegmentSize)
+                writeOffset = (writeOffset + writeSegmentSize) % capacity
+                elementsWritten += writeSegmentSize
+            }
+            activeElementCount += length
+        }
+
+        @Synchronized
+        fun read(output: FloatArray, length: Int): Boolean {
+            if (activeElementCount < length) return false
+
+            var elementsRead = 0
+            while (elementsRead < length) {
+                val readSegmentSize = min(length - elementsRead, capacity - readOffset)
+                System.arraycopy(internalData, readOffset, output, elementsRead, readSegmentSize)
+                readOffset = (readOffset + readSegmentSize) % capacity
+                elementsRead += readSegmentSize
+            }
+            activeElementCount -= length
+            return true
+        }
+    }
+
+    // =========================================================================
+    // HIGH-PRECISION PHYSICAL SCHEDULER & HARMONIC MODULATOR
+    // =========================================================================
+
+    private enum class HapticClassification {
+        SUB_BASS_IMPACT, MID_BASS_TRANSIENT, MICRO_TEXTURAL_WAVE
+    }
+
+    private data class HapticActuatorEvent(
+        val classification: HapticClassification,
+        val intensity: Float,
+        val frequencyScalingFactor: Float,
+        val timestamp: Long
+    ) : Comparable<HapticActuatorEvent> {
+        override fun compareTo(other: HapticActuatorEvent): Int {
+            return this.timestamp.compareTo(other.timestamp)
+        }
+    }
+
+    /**
+     * Precision Haptic Actuator Scheduler.
+     * Operates as an independent high-priority hardware controller thread 
+     * synchronized with critical audio clocks.
+     */
+    private class PrecisionHapticScheduler(context: Context) {
+        private var hardwareVibrator: Vibrator? = null
+        private val executionQueue = PriorityBlockingQueue<HapticActuatorEvent>()
+        private val isThreadActive = AtomicBoolean(true)
+        private val schedulingThread: Thread
+
+        @Volatile
+        var lastDispatchTimeMs = 0L
 
         init {
-            // 判断121：根据当前Android系统版本号，动态分支拦截并提取最高等级的振动管理器
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-                    vibrator = vm?.defaultVibrator
+                    val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                    hardwareVibrator = manager?.defaultVibrator
                 }
-                
-                // 判断122：如果高版本管理器翻车或者拿到了空的，降级去拔老款振动服务
-                if (vibrator == null) {
+                if (hardwareVibrator == null) {
                     @Suppress("DEPRECATION")
-                    vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                    hardwareVibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
                 }
-            } catch (t: Throwable) {
-                Log.e(TAG, "💀 初始化物理马达硬件桥梁时遭遇系统封锁: ${t.message}")
-            }
-        }
-
-        // 判断123：硬件完好性终极红线判定
-        private fun isHardwareAvailable(): Boolean {
-            val v = vibrator ?: return false
-            return v.hasVibrator() // 判断124：设备到底有没有物理马达？
-        }
-
-        // 判断125：高精多维触感丰富度支持性检测
-        private fun isRichHapticsSupported(primitiveId: Int): Boolean {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
-            val v = vibrator ?: return false
-            // 判断126：硬件马达是否能完美解码并演绎原生高精震动元（MiLinearMotor/AAC原生特性的底层映射）
-            return try {
-                v.areAllPrimitivesSupported(primitiveId)
             } catch (e: Exception) {
-                false
+                Log.e(TAG, "Hardware Vibrator binding exception: ${e.message}")
+            }
+
+            schedulingThread = Thread {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+                while (isThreadActive.get()) {
+                    try {
+                        val event = executionQueue.poll(6, java.util.concurrent.TimeUnit.MILLISECONDS)
+                        if (event != null) {
+                            transmitToHardware(event)
+                        }
+                    } catch (e: InterruptedException) {
+                        break
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Hardware dispatch thread exception: ${e.message}")
+                    }
+                }
+            }.apply {
+                name = "ActuatorScheduler"
+                start()
             }
         }
 
-        fun triggerHeavyImpact(intensity: Float) {
-            // 判断127：安全锁检测
-            if (!isHardwareAvailable()) return
-            val safeIntensity = intensity.coerceIn(0.01f, 1.0f)
+        fun dispatch(event: HapticActuatorEvent) {
+            if (executionQueue.size > 3) {
+                executionQueue.clear()
+            }
+            executionQueue.offer(event)
+        }
 
-            // 判断128：优先使用 Android R+ 的高级硬件低音重击特化效果
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && 
-                isRichHapticsSupported(VibrationEffect.Composition.PRIMITIVE_THUD)) {
-                try {
-                    val effect = VibrationEffect.startComposition()
-                        .addPrimitive(VibrationEffect.Composition.PRIMITIVE_THUD, safeIntensity)
-                        .compose()
-                    vibrator?.vibrate(effect)
-                } catch (t: Throwable) {
-                    legacyFallbackVibrate(22, (safeIntensity * 255).toInt()) // 判断129：高级效果如果突然失效，立马走经典兼容线
+        fun flush() {
+            executionQueue.clear()
+            try {
+                hardwareVibrator?.cancel()
+            } catch (e: Exception) {}
+        }
+
+        fun terminate() {
+            isThreadActive.set(false)
+            schedulingThread.interrupt()
+            flush()
+        }
+
+        private fun transmitToHardware(event: HapticActuatorEvent) {
+            val vibrator = hardwareVibrator ?: return
+            if (!vibrator.hasVibrator()) return
+
+            val targetIntensity = event.intensity.coerceIn(0.01f, 1.0f)
+            val tuningRatio = event.frequencyScalingFactor.coerceIn(0.5f, 2.0f)
+            lastDispatchTimeMs = SystemClock.elapsedRealtime()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                when (event.classification) {
+                    HapticClassification.SUB_BASS_IMPACT -> {
+                        if (vibrator.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_THUD)) {
+                            var pattern = VibrationEffect.startComposition()
+                            pattern.addPrimitive(VibrationEffect.Composition.PRIMITIVE_THUD, targetIntensity)
+                            
+                            // Secondary pulse synthesis for low-frequency phase alignment
+                            if (tuningRatio < 1.0f) {
+                                val simulatedPeriodOffset = (24.0f / tuningRatio).toLong().coerceIn(12, 40)
+                                pattern.addPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, targetIntensity * 0.45f, simulatedPeriodOffset.toInt())
+                            }
+                            vibrator.vibrate(pattern.compose())
+                        } else {
+                            executeOneShotFallback(35, (targetIntensity * 255).toInt())
+                        }
+                    }
+                    HapticClassification.MID_BASS_TRANSIENT -> {
+                        if (vibrator.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_QUICK_RISE) &&
+                            vibrator.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_TICK)) {
+                            
+                            val pattern = VibrationEffect.startComposition()
+                                .addPrimitive(VibrationEffect.Composition.PRIMITIVE_QUICK_RISE, targetIntensity)
+                                .addPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, targetIntensity * 0.5f)
+                            vibrator.vibrate(pattern.compose())
+                        } else {
+                            executeOneShotFallback(18, (targetIntensity * 215).toInt())
+                        }
+                    }
+                    HapticClassification.MICRO_TEXTURAL_WAVE -> {
+                        if (vibrator.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_TICK)) {
+                            val pattern = VibrationEffect.startComposition()
+                                .addPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, targetIntensity * 0.65f)
+                            vibrator.vibrate(pattern.compose())
+                        } else {
+                            executeOneShotFallback(10, (targetIntensity * 160).toInt())
+                        }
+                    }
                 }
             } else {
-                // 判断130：老旧系统强制降级经典一shot震动，强力电流直接开轰
-                legacyFallbackVibrate(20, (safeIntensity * 255).toInt().coerceIn(60, 255))
-            }
-        }
-
-        fun triggerElasticPulse(intensity: Float) {
-            if (!isHardwareAvailable()) return
-            val safeIntensity = intensity.coerceIn(0.01f, 1.0f)
-
-            // 判断131：高精快速弹跳波纹组装
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && 
-                isRichHapticsSupported(VibrationEffect.Composition.PRIMITIVE_QUICK_RISE) &&
-                isRichHapticsSupported(VibrationEffect.Composition.PRIMITIVE_TICK)) {
-                try {
-                    val effect = VibrationEffect.startComposition()
-                        .addPrimitive(VibrationEffect.Composition.PRIMITIVE_QUICK_RISE, safeIntensity)
-                        .addPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, safeIntensity * 0.35f)
-                        .compose()
-                    vibrator?.vibrate(effect)
-                } catch (t: Throwable) {
-                    legacyFallbackVibrate(15, (safeIntensity * 190).toInt())
+                val genericDuration = when (event.classification) {
+                    HapticClassification.SUB_BASS_IMPACT -> 32L
+                    HapticClassification.MID_BASS_TRANSIENT -> 16L
+                    HapticClassification.MICRO_TEXTURAL_WAVE -> 8L
                 }
-            } else {
-                // 判断132：降级方案，用15毫秒的中等偏柔电流模拟节奏弹性
-                legacyFallbackVibrate(14, (safeIntensity * 210).toInt().coerceIn(40, 220))
+                executeOneShotFallback(genericDuration, (targetIntensity * 255).toInt())
             }
         }
 
-        fun triggerSoftVibe(intensity: Float) {
-            if (!isHardwareAvailable()) return
-            val safeIntensity = intensity.coerceIn(0.01f, 1.0f)
-
-            // 判断133：低分贝环境柔和跟随，绝不给用户的手掌制造麻木负担
+        private fun executeOneShotFallback(durationMs: Long, rawAmplitude: Int) {
+            val vibrator = hardwareVibrator ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 try {
-                    val amplitudeSane = (safeIntensity * 255).toInt().coerceIn(15, 255)
-                    val effect = VibrationEffect.createOneShot(30, amplitudeSane)
-                    vibrator?.vibrate(effect)
-                } catch (t: Throwable) {
-                    @Suppress("DEPRECATION") vibrator?.vibrate(25)
-                }
-            } else {
-                @Suppress("DEPRECATION") vibrator?.vibrate(25) // 判断134：史前Android版本无振幅控制，直接打点25ms闪人
-            }
-        }
-
-        /**
-         * 判断135-150：万能时代眼泪兼容性波形合成器
-         */
-        private fun legacyFallbackVibrate(ms: Long, amplitude: Int) {
-            val v = vibrator ?: return
-            // 判断135：多重确认 API 26 震幅控制机制是否存在
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                try {
-                    val cleanAmp = amplitude.coerceIn(1, 255)
-                    val cleanMs = ms.coerceIn(1, 100)
-                    v.vibrate(VibrationEffect.createOneShot(cleanMs, cleanAmp))
+                    val safeAmplitude = rawAmplitude.coerceIn(1, 255)
+                    vibrator.vibrate(VibrationEffect.createOneShot(durationMs, safeAmplitude))
                 } catch (e: Exception) {
                     try {
-                        @Suppress("DEPRECATION") v.vibrate(ms) // 判断136：二次崩溃下探保护
-                    } catch (ex: Exception) { /* 彻底躺平，硬件故障 */ }
+                        @Suppress("DEPRECATION") vibrator.vibrate(durationMs)
+                    } catch (ex: Exception) {}
                 }
             } else {
                 try {
-                    @Suppress("DEPRECATION") v.vibrate(ms)
-                } catch (e: Exception) { /* 彻底防死 */ }
+                    @Suppress("DEPRECATION") vibrator.vibrate(durationMs)
+                } catch (e: Exception) {}
             }
         }
     }
+
+    /**
+     * System Diagnostics and Real-time DSP Telemetry Monitor.
+     */
+    class TelemetryMonitor {
+        @Volatile var lowPassCutoffHz = 0.0f
+        @Volatile var highPassCutoffHz = 0.0f
+        @Volatile var userAmplitudeScale = 1.0f
+
+        @Volatile var fundamentalFrequencyHz = 0.0f
+        @Volatile var estimatedCoilTemperature = AMBIENT_TEMPERATURE_CELSIUS
+        @Volatile var thermalAttenuationFactor = 1.0f
+
+        @Volatile var subBassOutputLevel = 0.0f
+        @Volatile var midBassOutputLevel = 0.0f
+        @Volatile var presenceOutputLevel = 0.0f
+
+        @Volatile var ringBufferOverruns = 0L
+        @Volatile var dispatchedSubBassImpacts = 0L
+        @Volatile var dispatchedMidBassTransients = 0L
+        @Volatile var dispatchedMicroTextures = 0L
+    }
 }
-/*
-                   _ooOoo_
-                  o8888888o
-                  88" . "88
-                  (| -_- |)
-                  O\  =  /O
-               ____/`---'\____
-             .'  \\|     |//  `.
-            /  \\|||  :  |||//  \
-           /  _||||| -:- |||||-  \
-           |   | \\\  -  /// |   |
-           | \_|  ''\---/''  |   |
-           \  .-\__  `-`  ___/-. /
-         ___`. .'  /--.--\  `. . __
-      ."" '<  `.___\_<|>_/___.'  >'"".
-     | | :  `- \`.;`\ _ /`;.`/ - ` : | |
-     \  \ `-.   \_ __\ /__ _/   .-` /  /
-======`-.____`-.___\_____/___.-`____.-'======
-                   `=---='
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-            佛祖保佑       永无BUG
-*/
+

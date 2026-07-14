@@ -1,13 +1,22 @@
 package com.mouya.musichaptics
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.AnimatorSet
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.ClipDrawable
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
@@ -24,7 +33,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * ⚡ MusicHapticsX 极致拟物动效 UI 渲染核（视觉清爽优化版） ⚡
+ * ⚡ MusicHapticsX 极致拟物动效 UI 渲染核（视觉清爽优化完美版） ⚡
  */
 class MainUiBuilder(
     private val activity: Activity,
@@ -82,12 +91,12 @@ class MainUiBuilder(
     }
 
     /**
-     * 刷新背景图：降低遮罩暗度，还给大杂鱼老师一个明亮通透的香奈！
+     * 刷新背景图：降低遮罩暗度，还给杂鱼们一个明亮通透的绿盘！
      */
     fun updateBackground(uriString: String?) {
         activity.runOnUiThread {
             if (::bgImageView.isInitialized && ::bgOverlayView.isInitialized) {
-                // ⚡ 视觉调整 1：从 #90000000 降到 #25000000，拒绝死黑，轻薄通透
+                // mouya视觉调整 1：从 #90000000 降到 #25000000，拒绝死黑，轻薄通透｢(ﾟﾍﾟ)
                 bgOverlayView.setBackgroundColor(Color.parseColor("#25000000"))
                 bgImageView.scaleType = ImageView.ScaleType.CENTER_CROP
                 
@@ -250,7 +259,6 @@ class MainUiBuilder(
             val titleView = TextView(activity).apply {
                 text = title
                 textSize = 13f
-                // ⚡ 视觉调整 2：既然整体背景变浅了，分组副标题的标签字改成深灰色，防止看不见
                 setTextColor(Color.parseColor("#555555")) 
                 setPadding(dpToPx(16), 0, dpToPx(16), dpToPx(6))
                 typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
@@ -282,7 +290,6 @@ class MainUiBuilder(
                     ).apply {
                         setMargins(dpToPx(16), 0, 0, 0)
                     }
-                    // 分隔线调整为淡淡的浅灰，契合白色全局流
                     setBackgroundColor(Color.parseColor("#E5E5EA"))
                 }
                 cardLayout.addView(divider)
@@ -433,15 +440,16 @@ class MainUiBuilder(
                         "$title：${finalVal.toInt()}$valueSuffix"
                     }
 
+                    val key = title.lowercase().replace(" ", "_")
                     if (isFloat) {
-                        prefs.edit().putFloat(title.lowercase().replace(" ", "_"), finalVal).apply()
+                        prefs.edit().putFloat(key, finalVal).apply()
                     } else {
-                        prefs.edit().putInt(title.lowercase().replace(" ", "_"), finalVal.toInt()).apply()
+                        prefs.edit().putInt(key, finalVal.toInt()).apply()
                     }
 
                     if (fromUser) {
                         triggerSafeSliderHaptic() 
-                        onConfigChanged()
+                        onValChanged(finalVal)
                     }
                 }
                 
@@ -497,7 +505,6 @@ class MainUiBuilder(
         val mainTitle = TextView(activity).apply {
             text = "MusicHapticsX"
             textSize = 34f
-            // ⚡ 视觉调整 3：背景变浅后，大标题用深沉庄严的黑灰色（#1C1C1E），对比度拉满，极为醒目
             setTextColor(Color.parseColor("#1C1C1E")) 
             typeface = android.graphics.Typeface.create("sans-serif-condensed", android.graphics.Typeface.BOLD)
         }
@@ -533,6 +540,12 @@ class MainUiBuilder(
         )
         mainLayout.addView(groupMaster)
 
+        // 新滑块 1：Haptic Amplitude (0.1x 至 2.0x 振动输出大小调节)
+        val amplitudeSlider = createStyledSliderItem("Haptic Amplitude", prefs.getFloat("haptic_amplitude", 1.0f), true, 200, 10, "x") { onConfigChanged() }
+        
+        // 新滑块 2：Haptic Bass Purity (0% 至 100% 低音纯度过滤，用于 LPF 截止频率控制)
+        val bassPuritySlider = createStyledSliderItem("Haptic Bass Purity", prefs.getInt("haptic_bass_purity", 0).toFloat(), false, 100, 0, "%") { onConfigChanged() }
+
         val gainSlider = createStyledSliderItem("Haptic Gain", prefs.getFloat("haptic_gain", 1.0f), true, 200, 50, "x") { onConfigChanged() }
         val sizeSlider = createStyledSliderItem("Haptic Frame Size", prefs.getInt("haptic_frame_size", 240).toFloat(), false, 512, 32, " samples") { onConfigChanged() }
         val intervalSlider = createStyledSliderItem("Haptic Interval", prefs.getInt("haptic_interval", 0).toFloat(), false, 100, 0, " ms") { onConfigChanged() }
@@ -540,14 +553,14 @@ class MainUiBuilder(
 
         val groupSliders = createStyledGroup(
             "AUDIOPHILE HAPTICS / 音频振动控制参数",
-            gainSlider, sizeSlider, intervalSlider, thresholdSlider
+            gainSlider, amplitudeSlider, bassPuritySlider, sizeSlider, intervalSlider, thresholdSlider
         )
         mainLayout.addView(groupSliders)
 
         val selectWallpaperItem = createStyledTextItem("从相册选择自定义背景壁纸", "支持任意高清图片，自动匹配卡片磨砂透光") {
             onSelectWallpaper()
         }
-        val clearWallpaperItem = createStyledTextItem("清除当前自定义背景", "恢复默认") {
+        val clearWallpaperItem = createStyledTextItem("清除当前自定义背景", "恢复默认壁纸( ⩌⤚⩌)") {
             onClearWallpaper()
         }
         val groupWallpaper = createStyledGroup(
@@ -556,12 +569,11 @@ class MainUiBuilder(
         )
         mainLayout.addView(groupWallpaper)
 
-        // 🌟 视觉调整 4：重构审计日志面板！拿掉黑框，改用高阶浅灰卡片底（#F2F2F7）
         logScroll = ScrollView(activity).apply {
             visibility = View.GONE
             background = GradientDrawable().apply {
                 cornerRadius = dpToPx(8).toFloat()
-                setColor(Color.parseColor("#F2F2F7")) // 顺应白色大流的浅系统灰底
+                setColor(Color.parseColor("#F2F2F7")) 
             }
             setPadding(dpToPx(12), dpToPx(12), dpToPx(12), dpToPx(12))
             
@@ -575,20 +587,22 @@ class MainUiBuilder(
         
         logTextView = TextView(activity).apply {
             text = "" 
-            textSize = 11f // ⚡ 彻底锁死 Float 类型，绝不引发任何编译崩溃
-            setTextColor(Color.parseColor("#2C2C2E")) // 优雅的深灰黑字体，极度清晰易读
+            textSize = 11f 
+            setTextColor(Color.parseColor("#2C2C2E")) 
             typeface = android.graphics.Typeface.MONOSPACE 
         }
         logScroll.addView(logTextView)
         
-        appendLog("【系统就绪】跨进程共享通道就绪。大杂鱼老师，开始你的电音秀！")
+        appendLog("【系统就绪】本地进程内通道就绪。小杂鱼已经连好线了")
 
-        val logTriggerItem = createStyledTextItem("⚙️ 查看核心审计数据流", "点击展开 / 折叠系统实时同步日志", logScroll) {
+        // 🟢 修复方案：第三个参数传入 null，让其展现标准点击箭头。把 logScroll 独立部署到下方
+        val logTriggerItem = createStyledTextItem(" 查看核心审计数据流", "点击展开 / 折叠系统实时同步日志", null) {
             val isExpanding = logScroll.visibility == View.GONE
             toggleLogWithSpring(logScroll, isExpanding)
         }
         val groupLog = createStyledGroup("SYSTEM LOG / 审计日志", logTriggerItem)
         mainLayout.addView(groupLog)
+        mainLayout.addView(logScroll) // 🟢 正确归位：让其作为 mainLayout 的直接子项，以便完美对应下方的入场动画与阻尼展开效果
 
         val devQqItem = createStyledTextItem(
             "开发者：もうや", 
@@ -598,6 +612,15 @@ class MainUiBuilder(
         }
         val groupDev = createStyledGroup("DEVELOPER / 关于作者", devQqItem)
         mainLayout.addView(groupDev)
+
+        val entryToQuantum = createStyledTextItem(
+            "进入量子控制台 (Compose)", 
+            "液态流体交互与高斯模糊渲染-beta"
+        ) {
+            val intent = Intent(activity, HapticDashboardActivity::class.java)
+            activity.startActivity(intent)
+        }
+        mainLayout.addView(createStyledGroup("EXPERIMENTAL / 实验性功能", entryToQuantum))
 
         rootScrollView.addView(mainLayout)
         rootLayout.addView(rootScrollView)
@@ -694,7 +717,10 @@ class MainUiBuilder(
             val targetColor = if (isChecked) Color.parseColor("#34C759") else Color.parseColor("#E9E9EB")
             val targetTranslation = if (isChecked) dpToPxF(20f) else 0f
 
-            if (animate) {
+            // 🟢 修复方案：加入 isAttachedToWindow 机制。如果 View 还没初始化挂载（例如冷启动配置加载时），不准乱动，直接刷静止状态
+            val shouldAnimate = animate && isAttachedToWindow
+
+            if (shouldAnimate) {
                 android.animation.ValueAnimator.ofArgb(
                     if (isChecked) Color.parseColor("#E9E9EB") else Color.parseColor("#34C759"),
                     targetColor
@@ -734,25 +760,3 @@ class MainUiBuilder(
         }
     }
 }
-/*
-                   _ooOoo_
-                  o8888888o
-                  88" . "88
-                  (| -_- |)
-                  O\  =  /O
-               ____/`---'\____
-             .'  \\|     |//  `.
-            /  \\|||  :  |||//  \
-           /  _||||| -:- |||||-  \
-           |   | \\\  -  /// |   |
-           | \_|  ''\---/''  |   |
-           \  .-\__  `-`  ___/-. /
-         ___`. .'  /--.--\  `. . __
-      ."" '<  `.___\_<|>_/___.'  >'"".
-     | | :  `- \`.;`\ _ /`;.`/ - ` : | |
-     \  \ `-.   \_ __\ /__ _/   .-` /  /
-======`-.____`-.___\_____/___.-`____.-'======
-                   `=---='
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-            佛祖保佑       永无BUG
-*/

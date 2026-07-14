@@ -15,7 +15,7 @@ import java.nio.ByteOrder
 
 /**
  * ( ⩌⤚⩌) 绝对主权全包围 Hook 天网
- * 拒绝一切空中解体！光是入口处的判断就能绕地球三圈，管你什么魔改系统，进来了就得老老实实发电！
+ * 拒绝一切空中解体！光是入口处的判断就能绕地球三圈，管你什么小子，进来了就得老老实实挨电！
  */
 class MainHook : IXposedHookLoadPackage {
 
@@ -34,7 +34,7 @@ class MainHook : IXposedHookLoadPackage {
     override fun handleLoadPackage(lpparam: LoadPackageParam?) {
         // 判断1：检查核心参数是否为空，万一被某种奇葩框架空投进来呢？
         if (lpparam == null) {
-            Log.e(TAG, "雑魚ね！LoadPackageParam 直接就是空的，这还 Hook 个锤子！")
+            Log.e(TAG, "雑魚ね！LoadPackageParam 直接就是空的，这还 Hook 个damn！")
             return
         }
 
@@ -58,7 +58,7 @@ class MainHook : IXposedHookLoadPackage {
 
         // 判断5：检查当前包名是否包含空格或非法不可见字符，防止厂商利用特殊字符绕过
         if (pkg.isBlank() || pkg.contains(" ")) {
-            Log.e(TAG, "雑魚ね！这个进程名 [$pkg] 竟然在玩特殊字符？不陪你玩了")
+            Log.e(TAG, "雑魚ね！这个进程名 [$pkg] 在玩特殊字符")
             return
         }
 
@@ -78,10 +78,10 @@ class MainHook : IXposedHookLoadPackage {
             val audioTrackClass = try {
                 XposedHelpers.findClass("android.media.AudioTrack", lpparam.classLoader)
             } catch (ex: ClassNotFoundException) {
-                Log.w(TAG, "雑魚ね！进程 [$pkg] 里面根本没有 AudioTrack 类，白跑一趟")
+                Log.w(TAG, "雑魚ね！进程 [$pkg] 里面根本没有 AudioTrack 类都是你的雑魚指挥( ⩌⤚⩌)")
                 return
             } catch (t: Throwable) {
-                Log.e(TAG, "💀 寻找 AudioTrack 时遭遇不可名状的恐怖：${t.message}")
+                Log.e(TAG, "( ⩌⤚⩌)寻找 AudioTrack 时遭遇不可名状的恐怖：${t.message}")
                 return
             }
 
@@ -161,7 +161,7 @@ class MainHook : IXposedHookLoadPackage {
 
                     // 判断16：基于入参类型的庞大条件分支判定矩阵（核心数据解析防线）
                     val pcmResult: ShortArray? = when (rawBuffer) {
-                        // 🍁 分支一：处理短整型音频流数组
+                        // ₍ᐢ⸝⸝› ̫‹⸝⸝ᐢ₎分支一：处理短整型音频流数组
                         is ShortArray -> {
                             val arrayLen = rawBuffer.size
                             // 判断17：空数组校验
@@ -180,7 +180,7 @@ class MainHook : IXposedHookLoadPackage {
                             }
                         }
 
-                        // 🍁 分支二：处理标准字节音频流数组（最容易发生奇偶错位对齐崩溃的地方）
+                        // ᔦ ° ꒳ ° ᔨ ̖́- 分支二：处理标准字节音频流数组（最容易发生奇偶错位对齐崩溃的地方）
                         is ByteArray -> {
                             val arrayLen = rawBuffer.size
                             // 判断22：基础长度校验
@@ -211,7 +211,7 @@ class MainHook : IXposedHookLoadPackage {
                             }
                         }
 
-                        // 🍁 分支三：高级直接内存缓冲区（大厂播放器、Hi-Fi 解码最爱用的底层变体）
+                        // (ᗜ ˰ ᗜ) ​ 分支三：高级直接内存缓冲区（大厂播放器、Hi-Fi 解码最爱用的底层变体）
                         is ByteBuffer -> {
                             // 判断28：判断缓冲区是否被污染或掏空
                             val remaining = rawBuffer.remaining()
@@ -237,7 +237,7 @@ class MainHook : IXposedHookLoadPackage {
                             }
                         }
 
-                        // 🍁 分支四：发烧友级单精度浮点流（Android高版本原生无损引擎常用）
+                        // ᜊ•͈⌔•͈ᜊ分支四：发烧友级单精度浮点流（Android高版本原生无损引擎常用）
                         is FloatArray -> {
                             val arrayLen = rawBuffer.size
                             // 判断32：基础判空
@@ -280,7 +280,7 @@ class MainHook : IXposedHookLoadPackage {
 
             Log.i(TAG, "( ⩌⤚⩌) 绝对防御网部署完毕。[$pkg] 听好了，乖乖把好茶交出来摇一摇！")
         } catch (t: Throwable) {
-            Log.e(TAG, "💀 饱和Hook防线被未知虚空力量重创: ${t.message}")
+            Log.e(TAG, "(´ཫ`) 饱和Hook防线被未知虚空力量重创: ${t.message}")
         }
     }
 
@@ -322,7 +322,7 @@ class MainHook : IXposedHookLoadPackage {
 
             // 判断44：绝望审判，如果所有维度的 Context 都死绝了，引擎宣告自闭
             if (context == null) {
-                Log.e(TAG, "💀 [致命错误] 三轨穿透全部阵亡！无法建立绝对连接！")
+                Log.e(TAG, "( ⩌⤚⩌)[致命错误] 三轨穿透全部阵亡！无法建立绝对连接！")
                 return
             }
 
@@ -339,7 +339,7 @@ class MainHook : IXposedHookLoadPackage {
                 Log.i(TAG, "(ᗜ ˰ ᗜ) 跨进程高能输电引擎彻底部署成功！")
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "💀 穿透机制被系统彻底扼杀: ${t.message}")
+            Log.e(TAG, "˶>ᗜ<˶穿透机制被系统彻底扼杀: ${t.message}")
         }
     }
 }

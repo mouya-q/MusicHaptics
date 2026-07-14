@@ -13,37 +13,16 @@ import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
-import android.os.Bundle // 就是这里    雑魚库不自带     凑库
+import android.os.Bundle 
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.io.BufferedReader
 import java.io.File
-
-/*
-                   _ooOoo_
-                  o8888888o
-                  88" . "88
-                  (| -_- |)
-                  O\  =  /O
-               ____/`---'\____
-             .'  \\|     |//  `.
-            /  \\|||  :  |||//  \
-           /  _||||| -:- |||||-  \
-           |   | \\\  -  /// |   |
-           | \_|  ''\---/''  |   |
-           \  .-\__  `-`  ___/-. /
-         ___`. .'  /--.--\  `. . __
-      ."" '<  `.___\_<|>_/___.'  >'"".
-     | | :  `- \`.;`\ _ /`;.`/ - ` : | |
-     \  \ `-.   \_ __\ /__ _/   .-` /  /
-======`-.____`-.___\_____/___.-`____.-'======
-                   `=---='
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-*/
-
+import java.io.InputStreamReader
 
 class MainActivity : Activity() {
 
@@ -51,11 +30,8 @@ class MainActivity : Activity() {
     private lateinit var uiBuilder: MainUiBuilder
     private val TARGET_PACKAGE = "com.kugou.android.lite"
     
-    // 省流：保证一秒内拖动几十次，最多触发一次跨进程传输♪(′ε′‧̣̥̇)
     private var lastNotifyTime = 0L
     private val NOTIFY_THROTTLE_MS = 300L
-
-    // 省流：保证审计日志控制台不会因为同步警告而刷屏爆满（每 3 秒最多输出一次）૮₍ ˊᯅˋ₎ა
     private var lastLogTime = 0L
 
     private val REQUEST_PICK_WALLPAPER = 2026
@@ -69,19 +45,21 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun dpToPx(dp: Int): Int {
+        return (dp * resources.displayMetrics.density).toInt()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("haptics_config", Context.MODE_PRIVATE)
 
-        //  在 setContentView 之前建立全屏幕穿透，消灭黑边gugugaga
+        // 在 setContentView 之前建立全屏幕穿透，消灭黑边gugugaga
         initImmersionStatusBar()
 
         uiBuilder = MainUiBuilder(
             activity = this,
             prefs = prefs,
             onSelectWallpaper = {
-                // 【核心修复】：丢弃 ACTION_OPEN_DOCUMENT（文件管理），
-                // 采用外部图像媒体库 ACTION_PICK，彻底强制唤醒系统自带相册！
                 val intent = Intent(Intent.ACTION_PICK, android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
                 startActivityForResult(intent, REQUEST_PICK_WALLPAPER)
             },
@@ -96,9 +74,12 @@ class MainActivity : Activity() {
 
         setContentView(uiBuilder.buildView())
 
-        if (isTargetAppRunning(TARGET_PACKAGE) && isAppUpdated()) {
-            executeRootAuditFlow()
-        }
+        // 异步检测目标应用状态与 Root 审计流，防止阻塞主线程物理冷启动
+        Thread {
+            if (isTargetAppRunning(TARGET_PACKAGE) && isAppUpdated()) {
+                runOnUiThread { executeRootAuditFlow() }
+            }
+        }.start()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -106,10 +87,13 @@ class MainActivity : Activity() {
         if (requestCode == REQUEST_PICK_WALLPAPER && resultCode == RESULT_OK && data != null) {
             val uri = data.data ?: return
             try {
-                // ⚡ 申请持久化 URI 访问权限，即使模块重启，依然能看大老婆壁纸
+                // 仅在支持持久化的系统层 URI 下尝试锁定
                 val takeFlags = data.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION
-                contentResolver.takePersistableUriPermission(uri, takeFlags)
+                if (takeFlags != 0) {
+                    contentResolver.takePersistableUriPermission(uri, takeFlags)
+                }
             } catch (e: Exception) {
+                // ACTION_PICK 产生的普通媒体库 URI 无法持久化是正常现象，捕获不闪退
                 e.printStackTrace()
             }
             prefs.edit().putString("wallpaper_uri", uri.toString()).apply()
@@ -120,7 +104,8 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         val filter = IntentFilter("com.mouya.musichaptics.ACTION_LOG")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        // 🟢 修复：只有 API 33 (TIRAMISU) 以上才支持并强制要求带上 RECEIVER_EXPORTED 标志位
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(logReceiver, filter, Context.RECEIVER_EXPORTED)
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
@@ -130,10 +115,13 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         super.onStop()
-        unregisterReceiver(logReceiver)
+        try {
+            unregisterReceiver(logReceiver)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
-    // 好像没鸟用终极修复：“黑边”消灭器！开启全屏 Edge-to-Edge 渲染
     private fun initImmersionStatusBar() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS or WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION)
@@ -142,7 +130,7 @@ class MainActivity : Activity() {
             window.navigationBarColor = Color.TRANSPARENT
         }
 
-        // 让系统内容区域（包括壁纸）无视状态栏与导航栏高度，彻底占满屏幕(ᗜ ˰ ᗜ) ​
+        @Suppress("DEPRECATION")
         var flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             flags = flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
@@ -150,6 +138,7 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             flags = flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         }
+        @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = flags
     }
 
@@ -161,7 +150,7 @@ class MainActivity : Activity() {
                 @Suppress("DEPRECATION")
                 packageManager.getPackageInfo(packageName, 0).versionCode.toLong()
             }
-        } catch (e: Exception) { 79L } // ㅎㅅㅎ 版本迭代升级：Build 79！
+        } catch (e: Exception) { 79L }
 
         val lastVersionCode = prefs.getLong("last_version_code", -1L)
         if (currentVersionCode > lastVersionCode) {
@@ -171,7 +160,6 @@ class MainActivity : Activity() {
         return false
     }
 
-    // (´ཫ`)雑魚雑魚 极致防洪：不仅限制同步频率，更锁死警告日志输出频率，终结刷屏！
     private fun notifyHookUpdate() {
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastNotifyTime < NOTIFY_THROTTLE_MS) {
@@ -183,57 +171,56 @@ class MainActivity : Activity() {
             val uri = Uri.parse("content://com.mouya.musichaptics.provider/update")
             contentResolver.notifyChange(uri, null)
         } catch (e: Exception) {
-            e.printStackTrace()
-            // ⚡ 漏斗：限制警告每 3000ms 最多在日志区打印一次，防止疯狂刷屏导致闪退或迟钝
             val now = System.currentTimeMillis()
             if (now - lastLogTime > 3000) {
                 lastLogTime = now
                 if (::uiBuilder.isInitialized) {
-                    uiBuilder.appendLog("⚠️ [同步通道挂起] 仅保存在本地。请在大杂鱼老师的 AndroidManifest 中配置 Provider 即可完美激活！")
+                    uiBuilder.appendLog("咕咕嘎嘎！ [同步通道挂起] 仅保存在本地。请在杂鱼老师的 AndroidManifest 中配置 Provider 即可完美激活！")
                 }
             }
         }
     }
 
     private fun executeRootAuditFlow() {
-        if (checkRootSilent()) {
-            showHyperDialog(hasRoot = true)
-        } else {
-            showHyperDialog(hasRoot = false)
-        }
+        Thread {
+            val hasRoot = checkRootSilent()
+            runOnUiThread {
+                showHyperDialog(hasRoot)
+            }
+        }.start()
     }
 
     private fun showHyperDialog(hasRoot: Boolean) {
         val context = this
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(64, 60, 64, 60)
+            setPadding(dpToPx(24), dpToPx(22), dpToPx(24), dpToPx(22))
             gravity = Gravity.CENTER_HORIZONTAL
             background = GradientDrawable().apply {
-                cornerRadius = 68f
+                cornerRadius = dpToPx(24).toFloat()
                 setColor(Color.parseColor("#FAFAFA"))
             }
         }
 
         val titleView = TextView(context).apply {
             text = if (hasRoot) "审计中心系统提示" else "核心授权请求"
-            textSize = 20f
+            textSize = 19f
             setTextColor(Color.BLACK)
             typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setPadding(0, 12, 0, 32)
+            setPadding(0, dpToPx(4), 0, dpToPx(14))
         }
         container.addView(titleView)
 
         val descView = TextView(context).apply {
             text = if (hasRoot) {
-                "大杂鱼老师，宿主音频参数流已经升级！为了防止你的爪机阻抗失调，现在必须强杀酷狗概念版来重新载入！"
+                "杂鱼老师，宿主音频参数流已经升级！为了防止你的爪机阻抗失调，现在必须强杀酷狗概念版来重新载入！"
             } else {
-                "哼，大杂鱼老师居然没有给 Root 权限！快去 Magisk/KernelSU 里面给本大人点下允许授权啦！"
+                "哼，杂鱼老师居然没有给 Root 权限！快去 Magisk/KernelSU 里面给本大人点下允许授权啦！( ⩌⤚⩌)"
             }
-            textSize = 15f
+            textSize = 14f
             setTextColor(Color.parseColor("#43474E"))
-            setLineSpacing(0f, 1.25f)
-            setPadding(0, 0, 0, 56)
+            setLineSpacing(0f, 1.2f)
+            setPadding(0, 0, 0, dpToPx(24))
         }
         container.addView(descView)
 
@@ -241,44 +228,44 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
         }
-        buttonLayout.setLayoutParams(LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ))
+
+        // 🟢 修复：将原本死板的 116px 换算为标准响应式高斯阻尼 DP 适配
+        val btnHeight = dpToPx(42)
 
         val cancelBtn = Button(context).apply {
             text = "取消"
             isAllCaps = false
-            textSize = 15f
+            textSize = 14f
             setTextColor(Color.parseColor("#3F474F"))
             background = GradientDrawable().apply {
-                cornerRadius = 36f
+                cornerRadius = dpToPx(20).toFloat()
                 setColor(Color.WHITE)
-                setStroke(2, Color.parseColor("#DCE2E9"))
+                setStroke(dpToPx(1), Color.parseColor("#DCE2E9"))
             }
         }
-        cancelBtn.setLayoutParams(LinearLayout.LayoutParams(0, 116, 1f).apply {
-            setMargins(0, 0, 16, 0)
-        })
+        cancelBtn.layoutParams = LinearLayout.LayoutParams(0, btnHeight, 1f).apply {
+            setMargins(0, 0, dpToPx(8), 0)
+        }
 
         val confirmBtn = Button(context).apply {
             text = if (hasRoot) "立即重启" else "重试检测"
             isAllCaps = false
-            textSize = 15f
+            textSize = 14f
             setTextColor(Color.WHITE)
             background = GradientDrawable().apply {
-                cornerRadius = 36f
-                setColor(Color.parseColor("#FF0078FA"))
+                cornerRadius = dpToPx(20).toFloat()
+                setColor(Color.parseColor("#007AFF"))
             }
         }
-        confirmBtn.setLayoutParams(LinearLayout.LayoutParams(0, 116, 1f).apply {
-            setMargins(16, 0, 0, 0)
-        })
+        confirmBtn.layoutParams = LinearLayout.LayoutParams(0, btnHeight, 1f).apply {
+            setMargins(dpToPx(8), 0, 0, 0)
+        }
 
         buttonLayout.addView(cancelBtn)
         buttonLayout.addView(confirmBtn)
         container.addView(buttonLayout)
 
+        @Suppress("DEPRECATION")
         val dialog = AlertDialog.Builder(context, AlertDialog.THEME_DEVICE_DEFAULT_LIGHT)
             .setView(container)
             .create()
@@ -288,23 +275,27 @@ class MainActivity : Activity() {
                 addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
                 attributes.blurBehindRadius = 60
             }
-            setDimAmount(0.16f)
+            setDimAmount(0.18f)
         }
 
         cancelBtn.setOnClickListener { dialog.dismiss() }
         confirmBtn.setOnClickListener {
             dialog.dismiss()
             if (hasRoot) {
-                try {
-                    val process = Runtime.getRuntime().exec("su")
-                    val os = process.outputStream
-                    os.write("am force-stop $TARGET_PACKAGE\n".toByteArray())
-                    os.write("exit\n".toByteArray())
-                    os.flush()
-                    process.waitFor()
-                } catch (e: Exception) {
-                    descView.text = "切，自动强杀失败，大杂鱼老师自己去系统设置手动停止吧~|･з･)｡"
-                }
+                Thread {
+                    try {
+                        val process = Runtime.getRuntime().exec("su")
+                        val os = process.outputStream
+                        os.write("am force-stop $TARGET_PACKAGE\n".toByteArray())
+                        os.write("exit\n".toByteArray())
+                        os.flush()
+                        process.waitFor()
+                    } catch (e: Exception) {
+                        runOnUiThread {
+                            descView.text = "切，自动强杀失败，大杂鱼老师自己去系统设置手动停止吧~|･з･)｡"
+                        }
+                    }
+                }.start()
             } else {
                 executeRootAuditFlow()
             }
@@ -314,9 +305,9 @@ class MainActivity : Activity() {
     }
 
     private fun checkRootSilent(): Boolean {
+        val paths = arrayOf("/system/bin/su", "/system/xbin/su", "/sbin/su", "/data/local/su")
+        for (path in paths) { if (File(path).exists()) return true }
         return try {
-            val paths = arrayOf("/system/bin/su", "/system/xbin/su", "/sbin/su", "/data/local/su")
-            for (path in paths) { if (File(path).exists()) return true }
             val process = Runtime.getRuntime().exec("su")
             val os = process.outputStream
             os.write("exit\n".toByteArray())
@@ -325,14 +316,23 @@ class MainActivity : Activity() {
         } catch (e: Exception) { false }
     }
 
+    /**
+     * 🟢 修复：利用底层 Root 命令行突破 Android 应用进程沙盒机制
+     */
     private fun isTargetAppRunning(packageName: String): Boolean {
+        var process: Process? = null
+        var reader: BufferedReader? = null
         return try {
-            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            val runningProcesses = am.runningAppProcesses ?: return false
-            for (processInfo in runningProcesses) {
-                if (processInfo.processName == packageName) return true
-            }
+            // 利用 pidof 直接去内核查找目标包名进程号
+            process = Runtime.getRuntime().exec(arrayOf("sh", "-c", "pidof $packageName"))
+            reader = BufferedReader(InputStreamReader(process.inputStream))
+            val line = reader.readLine()
+            !line.isNullOrEmpty()
+        } catch (e: Exception) {
             false
-        } catch (e: Exception) { false }
+        } finally {
+            reader?.close()
+            process?.destroy()
+        }
     }
 }

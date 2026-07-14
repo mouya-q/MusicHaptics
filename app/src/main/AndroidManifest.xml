@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+<uses-permission android:name="android.permission.VIBRATE"/>
+    <!-- 💥 指向全新的自适应图标 XML 资源，彻底干掉 legacy 缩水模式 -->
+    <application 
+        android:allowBackup="false"
+        android:icon="@drawable/ic_launcher_adaptive"
+        android:roundIcon="@drawable/ic_launcher_adaptive"
+        android:label="MusicHaptics" 
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription" android:value="音乐音频拦截与高级振动协同模块" />
+        <meta-data android:name="xposedminversion" android:value="82" />
+
+        <provider android:name="com.itsaky.androidide.logsender.utils.LogSenderInstaller" tools:node="remove" />
+        <service android:name="com.itsaky.androidide.logsender.LogSenderService" tools:node="remove" />
+        <!-- ⚡ 注册跨进程共享 Provider，解决所有的 notifyChange 崩溃与警告 -->
+        <provider
+            android:name=".ConfigProvider"
+            android:authorities="com.mouya.musichaptics.provider"
+            android:exported="true" />
+        <activity 
+            android:name=".MainActivity" 
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

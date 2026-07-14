@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    
+    <!-- 替换 parent 为系统自带的 DeviceDefault 无标题栏主题 -->
+    <style name="Theme.MusicHapticsX" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <!-- 核心修改：把之前的纯白替换为你的默认壁纸图片 -->
+        <item name="android:windowBackground">@drawable/default_bg</item>
+
+        <!-- 状态栏和导航栏透明 -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        
+        <!-- 适配刘海屏 -->
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="r">shortEdges</item>
+    </style>
+    
+</resources>

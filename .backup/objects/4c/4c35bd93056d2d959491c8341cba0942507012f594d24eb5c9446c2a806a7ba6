@@ -1,0 +1,836 @@
+package com.mouya.musichaptics
+
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.AnimatorSet
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Outline
+import android.graphics.Typeface
+import android.graphics.drawable.ClipDrawable
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.RippleDrawable
+import android.net.Uri
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.ViewOutlineProvider
+import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
+import android.view.animation.PathInterpolator
+import android.widget.*
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+/**
+ * MusicHapticsX Main UI Builder
+ * Liquid Glass Rendering Engine
+ */
+class MainUiBuilder(
+    private val activity: Activity,
+    private val prefs: SharedPreferences,
+    private val onSelectWallpaper: () -> Unit,
+    private val onClearWallpaper: () -> Unit,
+    private val onConfigChanged: () -> Unit
+) {
+
+    private var lastSliderHapticTime = 0L
+    private lateinit var logTextView: TextView
+    private lateinit var logScroll: ScrollView
+    private lateinit var bgImageView: ImageView
+    private lateinit var bgOverlayView: View
+    
+    // Elevate the root layout to a global variable for real-time BlurView sampling
+    private lateinit var rootLayout: FrameLayout
+    
+    private val logTimeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
+    private val vibrator = activity.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+
+    private fun dpToPx(dp: Int): Int {
+        return (dp * activity.resources.displayMetrics.density).toInt()
+    }
+
+    private fun dpToPxF(dp: Float): Float {
+        return dp * activity.resources.displayMetrics.density
+    }
+
+    private fun getStatusBarHeight(): Int {
+        val resourceId = activity.resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (resourceId > 0) {
+            activity.resources.getDimensionPixelSize(resourceId)
+        } else {
+            dpToPx(24)
+        }
+    }
+
+    fun appendLog(msg: String) {
+        activity.runOnUiThread {
+            if (::logTextView.isInitialized && ::logScroll.isInitialized) {
+                val timeStr = logTimeFormat.format(Date())
+                if (logTextView.text.isEmpty()) {
+                    logTextView.text = "[$timeStr] $msg"
+                } else {
+                    logTextView.append("\n[$timeStr] $msg")
+                }
+                logScroll.post {
+                    logScroll.fullScroll(View.FOCUS_DOWN)
+                }
+            }
+        }
+    }
+
+    fun updateBackground(uriString: String?) {
+        activity.runOnUiThread {
+            if (::bgImageView.isInitialized && ::bgOverlayView.isInitialized) {
+                // Remove the dark overlay. True blur algorithms perform better with brighter wallpapers.
+                bgOverlayView.setBackgroundColor(Color.TRANSPARENT)
+                bgImageView.scaleType = ImageView.ScaleType.CENTER_CROP
+                
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    bgImageView.setRenderEffect(null)
+                }
+                
+                if (!uriString.isNullOrEmpty()) {
+                    try {
+                        bgImageView.setImageURI(Uri.parse(uriString))
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        setDefaultBackground()
+                    }
+                } else {
+                    setDefaultBackground()
+                }
+            }
+        }
+    }
+
+    private fun setDefaultBackground() {
+        val resId = activity.resources.getIdentifier("default_bg", "drawable", activity.packageName)
+        if (resId > 0) {
+            bgImageView.setImageResource(resId)
+        } else {
+            bgImageView.setImageDrawable(null)
+            bgOverlayView.setBackgroundColor(Color.parseColor("#2C2C2E"))
+        }
+    }
+
+    private fun vibrateClick() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                vibrator.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(VibrationEffect.createOneShot(12, 180)) 
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun vibrateTick() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                vibrator.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(VibrationEffect.createOneShot(6, 110)) 
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun triggerSafeSliderHaptic() {
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastSliderHapticTime >= 40) {
+            vibrateTick() 
+            lastSliderHapticTime = currentTime
+        }
+    }
+
+    private fun applySpringAndLiquidClick(view: View, onClick: () -> Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val rippleColor = android.content.res.ColorStateList.valueOf(Color.parseColor("#33FFFFFF"))
+            val mask = android.graphics.drawable.ColorDrawable(Color.BLACK)
+            view.foreground = android.graphics.drawable.RippleDrawable(rippleColor, null, mask)
+        }
+
+        view.setOnTouchListener { v, event ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                v.foreground?.setHotspot(event.x, event.y)
+            }
+
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    v.isPressed = true
+                    v.pivotX = v.width / 2f
+                    v.pivotY = v.height / 2f
+                    v.animate().scaleX(0.96f).scaleY(0.96f).setDuration(120).setInterpolator(DecelerateInterpolator()).start()
+                    vibrateClick() 
+                }
+                MotionEvent.ACTION_UP -> {
+                    v.isPressed = false
+                    v.animate().cancel()
+                    val reboundX = android.animation.ObjectAnimator.ofFloat(v, "scaleX", 0.96f, 1.02f, 0.99f, 1.0f)
+                    val reboundY = android.animation.ObjectAnimator.ofFloat(v, "scaleY", 0.96f, 1.02f, 0.99f, 1.0f)
+                    android.animation.AnimatorSet().apply {
+                        playTogether(reboundX, reboundY)
+                        duration = 420
+                        interpolator = PathInterpolator(0.15f, 1.65f, 0.30f, 1.0f)
+                        start()
+                    }
+                    vibrateTick() 
+                    onClick()
+                    v.performClick()
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    v.isPressed = false
+                    v.animate().scaleX(1.0f).scaleY(1.0f).setDuration(180).setInterpolator(DecelerateInterpolator()).start()
+                }
+            }
+            true
+        }
+    }
+
+    private fun toggleLogWithSpring(container: View, isExpanding: Boolean) {
+        container.clearAnimation()
+        if (isExpanding) {
+            container.visibility = View.VISIBLE
+            container.alpha = 0f
+            val matchParentMeasureSpec = View.MeasureSpec.makeMeasureSpec((container.parent as View).width, View.MeasureSpec.EXACTLY)
+            val wrapContentMeasureSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+            container.measure(matchParentMeasureSpec, wrapContentMeasureSpec)
+            val targetHeight = dpToPx(180)
+
+            container.layoutParams.height = 0
+            container.requestLayout()
+
+            android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 450
+                interpolator = PathInterpolator(0.15f, 1.55f, 0.35f, 1.0f)
+                addUpdateListener { animator ->
+                    val value = animator.animatedValue as Float
+                    container.layoutParams.height = (targetHeight * value).toInt()
+                    container.alpha = value
+                    container.requestLayout()
+                }
+                start()
+            }
+        } else {
+            val startHeight = container.height
+            android.animation.ValueAnimator.ofFloat(1f, 0f).apply {
+                duration = 300
+                interpolator = PathInterpolator(0.3f, 1.0f, 0.5f, 1.0f)
+                addUpdateListener { animator ->
+                    val value = animator.animatedValue as Float
+                    container.layoutParams.height = (startHeight * value).toInt()
+                    container.alpha = value
+                    container.requestLayout()
+                }
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        container.visibility = View.GONE
+                    }
+                })
+                start()
+            }
+        }
+    }
+
+    /**
+     * Hardware rendering engine integration using BlurView properties
+     */
+    private fun createStyledGroup(title: String?, vararg items: View): LinearLayout {
+        val groupLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(0, 0, 0, dpToPx(24))
+            }
+        }
+
+        if (!title.isNullOrEmpty()) {
+            val titleView = TextView(activity).apply {
+                text = title
+                textSize = 13f
+                setTextColor(Color.parseColor("#B3000000")) // 70% Black for contrast
+                setShadowLayer(3f, 0f, 1f, Color.parseColor("#4DFFFFFF")) // Subtle white glow
+                setPadding(dpToPx(16), 0, dpToPx(16), dpToPx(8))
+                typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+            }
+            groupLayout.addView(titleView)
+        }
+
+        // Core rendering layer: BlurView configuration
+        val blurView = FrameLayout(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            // Clip large rounded corners to match the card edges
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setRoundRect(0, 0, view.width, view.height, dpToPx(24).toFloat())
+                }
+            }
+            clipToOutline = true
+        }
+
+        // Liquid Glass base style
+        blurView.setBackground(
+            GradientDrawable().apply {
+                cornerRadius = dpToPx(24).toFloat()
+                // Main body color
+                setColor(Color.parseColor("#75FFFFFF"))
+                // Edge stroke
+                setStroke(dpToPx(1), Color.parseColor("#55FFFFFF"))
+             }
+        )
+
+        // Card content container
+        val cardLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dpToPx(24).toFloat()
+                setColor(Color.parseColor("#30FFFFFF"))
+                setStroke(dpToPx(1), Color.parseColor("#80FFFFFF"))
+                setColorFilter(
+                    android.graphics.PorterDuffColorFilter(
+                        Color.parseColor("#10FFFFFF"),
+                        android.graphics.PorterDuff.Mode.SRC_OVER
+                    )
+                )
+            }
+        }
+
+        for (i in items.indices) {
+            val item = items[i]
+            cardLayout.addView(item)
+
+            if (i < items.size - 1) {
+                val divider = View(activity).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        dpToPx(1)
+                    ).apply {
+                        setMargins(dpToPx(20), 0, dpToPx(20), 0)
+                    }
+                    setBackgroundColor(Color.parseColor("#26000000")) // Darkened divider for visibility
+                }
+                cardLayout.addView(divider)
+            }
+        }
+
+        // Liquid Glass top reflection layer
+        val shine = View(activity).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(
+                    Color.parseColor("#55FFFFFF"),
+                    Color.TRANSPARENT
+                )
+            ).apply {
+                cornerRadius = dpToPx(24).toFloat()
+            }
+            alpha = 0.8f
+        }
+        
+        // Liquid Glass secondary gloss layer
+        val shineView = View(activity).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dpToPx(80)
+            )
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(
+                    Color.parseColor("#70FFFFFF"),
+                    Color.parseColor("#00FFFFFF")
+                )
+            ).apply {
+                cornerRadius = dpToPx(24).toFloat()
+            }
+            alpha = 0.55f
+        }
+
+        blurView.addView(cardLayout)
+        blurView.addView(shine) 
+        blurView.addView(
+            shineView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dpToPx(80)
+            )
+        )
+
+        groupLayout.addView(blurView)
+        return groupLayout
+    }
+
+    private fun createStyledTextItem(
+        title: String, 
+        subtitle: String? = null, 
+        actionView: View? = null, 
+        onClick: (() -> Unit)? = null
+    ): LinearLayout {
+        val finalOnClick = onClick ?: if (actionView is SpringSwitch) {
+            { actionView.isChecked = !actionView.isChecked }
+        } else {
+            null
+        }
+
+        val itemLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dpToPx(20), dpToPx(18), dpToPx(20), dpToPx(18))
+            
+            if (finalOnClick != null) {
+                applySpringAndLiquidClick(this, finalOnClick)
+            }
+        }
+
+        val textLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        val titleView = TextView(activity).apply {
+            text = title
+            textSize = 16f
+            setTextColor(Color.parseColor("#E6000000")) // 90% Black
+            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+        }
+        textLayout.addView(titleView)
+
+        if (!subtitle.isNullOrEmpty()) {
+            val subView = TextView(activity).apply {
+                text = subtitle
+                textSize = 12f
+                setTextColor(Color.parseColor("#99000000")) // 60% Black
+                setPadding(0, dpToPx(4), 0, 0)
+            }
+            textLayout.addView(subView)
+        }
+
+        itemLayout.addView(textLayout)
+
+        if (actionView != null) {
+            actionView.isClickable = false
+            actionView.isFocusable = false
+            itemLayout.addView(actionView)
+        } else if (finalOnClick != null) {
+            val arrow = TextView(activity).apply {
+                text = "〉"
+                textSize = 14f
+                setTextColor(Color.parseColor("#66000000")) // 40% Black
+            }
+            itemLayout.addView(arrow)
+        }
+
+        return itemLayout
+    }
+
+    private fun createStyledSliderItem(
+        title: String, 
+        currentVal: Float, 
+        isFloat: Boolean,
+        maxProgress: Int, 
+        minProgress: Int,
+        valueSuffix: String = "",
+        onValChanged: (Float) -> Unit
+    ): LinearLayout {
+        val container = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpToPx(20), dpToPx(16), dpToPx(20), dpToPx(16))
+        }
+
+        val titleText = if (isFloat) {
+            "$title: ${String.format("%.1f", currentVal)}$valueSuffix"
+        } else {
+            "$title: ${currentVal.toInt()}$valueSuffix"
+        }
+
+        val titleView = TextView(activity).apply {
+            text = titleText
+            textSize = 15f
+            setTextColor(Color.parseColor("#E6000000")) // 90% Black
+            setPadding(0, 0, 0, dpToPx(10))
+        }
+        container.addView(titleView)
+
+        val seekBar = SeekBar(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dpToPx(28))
+            max = maxProgress - minProgress
+            progress = if (isFloat) {
+                ((currentVal - (minProgress / 100f)) * 100).toInt().coerceIn(0, max)
+            } else {
+                (currentVal.toInt() - minProgress).coerceIn(0, max)
+            }
+
+            val trackGrad = GradientDrawable().apply {
+                cornerRadius = dpToPx(8).toFloat()
+                setColor(Color.parseColor("#40000000")) // Darker track for visibility
+            }
+            val progressGrad = GradientDrawable().apply {
+                cornerRadius = dpToPx(8).toFloat()
+                setColor(Color.parseColor("#99000000")) // Darker progress indicator
+            }
+            val progressClip = ClipDrawable(progressGrad, Gravity.START, ClipDrawable.HORIZONTAL)
+            progressDrawable = LayerDrawable(arrayOf(trackGrad, progressClip)).apply {
+                setId(0, android.R.id.background)
+                setId(1, android.R.id.progress)
+            }
+
+            thumb = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setSize(dpToPx(26), dpToPx(26)) 
+                setColor(Color.parseColor("#F8FFFFFF"))
+                setStroke(dpToPx(1), Color.parseColor("#1A000000"))
+            }
+            thumbOffset = dpToPx(13)
+            splitTrack = false
+
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, prog: Int, fromUser: Boolean) {
+                    val finalVal = if (isFloat) {
+                        (minProgress / 100f) + (prog / 100f)
+                    } else {
+                        (minProgress + prog).toFloat()
+                    }
+
+                    titleView.text = if (isFloat) {
+                        "$title: ${String.format("%.1f", finalVal)}$valueSuffix"
+                    } else {
+                        "$title: ${finalVal.toInt()}$valueSuffix"
+                    }
+
+                    val key = title.substringBefore("/").trim().lowercase().replace(" ", "_")
+                    if (isFloat) {
+                        prefs.edit().putFloat(key, finalVal).apply()
+                    } else {
+                        prefs.edit().putInt(key, finalVal.toInt()).apply()
+                    }
+
+                    if (fromUser) {
+                        triggerSafeSliderHaptic() 
+                        onValChanged(finalVal)
+                    }
+                }
+                
+                override fun onStartTrackingTouch(sb: SeekBar?) {
+                    sb?.animate()?.scaleX(1.02f)?.scaleY(1.2f)?.setDuration(220)?.setInterpolator(PathInterpolator(0.2f, 1.4f, 0.4f, 1.0f))?.start()
+                    vibrateClick()
+                }
+
+                override fun onStopTrackingTouch(sb: SeekBar?) {
+                    sb?.animate()?.scaleX(1.0f)?.scaleY(1.0f)?.setDuration(300)?.setInterpolator(OvershootInterpolator(1.8f))?.start()
+                    vibrateTick()
+                }
+            })
+        }
+
+        container.addView(seekBar)
+        return container
+    }
+
+    fun buildView(): View {
+        // [Critical] Initialize and store global rendering root node
+        rootLayout = FrameLayout(activity).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        }
+
+        bgImageView = ImageView(activity).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        }
+        rootLayout.addView(bgImageView)
+
+        bgOverlayView = View(activity).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        }
+        rootLayout.addView(bgOverlayView)
+
+        val savedWallpaper = prefs.getString("wallpaper_uri", null)
+        updateBackground(savedWallpaper)
+
+        val rootScrollView = ScrollView(activity).apply {
+            isFillViewport = true
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            overScrollMode = View.OVER_SCROLL_NEVER 
+        }
+
+        val mainLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpToPx(16), 0, dpToPx(16), dpToPx(32))
+        }
+
+        val headerLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            val topPadding = getStatusBarHeight() + dpToPx(24)
+            setPadding(dpToPx(8), topPadding, dpToPx(8), dpToPx(24))
+        }
+        val mainTitle = TextView(activity).apply {
+            text = "MusicHapticsX"
+            textSize = 38f
+            setTextColor(Color.parseColor("#E6000000")) // 90% Black 
+            setShadowLayer(12f, 0f, 4f, Color.parseColor("#66FFFFFF")) // Bright glow for contrast
+            typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD)
+        }
+        val subTitle = TextView(activity).apply {
+            val verCode = try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    activity.packageManager.getPackageInfo(activity.packageName, PackageManager.PackageInfoFlags.of(0)).longVersionCode
+                } else {
+                    @Suppress("DEPRECATION")
+                    activity.packageManager.getPackageInfo(activity.packageName, 0).versionCode.toLong()
+                }
+            } catch (e: Exception) { 87L }
+            text = "Liquid Glass Engine Build $verCode"
+            textSize = 14f
+            setTextColor(Color.parseColor("#99000000")) // 60% Black
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(0, dpToPx(6), 0, 0)
+        }
+        headerLayout.addView(mainTitle)
+        headerLayout.addView(subTitle)
+        mainLayout.addView(headerLayout)
+
+        val masterSwitch = SpringSwitch(activity).apply {
+            isChecked = prefs.getBoolean("master_switch", true)
+            setOnCheckedChangeListener { checked ->
+                prefs.edit().putBoolean("master_switch", checked).apply()
+                onConfigChanged()
+            }
+        }
+        val groupMaster = createStyledGroup(
+            "CORE SYSTEM / 核心系统",
+            createStyledTextItem("Haptic Engine / 触感引擎", "Status: System parameters injected / 当前状态：已注入系统参数", masterSwitch)
+        )
+        mainLayout.addView(groupMaster)
+
+        val amplitudeSlider = createStyledSliderItem("Haptic Amplitude / 触感强度", prefs.getFloat("haptic_amplitude", 1.0f), true, 200, 10, "x") { onConfigChanged() }
+        val bassPuritySlider = createStyledSliderItem("Haptic Bass Purity / 低频纯度", prefs.getInt("haptic_bass_purity", 14).toFloat(), false, 100, 0, "%") { onConfigChanged() }
+        val gainSlider = createStyledSliderItem("Haptic Gain / 触感增益", prefs.getFloat("haptic_gain", 1.0f), true, 200, 50, "x") { onConfigChanged() }
+        val sizeSlider = createStyledSliderItem("Haptic Frame Size / 分析帧大小", prefs.getInt("haptic_frame_size", 240).toFloat(), false, 512, 32, " samples") { onConfigChanged() }
+        val intervalSlider = createStyledSliderItem("Haptic Interval / 触发间隔", prefs.getInt("haptic_interval", 14).toFloat(), false, 100, 0, " ms") { onConfigChanged() }
+        val thresholdSlider = createStyledSliderItem("Haptic Threshold / 灵敏阈值", prefs.getInt("haptic_threshold", 1200).toFloat(), false, 5000, 500, "") { onConfigChanged() }
+
+        val groupSliders = createStyledGroup(
+            "AUDIOPHILE HAPTICS / 音频振动参数",
+            gainSlider, amplitudeSlider, bassPuritySlider, sizeSlider, intervalSlider, thresholdSlider
+        )
+        mainLayout.addView(groupSliders)
+
+        val selectWallpaperItem = createStyledTextItem("Change Background / 更改底层渲染背景", "Use high-resolution images for optimal glass effect / 建议搭配高清背景使用") {
+            onSelectWallpaper()
+        }
+        val clearWallpaperItem = createStyledTextItem("Restore Default / 恢复默认背景", "Revert to standard dark theme / 恢复默认暗场背景") {
+            onClearWallpaper()
+        }
+        val groupWallpaper = createStyledGroup(
+            "PERSONALIZATION / 视觉个性化",
+            selectWallpaperItem, clearWallpaperItem
+        )
+        mainLayout.addView(groupWallpaper)
+
+        logScroll = ScrollView(activity).apply {
+            visibility = View.GONE
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(
+                    Color.parseColor("#99000000"),
+                    Color.parseColor("#B3000000"),
+                    Color.parseColor("#CC000000")
+                )
+            ).apply {
+                cornerRadius = dpToPx(24).toFloat()
+                setStroke(dpToPx(1), Color.parseColor("#45FFFFFF"))
+            }
+            setPadding(dpToPx(16), dpToPx(16), dpToPx(16), dpToPx(16))
+            
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dpToPx(200)
+            ).apply {
+                setMargins(dpToPx(4), dpToPx(4), dpToPx(4), dpToPx(24))
+            }
+        }
+        
+        logTextView = TextView(activity).apply {
+            text = "" 
+            textSize = 11f 
+            setTextColor(Color.parseColor("#E5FFFFFF")) // Keep log text white for terminal feel on dark background
+            typeface = android.graphics.Typeface.MONOSPACE 
+        }
+        logScroll.addView(logTextView)
+        
+        appendLog("[System Ready] Liquid Glass rendering engine mounted.")
+
+        val logTriggerItem = createStyledTextItem("Audit Data Stream / 开启底层审计数据流", "Monitor kernel waveform injection status / 实时观测内核波形注入状态", null) {
+            val isExpanding = logScroll.visibility == View.GONE
+            toggleLogWithSpring(logScroll, isExpanding)
+        }
+        val groupLog = createStyledGroup("SYSTEM LOG / 审计日志", logTriggerItem)
+        mainLayout.addView(groupLog)
+        mainLayout.addView(logScroll)
+
+        val entryToQuantum = createStyledTextItem(
+            "Enter Quantum Console / 进入量子控制台", 
+            "Fluid interaction testing / 液态流体交互试验"
+        ) {
+            val intent = Intent(activity, HapticDashboardActivity::class.java)
+            activity.startActivity(intent)
+        }
+        mainLayout.addView(createStyledGroup("EXPERIMENTAL / 实验区", entryToQuantum))
+
+        rootScrollView.addView(mainLayout)
+        rootLayout.addView(rootScrollView)
+
+        mainLayout.post {
+            val count = mainLayout.childCount
+            for (i in 0 until count) {
+                val child = mainLayout.getChildAt(i)
+                if (child == logScroll) continue
+                child.alpha = 0f
+                child.translationY = dpToPxF(50f)
+                child.animate()
+                    .alpha(1f)
+                    .translationY(0f)
+                    .setDuration(700)
+                    .setStartDelay(i * 80L)
+                    .setInterpolator(PathInterpolator(0.15f, 1.45f, 0.30f, 1.0f))
+                    .start()
+            }
+        }
+
+        return rootLayout
+    }
+
+    inner class SpringSwitch(context: Context) : FrameLayout(context) {
+        var isChecked = false
+            set(value) {
+                if (field != value) {
+                    field = value
+                    updateState(animate = true)
+                }
+            }
+
+        private val trackDrawable = GradientDrawable().apply {
+            cornerRadius = dpToPxF(16f)
+            setColor(Color.parseColor("#4D000000")) // Darker default track
+        }
+
+        private val thumbView = View(context).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.WHITE)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    elevation = dpToPxF(3f) 
+                }
+            }
+        }
+
+        private var onCheckedChangeListener: ((Boolean) -> Unit)? = null
+
+        init {
+            background = trackDrawable
+            val widthPx = dpToPxF(54f).toInt()
+            val heightPx = dpToPxF(32f).toInt()
+            layoutParams = LayoutParams(widthPx, heightPx)
+
+            val thumbSize = dpToPxF(28f).toInt()
+            val thumbParams = LayoutParams(thumbSize, thumbSize).apply {
+                gravity = Gravity.CENTER_VERTICAL or Gravity.START
+                leftMargin = dpToPxF(2f).toInt()
+            }
+            addView(thumbView, thumbParams)
+
+            setOnTouchListener { v, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        v.animate().scaleX(0.90f).scaleY(0.90f).setDuration(120).start()
+                        vibrateClick() 
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        v.animate().scaleX(1.0f).scaleY(1.0f).setDuration(320).setInterpolator(OvershootInterpolator(2.2f)).start()
+                        vibrateTick() 
+                        toggleCheckedState()
+                        v.performClick()
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        v.animate().scaleX(1.0f).scaleY(1.0f).setDuration(150).start()
+                    }
+                }
+                true
+            }
+        }
+
+        fun setOnCheckedChangeListener(listener: (Boolean) -> Unit) {
+            onCheckedChangeListener = listener
+        }
+
+        private fun toggleCheckedState() {
+            isChecked = !isChecked
+            onCheckedChangeListener?.invoke(isChecked)
+        }
+
+        private fun updateState(animate: Boolean) {
+            val targetColor = if (isChecked) Color.parseColor("#34C759") else Color.parseColor("#4D000000")
+            val targetTranslation = if (isChecked) dpToPxF(22f) else 0f
+
+            val shouldAnimate = animate && isAttachedToWindow
+
+            if (shouldAnimate) {
+                android.animation.ValueAnimator.ofArgb(
+                    if (isChecked) Color.parseColor("#4D000000") else Color.parseColor("#34C759"),
+                    targetColor
+                ).apply {
+                    duration = 250
+                    addUpdateListener { animator -> trackDrawable.setColor(animator.animatedValue as Int) }
+                }.start()
+
+                val startTranslation = thumbView.translationX
+                android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 380
+                    interpolator = PathInterpolator(0.25f, 1.45f, 0.40f, 1.0f)
+                    addUpdateListener { animator ->
+                        val fraction = animator.animatedValue as Float
+                        thumbView.translationX = startTranslation + (targetTranslation - startTranslation) * fraction
+                        val stretchFactor = 1.0f - Math.abs(fraction - 0.5f) * 2.0f
+                        thumbView.pivotX = if (isChecked) 0f else thumbView.width.toFloat()
+                        thumbView.scaleX = 1.0f + (0.32f * stretchFactor)
+                        thumbView.scaleY = 1.0f - (0.15f * stretchFactor)
+                    }
+                    addListener(object : android.animation.AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: android.animation.Animator) {
+                            thumbView.animate().scaleX(1.0f).scaleY(1.0f).setDuration(120).setInterpolator(OvershootInterpolator(1.5f)).start()
+                        }
+                    })
+                }.start()
+            } else {
+                trackDrawable.setColor(targetColor)
+                thumbView.translationX = targetTranslation
+                thumbView.scaleX = 1.0f
+                thumbView.scaleY = 1.0f
+            }
+        }
+
+        private fun dpToPxF(dp: Float): Float {
+            return dp * context.resources.displayMetrics.density
+        }
+    }
+}

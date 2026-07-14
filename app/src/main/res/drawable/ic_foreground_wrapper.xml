@@ -1,15 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     
-    <!-- 🎯 核心手动定位图层 -->
+    <!--  核心手动定位图层 -->
     <item
         android:drawable="@drawable/icon_foreground"
         android:width="68dp"
         android:height="68dp"
         android:gravity="center" />
         
-    <!-- 💡 调教指南：
-         1. 如果觉得线条在手机里看起来还是有点大，把 68dp 改小（例如 64dp 或 60dp）。
+    <!--  萝莉调教指南：
+         1. 如果觉得opaai在手机里看起来还是有点大，把 68dp 改小（例如 64dp 或 60dp）。
          2. 如果觉得有点偏，可以在 item 标签里加上类似 android:top="2dp" 或者 android:left="-1dp" 来进行微调像素级平移！ -->
 
 </layer-list>

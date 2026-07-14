@@ -1,0 +1,698 @@
+package com.mouya.musichaptics
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.os.SystemClock
+import android.util.Log
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.*
+
+/**
+ * High-Performance Electro-Haptic DSP Synthesis Engine (MusicHapticsX Super-Core).
+ *
+ * This engine receives normalized PCM frames from the AudioTrack interception layer,
+ * processes them through a complete DSP pipeline (Linkwitz-Riley crossover, autocorrelation
+ * pitch detection, dual-knee dynamic range compression, dual-node thermal simulation),
+ * and pushes the resulting multi-band intensity values directly to the C++ native tunnel
+ * which writes to the AW8697 RTP sysfs node on the Xiaomi 10 hardware.
+ */
+class HapticEngine(
+    private val context: Context,
+    private val prefs: SharedPreferences
+) {
+    companion object {
+        /** Logcat tag for filtering DSP engine diagnostic output. */
+        private const val TAG = "HapticDSPCore"
+
+        /** Capacity (in number of float elements) of the concurrent ring buffer. */
+        private const val RING_BUFFER_CAPACITY = 131072
+
+        /** Fixed processing block size (number of float samples per DSP iteration). */
+        private const val FRAME_BLOCK_SIZE = 512
+
+        /**
+         * Maximum number of interleaved audio channels the engine will accept.
+         * Prevents memory exhaustion from malformed multi-channel configurations.
+         */
+        private const val MAXIMUM_CHANNELS = 8
+
+        // Thermal modeling temperature thresholds (degrees Celsius)
+        /** Ambient (room) temperature baseline for thermal simulation start state. */
+        private const val AMBIENT_TEMPERATURE_CELSIUS = 25.0f
+
+        /**
+         * Temperature above which the thermal safety gain begins to roll off.
+         * A cosine-based interpolation smoothly reduces gain from 1.0 to 0.5
+         * between LIMITING_TEMPERATURE and CRITICAL_TEMPERATURE.
+         */
+        private const val LIMITING_TEMPERATURE_CELSIUS = 80.0f
+
+        /**
+         * Temperature at which the output is fully muted (gain = 0.0).
+         * This provides absolute hardware protection against coil burn-out.
+         */
+        private const val CRITICAL_TEMPERATURE_CELSIUS = 100.0f
+    }
+
+    // -----------------------------------------------------------------------
+    // Native library loading
+    // -----------------------------------------------------------------------
+
+    init {
+        try {
+            System.loadLibrary("quantum_haptic")
+            Log.i(TAG, "Native quantum_haptic library successfully loaded.")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load native library: ${e.message}")
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // JNI native interface declarations
+    // These methods map to the C++ implementations in rtp_driver.cpp.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Starts the kernel-level RTP haptic rendering loop in the native layer.
+     * Spawns a dedicated std::thread that continuously reads shared haptic state
+     * and writes PWM sequences to the AW8697 RTP sysfs node.
+     * @return true if the tunnel was started successfully; false if already running.
+     */
+    private external fun startKernelTunnel(): Boolean
+
+    /**
+     * Signals the native rendering loop to exit and joins the render thread.
+     * Safe to call even if the tunnel has not been started.
+     */
+    external fun stopKernelTunnel()
+
+    /**
+     * Pushes the RTP node path and motor resonant frequency (F0) to the native layer.
+     * Must be called before [startKernelTunnel] to configure the render target.
+     * @param path Absolute filesystem path to the AW8697 RTP sysfs node.
+     * @param f0 Calibrated motor resonant frequency in Hz (typically ~170 Hz).
+     */
+    private external fun updateKernelConfig(path: String, f0: Float)
+
+    /**
+     * Pushes a single frame of DSP telemetry (three-band intensities + pitch)
+     * into the native shared state, which the rendering thread reads at each cycle.
+     * @param sub Sub-bass output intensity (0.0 .. 1.0).
+     * @param mid Mid-bass output intensity (0.0 .. 1.0).
+     * @param presence Presence band output intensity (0.0 .. 1.0).
+     * @param pitch Detected fundamental frequency in Hz.
+     */
+    private external fun pushDspTelemetry(sub: Float, mid: Float, presence: Float, pitch: Float)
+
+    /**
+     * Retrieves a JSON-encoded telemetry snapshot from the native layer.
+     * Used by the UI to display real-time engine status.
+     * @return JSON string containing native telemetry fields.
+     */
+    external fun getTelemetry(): String
+
+    /** Reference to the UI builder passed from [MainUiBuilder], for log display. */
+    var uiBuilder: MainUiBuilder? = null
+
+    private var sampleRate = 48000
+    private var channels = 2
+    private val audioRingBuffer = ConcurrentAudioRingBuffer(RING_BUFFER_CAPACITY)
+    private val processingFrame = FloatArray(FRAME_BLOCK_SIZE)
+
+    private val subBassSignal = FloatArray(FRAME_BLOCK_SIZE)
+    private val midBassSignal = FloatArray(FRAME_BLOCK_SIZE)
+    private val presenceSignal = FloatArray(FRAME_BLOCK_SIZE)
+
+    private val crossoverNetwork = ThreeWayCrossover()
+    private val pitchTracker = AutocorrelationPitchEstimator()
+    private val dynamicCompressor = DualKneeCompressor()
+    private val thermalSimulator = DualNodeThermalSimulator()
+
+    private val isEngineEnabled = AtomicBoolean(true)
+    private val frameIndexCounter = AtomicLong(0)
+    private var lastParameterUpdateTime = 0L
+
+    val telemetryData = TelemetryMonitor()
+
+    init {
+        // 除这里错误嵌套的 initializeKernelTunnel 方法
+        synchronizeParameters()
+        Log.i(TAG, "DSP init only, kernel tunnel disabled")
+    }
+
+    /**
+     * 请求 Root 权限并打通硬件节点的读写特权
+     */
+    private fun initializeKernelTunnel() {
+        Thread {
+            try {
+                val nodePath = prefs.getString(
+                    "calibrated_node_path",
+                    "/sys/class/leds/vibrator/rtp"
+                ) ?: "/sys/class/leds/vibrator/rtp"
+
+                val motorF0 = prefs.getFloat(
+                    "calibrated_motor_f0",
+                    170.0f
+                )
+
+                val process = Runtime.getRuntime().exec("su")
+                val os = process.outputStream
+
+                os.write("chmod 666 $nodePath\n".toByteArray())
+                os.write("exit\n".toByteArray())
+                os.flush()
+                os.close() // 增加的安全关闭流操作，防止 su 挂起
+                process.waitFor()
+
+                updateKernelConfig(nodePath, motorF0)
+                startKernelTunnel()
+
+                Log.i(TAG, "Dynamic Kernel Haptic Tunnel -> $nodePath F0=$motorF0")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Critical error acquiring root node permissions: ${e.message}")
+            }
+        }.start()
+    }
+
+    /**
+     * 公开方法：在引擎初始化后从外部调用，启动原生 RTP 渲染线程
+     * 由 MainHook.ensureEngineInitialized() 在引擎创建完成后触发
+     */
+    fun startHapticTunnel() {
+        Thread {
+            try {
+                val nodePath = prefs.getString(
+                    "calibrated_node_path",
+                    "/sys/class/leds/vibrator/rtp"
+                ) ?: "/sys/class/leds/vibrator/rtp"
+
+                val motorF0 = prefs.getFloat(
+                    "calibrated_motor_f0",
+                    170.0f
+                )
+
+                // 1. 先配置路径和频率到原生层
+                updateKernelConfig(nodePath, motorF0)
+
+                // 2. 用 su 修改节点权限为 666，确保原生线程可写
+                //    使用 ProcessBuilder 解决某些 root 实现流挂起问题
+                try {
+                    val pb = ProcessBuilder("su", "-c", "chmod 666 $nodePath")
+                    pb.redirectErrorStream(true)
+                    val process = pb.start()
+                    val exitCode = process.waitFor()
+                    if (exitCode == 0) {
+                        Log.i(TAG, "su chmod 666 $nodePath 成功")
+                    } else {
+                        Log.w(TAG, "su chmod 返回 exitCode=$exitCode，尝试 Runtime.exec 方式...")
+                        // fallback 方式
+                        val altProcess = Runtime.getRuntime().exec(arrayOf("su", "-c", "chmod 666 $nodePath"))
+                        altProcess.waitFor()
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "su chmod 失败: ${e.message}，尝试直接启动原生隧道")
+                }
+
+                // 3. 启动原生渲染线程
+                val started = startKernelTunnel()
+                if (started) {
+                    Log.i(TAG, "✓ Kernel RTP Tunnel 成功启动！节点: $nodePath F0=$motorF0")
+                } else {
+                    Log.w(TAG, "Kernel Tunnel 已在运行中（重复调用）")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "启动 Kernel Tunnel 失败: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun synchronizeParameters() {
+        val masterState = try { prefs.getBoolean("master_switch", true) } catch (e: Exception) { true }
+        isEngineEnabled.set(masterState)
+
+        val inputGain = try { prefs.getFloat("haptic_gain", 1.0f) } catch (e: Exception) { 1.0f }
+        val outputAmp = try { prefs.getFloat("haptic_amplitude", 1.0f) } catch (e: Exception) { 1.0f }
+        val purityParam = try { prefs.getInt("haptic_bass_purity", 50) } catch (e: Exception) { 50 }
+
+        val lowCutoffFreq = 320.0f - (purityParam.coerceIn(0, 100).toFloat() * 2.65f)
+        val highCutoffFreq = lowCutoffFreq * 2.2f 
+
+        crossoverNetwork.calculateCoefficients(sampleRate.toFloat(), lowCutoffFreq, highCutoffFreq)
+
+        val blockRate = sampleRate.toFloat() / FRAME_BLOCK_SIZE.toFloat()
+        dynamicCompressor.setParameters(
+            thresholdDb = -18.0f,
+            ratio = 4.5f,
+            kneeWidthDb = 6.0f,
+            attackMs = 4.0f,
+            releaseMs = 75.0f,
+            makeupGainDb = 3.5f + (inputGain * 2.0f),
+            blockRate = blockRate
+        )
+
+        telemetryData.lowPassCutoffHz = lowCutoffFreq
+        telemetryData.highPassCutoffHz = highCutoffFreq
+        telemetryData.userAmplitudeScale = outputAmp
+    }
+
+    fun reconfigure(newSampleRate: Int, newChannels: Int) {
+        if (newSampleRate <= 0 || newChannels <= 0 || newChannels > MAXIMUM_CHANNELS) {
+            Log.w(TAG, "Reconfiguration rejected. Invalid audio specification: ${newSampleRate}Hz | $newChannels Ch")
+            return
+        }
+
+        if (this.sampleRate == newSampleRate && this.channels == newChannels) {
+            return
+        }
+
+        this.sampleRate = newSampleRate
+        this.channels = newChannels
+
+        audioRingBuffer.clear()
+        crossoverNetwork.reset()
+        pitchTracker.initialize(newSampleRate)
+        dynamicCompressor.reset()
+        
+        val stepTimeSec = FRAME_BLOCK_SIZE.toFloat() / sampleRate.toFloat()
+        thermalSimulator.reset(stepTimeSec)
+
+        synchronizeParameters()
+
+        val logMessage = "System reconfigured to: ${sampleRate}Hz | $channels Channels"
+        Log.i(TAG, logMessage)
+        uiBuilder?.appendLog(logMessage)
+    }
+
+    fun processAudioFrame(pcmData: ShortArray?) {
+        if (pcmData == null || pcmData.isEmpty() || !isEngineEnabled.get()) {
+            if (!isEngineEnabled.get()) {
+                audioRingBuffer.clear()
+                pushDspTelemetry(0.0f, 0.0f, 0.0f, 150.0f) // 引擎关闭时强行归零底层驱动
+            }
+            return
+        }
+
+        val sampleLength = pcmData.size
+        val targetMonoSamples = sampleLength / channels
+        if (targetMonoSamples <= 0) return
+
+        val normalizedBuffer = FloatArray(targetMonoSamples)
+        var writerOffset = 0
+
+        try {
+            when (channels) {
+                1 -> {
+                    val scaleFactor = 1.0f / 32768.0f
+                    for (i in pcmData.indices) {
+                        normalizedBuffer[writerOffset++] = pcmData[i].toFloat() * scaleFactor
+                    }
+                }
+                2 -> {
+                    var i = 0
+                    val scaleFactor = 1.0f / 65536.0f
+                    while (i < sampleLength - 1) {
+                        val monoSum = (pcmData[i].toFloat() + pcmData[i + 1].toFloat()) * scaleFactor
+                        normalizedBuffer[writerOffset++] = monoSum
+                        i += 2
+                    }
+                }
+                else -> {
+                    var i = 0
+                    val channelNormalizationFactor = 1.0f / (channels.toFloat() * 32768.0f)
+                    while (i < sampleLength - channels + 1) {
+                        var matrixAccumulator = 0.0f
+                        for (c in 0 until channels) {
+                            matrixAccumulator += pcmData[i + c].toFloat()
+                        }
+                        normalizedBuffer[writerOffset++] = matrixAccumulator * channelNormalizationFactor
+                        i += channels
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "PCM normalization exception: ${e.message}")
+            return
+        }
+
+        audioRingBuffer.write(normalizedBuffer, writerOffset)
+
+        var processingSafetyIterations = 0
+        while (audioRingBuffer.read(processingFrame, FRAME_BLOCK_SIZE)) {
+            if (processingSafetyIterations++ > 64) {
+                telemetryData.ringBufferOverruns++
+                break
+            }
+            executeDspPipeline(processingFrame)
+        }
+    }
+
+    /**
+     * 高精密工业数学公式的计算核心
+     */
+    private fun executeDspPipeline(block: FloatArray) {
+        val currentTimeMs = SystemClock.elapsedRealtime()
+
+        if (currentTimeMs - lastParameterUpdateTime > 600) {
+            synchronizeParameters()
+            lastParameterUpdateTime = currentTimeMs
+        }
+
+        val currentFrameId = frameIndexCounter.incrementAndGet()
+
+        // 1. Pitch Tracking 
+        val detectedFundamentalFreq = pitchTracker.analyzeSignal(block)
+        telemetryData.fundamentalFrequencyHz = detectedFundamentalFreq
+
+        // 2. Multi-Band Decimation via Linkwitz-Riley crossover 
+        for (i in 0 until FRAME_BLOCK_SIZE) {
+            crossoverNetwork.processSample(block[i])
+            subBassSignal[i] = crossoverNetwork.subBassOutput
+            midBassSignal[i] = crossoverNetwork.midBassOutput
+            presenceSignal[i] = crossoverNetwork.presenceOutput
+        }
+
+        // 3. RMS 计算
+        val subBassRms = computeRms(subBassSignal)
+        val midBassRms = computeRms(midBassSignal)
+        val presenceRms = computeRms(presenceSignal)
+
+        // 4. Piecewise Soft-Knee Dynamic Range Compression (DRC)
+        val compressedSub = dynamicCompressor.applyCompression(subBassRms)
+        val compressedMid = dynamicCompressor.applyCompression(midBassRms)
+        val compressedPresence = dynamicCompressor.applyCompression(presenceRms)
+
+        // 5. Electro-Thermal LRA Simulation & Protection Model
+        val electricalPowerPowerSum = (compressedSub * compressedSub) + (compressedMid * compressedMid * 0.4f)
+        val estimatedCoilTemperature = thermalSimulator.updateThermalDynamics(electricalPowerPowerSum)
+        telemetryData.estimatedCoilTemperature = estimatedCoilTemperature
+
+        // 6. Closed-Loop Thermal Mitigation Gain Scaling
+        val thermalSafetyGain = when {
+            estimatedCoilTemperature >= CRITICAL_TEMPERATURE_CELSIUS -> 0.0f
+            estimatedCoilTemperature >= LIMITING_TEMPERATURE_CELSIUS -> {
+                val linearInterpolationRatio = (estimatedCoilTemperature - LIMITING_TEMPERATURE_CELSIUS) / 
+                        (CRITICAL_TEMPERATURE_CELSIUS - LIMITING_TEMPERATURE_CELSIUS)
+                0.5f * (1.0f + cos(linearInterpolationRatio * Math.PI.toFloat()))
+            }
+            else -> 1.0f
+        }
+        telemetryData.thermalAttenuationFactor = thermalSafetyGain
+
+        // 7. 结合增益放大与热力学防烧系数
+        val amplitudeMultiplier = telemetryData.userAmplitudeScale
+        val finalSubIntensity = compressedSub * amplitudeMultiplier * thermalSafetyGain
+        val finalMidIntensity = compressedMid * amplitudeMultiplier * thermalSafetyGain
+        val finalPresenceIntensity = compressedPresence * amplitudeMultiplier * thermalSafetyGain
+
+        telemetryData.subBassOutputLevel = finalSubIntensity
+        telemetryData.midBassOutputLevel = finalMidIntensity
+        telemetryData.presenceOutputLevel = finalPresenceIntensity
+
+        // 8. 直接将频段数据灌入底层 C++ 实时渲染隧道
+        if (isEngineEnabled.get()) {
+            if (thermalSafetyGain > 0.05f) {
+                pushDspTelemetry(
+                    finalSubIntensity,
+                    finalMidIntensity,
+                    finalPresenceIntensity,
+                    detectedFundamentalFreq
+                )
+                
+                if (currentFrameId % 15L == 0L) {
+                    uiBuilder?.appendLog(String.format("Kernel-RTP Streamed -> Sub: %.2f | Mid: %.2f | F0: %.1fHz", finalSubIntensity, finalMidIntensity, detectedFundamentalFreq))
+                    telemetryData.dispatchedSubBassImpacts++ 
+                }
+            } else {
+                pushDspTelemetry(0.0f, 0.0f, 0.0f, 150.0f) // 触发过热保护，安全静音
+            }
+        }
+    }
+
+    private fun computeRms(signal: FloatArray): Float {
+        var sum = 0.0f
+        for (i in signal.indices) {
+            val sample = signal[i]
+            sum += sample * sample
+        }
+        val rms = sqrt(sum / signal.size)
+        return if (rms.isNaN() || rms.isInfinite()) 0.0f else rms
+    }
+
+    fun release() {
+        stopKernelTunnel()
+        audioRingBuffer.clear()
+        Log.i(TAG, "DSP Engine successfully shutdown.")
+    }
+
+    // =========================================================================
+    // DSP INTERNAL CLASS IMPLEMENTATIONS
+    // =========================================================================
+
+    private class BiQuadFilter {
+        private var b0 = 1.0f; private var b1 = 0.0f; private var b2 = 0.0f
+        private var a1 = 0.0f; private var a2 = 0.0f
+        private var x1 = 0.0f; private var x2 = 0.0f
+        private var y1 = 0.0f; private var y2 = 0.0f
+
+        fun reset() { x1 = 0.0f; x2 = 0.0f; y1 = 0.0f; y2 = 0.0f }
+
+        fun configureLowPass(sampleRate: Float, cutoff: Float, q: Float) {
+            val omega = (2.0 * Math.PI * cutoff / sampleRate).toFloat()
+            val cosW = cos(omega); val sinW = sin(omega); val alpha = sinW / (2.0f * q)
+            val b0Raw = (1.0f - cosW) / 2.0f; val b1Raw = 1.0f - cosW; val b2Raw = (1.0f - cosW) / 2.0f
+            val a0Raw = 1.0f + alpha; val a1Raw = -2.0f * cosW; val a2Raw = 1.0f - alpha
+            b0 = b0Raw / a0Raw; b1 = b1Raw / a0Raw; b2 = b2Raw / a0Raw; a1 = a1Raw / a0Raw; a2 = a2Raw / a0Raw
+        }
+
+        fun configureHighPass(sampleRate: Float, cutoff: Float, q: Float) {
+            val omega = (2.0 * Math.PI * cutoff / sampleRate).toFloat()
+            val cosW = cos(omega); val sinW = sin(omega); val alpha = sinW / (2.0f * q)
+            val b0Raw = (1.0f + cosW) / 2.0f; val b1Raw = -(1.0f + cosW); val b2Raw = (1.0f + cosW) / 2.0f
+            val a0Raw = 1.0f + alpha; val a1Raw = -2.0f * cosW; val a2Raw = 1.0f - alpha
+            b0 = b0Raw / a0Raw; b1 = b1Raw / a0Raw; b2 = b2Raw / a0Raw; a1 = a1Raw / a0Raw; a2 = a2Raw / a0Raw
+        }
+
+        fun process(input: Float): Float {
+            val output = b0 * input + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+            x2 = x1; x1 = input; y2 = y1; y1 = output
+            return if (output.isNaN() || output.isInfinite()) 0.0f else output
+        }
+    }
+
+    private class ThreeWayCrossover {
+        private val lowPassSubStage1 = BiQuadFilter(); private val lowPassSubStage2 = BiQuadFilter()
+        private val highPassPresStage1 = BiQuadFilter(); private val highPassPresStage2 = BiQuadFilter()
+        private val lowPassMidStage1 = BiQuadFilter(); private val lowPassMidStage2 = BiQuadFilter()
+        private val highPassMidStage1 = BiQuadFilter(); private val highPassMidStage2 = BiQuadFilter()
+
+        var subBassOutput = 0.0f; var midBassOutput = 0.0f; var presenceOutput = 0.0f
+
+        fun reset() {
+            lowPassSubStage1.reset(); lowPassSubStage2.reset(); highPassPresStage1.reset(); highPassPresStage2.reset()
+            lowPassMidStage1.reset(); lowPassMidStage2.reset(); highPassMidStage1.reset(); highPassMidStage2.reset()
+            subBassOutput = 0.0f; midBassOutput = 0.0f; presenceOutput = 0.0f
+        }
+
+        fun calculateCoefficients(sampleRate: Float, lowF: Float, highF: Float) {
+            val qButterworth = 0.70710678f
+            lowPassSubStage1.configureLowPass(sampleRate, lowF, qButterworth); lowPassSubStage2.configureLowPass(sampleRate, lowF, qButterworth)
+            highPassPresStage1.configureHighPass(sampleRate, highF, qButterworth); highPassPresStage2.configureHighPass(sampleRate, highF, qButterworth)
+            lowPassMidStage1.configureLowPass(sampleRate, highF, qButterworth); lowPassMidStage2.configureLowPass(sampleRate, highF, qButterworth)
+            highPassMidStage1.configureHighPass(sampleRate, lowF, qButterworth); highPassMidStage2.configureHighPass(sampleRate, lowF, qButterworth)
+        }
+
+        fun processSample(input: Float) {
+            subBassOutput = lowPassSubStage2.process(lowPassSubStage1.process(input))
+            presenceOutput = highPassPresStage2.process(highPassPresStage1.process(input))
+            midBassOutput = highPassMidStage2.process(highPassMidStage1.process(lowPassMidStage2.process(lowPassMidStage1.process(input))))
+        }
+    }
+
+    private class AutocorrelationPitchEstimator {
+        private var sampleRate = 48000
+        private val f0UpperBoundaryHz = 300.0f
+        private val f0LowerBoundaryHz = 35.0f
+        private var minimumSampleLag = 0
+        private var maximumSampleLag = 0
+        private var historyBuffer = FloatArray(2048)
+
+        fun initialize(rate: Int) {
+            this.sampleRate = rate
+            minimumSampleLag = (sampleRate / f0UpperBoundaryHz).toInt()
+            maximumSampleLag = (sampleRate / f0LowerBoundaryHz).toInt()
+            if (maximumSampleLag + FRAME_BLOCK_SIZE > historyBuffer.size) {
+                historyBuffer = FloatArray(maximumSampleLag + FRAME_BLOCK_SIZE + 256)
+            } else {
+                historyBuffer.fill(0.0f)
+            }
+        }
+
+        fun analyzeSignal(signal: FloatArray): Float {
+            val signalLength = signal.size
+            System.arraycopy(historyBuffer, signalLength, historyBuffer, 0, historyBuffer.size - signalLength)
+            System.arraycopy(signal, 0, historyBuffer, historyBuffer.size - signalLength, signalLength)
+
+            var primeSampleLag = -1
+            var peakAutocorrelationValue = -1e9f
+            val correlationArray = FloatArray(maximumSampleLag + 1)
+            val startIndex = historyBuffer.size - signalLength
+
+            for (lag in minimumSampleLag..maximumSampleLag) {
+                var energySum = 0.0f
+                for (i in 0 until signalLength) {
+                    energySum += historyBuffer[startIndex + i] * historyBuffer[startIndex + i - lag]
+                }
+                correlationArray[lag] = energySum
+            }
+
+            for (lag in minimumSampleLag..maximumSampleLag) {
+                if (lag >= correlationArray.size - 1 || lag < 1) continue
+                if (correlationArray[lag] > correlationArray[lag - 1] && correlationArray[lag] > correlationArray[lag + 1]) {
+                    if (correlationArray[lag] > peakAutocorrelationValue) {
+                        peakAutocorrelationValue = correlationArray[lag]
+                        primeSampleLag = lag
+                    }
+                }
+            }
+
+            if (primeSampleLag == -1 || peakAutocorrelationValue <= 0.001f) return 150.0f
+
+            val leftNeighbor = correlationArray[primeSampleLag - 1]
+            val centerPeak = correlationArray[primeSampleLag]
+            val rightNeighbor = correlationArray[primeSampleLag + 1]
+            val denominator = leftNeighbor - 2.0f * centerPeak + rightNeighbor
+            if (abs(denominator) < 1e-5f) return sampleRate.toFloat() / primeSampleLag.toFloat()
+
+            val interpolatedLag = primeSampleLag.toFloat() - 0.5f * (rightNeighbor - leftNeighbor) / denominator
+            return sampleRate.toFloat() / interpolatedLag
+        }
+    }
+
+    private class DualKneeCompressor {
+        private var thresholdDb = -18.0f; private var ratio = 4.5f; private var kneeWidthDb = 6.0f
+        private var attackMs = 4.0f; private var releaseMs = 75.0f; private var makeupGainDb = 4.0f
+        private var blockRateHz = 93.75f; private var envelopeStateDb = -96.0f
+
+        fun reset() { envelopeStateDb = -96.0f }
+
+        fun setParameters(thresholdDb: Float, ratio: Float, kneeWidthDb: Float, attackMs: Float, releaseMs: Float, makeupGainDb: Float, blockRate: Float) {
+            this.thresholdDb = thresholdDb; this.ratio = ratio; this.kneeWidthDb = kneeWidthDb
+            this.attackMs = attackMs; this.releaseMs = releaseMs; this.makeupGainDb = makeupGainDb; this.blockRateHz = blockRate
+        }
+
+        fun applyCompression(inputAmplitude: Float): Float {
+            if (inputAmplitude < 1e-5f) return 0.0f
+            val inputDb = 20.0f * log10(inputAmplitude)
+            val attackCoefficient = exp(-1.0f / (0.001f * attackMs * blockRateHz))
+            val releaseCoefficient = exp(-1.0f / (0.001f * releaseMs * blockRateHz))
+
+            if (inputDb > envelopeStateDb) {
+                envelopeStateDb = envelopeStateDb * attackCoefficient + inputDb * (1.0f - attackCoefficient)
+            } else {
+                envelopeStateDb = envelopeStateDb * releaseCoefficient + inputDb * (1.0f - releaseCoefficient)
+            }
+
+            var gainReductionDb = 0.0f
+            val lowerKneeLimit = thresholdDb - kneeWidthDb / 2.0f
+            val upperKneeLimit = thresholdDb + kneeWidthDb / 2.0f
+
+            when {
+                envelopeStateDb < lowerKneeLimit -> gainReductionDb = 0.0f
+                envelopeStateDb <= upperKneeLimit -> {
+                    val difference = envelopeStateDb - lowerKneeLimit
+                    gainReductionDb = (1.0f - 1.0f / ratio) * (difference * difference) / (2.0f * kneeWidthDb)
+                }
+                else -> gainReductionDb = (1.0f - 1.0f / ratio) * (envelopeStateDb - thresholdDb)
+            }
+
+            val totalGainDb = -gainReductionDb + makeupGainDb
+            val staticScalingFactor = 10.0f.pow(totalGainDb / 20.0f)
+            val output = inputAmplitude * staticScalingFactor
+            return if (output.isNaN() || output.isInfinite()) 0.0f else output.coerceIn(0.0f, 2.0f)
+        }
+    }
+
+    private class DualNodeThermalSimulator {
+        private val cCoil = 0.045f; private val cMagnet = 0.320f
+        private val rCoilToMagnet = 35.0f; private val rMagnetToAmbient = 12.0f
+        private var iterationStepTimeSec = 0.0106f
+        private var tempCoil = AMBIENT_TEMPERATURE_CELSIUS; private var tempMagnet = AMBIENT_TEMPERATURE_CELSIUS
+
+        fun reset(newStepTimeSec: Float = 0.0106f) {
+            tempCoil = AMBIENT_TEMPERATURE_CELSIUS; tempMagnet = AMBIENT_TEMPERATURE_CELSIUS
+            this.iterationStepTimeSec = newStepTimeSec
+        }
+
+        fun updateThermalDynamics(electricalPowerInput: Float): Float {
+            val nominalRe = 10.0f
+            val realElectricalPowerWatts = (electricalPowerInput * electricalPowerInput) / nominalRe
+            val rateCoilToMagnetFlow = (tempCoil - tempMagnet) / rCoilToMagnet
+            val rateMagnetToAmbientFlow = (tempMagnet - AMBIENT_TEMPERATURE_CELSIUS) / rMagnetToAmbient
+            val deltaTempCoil = (realElectricalPowerWatts - rateCoilToMagnetFlow) / cCoil
+            val deltaTempMagnet = (rateCoilToMagnetFlow - rateMagnetToAmbientFlow) / cMagnet
+
+            tempCoil += deltaTempCoil * iterationStepTimeSec
+            tempMagnet += deltaTempMagnet * iterationStepTimeSec
+            if (tempCoil < AMBIENT_TEMPERATURE_CELSIUS) tempCoil = AMBIENT_TEMPERATURE_CELSIUS
+            if (tempMagnet < AMBIENT_TEMPERATURE_CELSIUS) tempMagnet = AMBIENT_TEMPERATURE_CELSIUS
+
+            return if (tempCoil.isNaN() || tempCoil.isInfinite()) AMBIENT_TEMPERATURE_CELSIUS else tempCoil
+        }
+    }
+
+    private class ConcurrentAudioRingBuffer(private val capacity: Int) {
+        private val internalData = FloatArray(capacity)
+        private var readOffset = 0; private var writeOffset = 0; private var activeElementCount = 0
+
+        @Synchronized fun clear() { readOffset = 0; writeOffset = 0; activeElementCount = 0; internalData.fill(0.0f) }
+
+        @Synchronized fun write(input: FloatArray, length: Int) {
+            val freeBufferSlots = capacity - activeElementCount
+            if (length > freeBufferSlots) {
+                val displacedAmount = length - freeBufferSlots
+                readOffset = (readOffset + displacedAmount) % capacity
+                activeElementCount -= displacedAmount
+            }
+            var elementsWritten = 0
+            while (elementsWritten < length) {
+                val writeSegmentSize = min(length - elementsWritten, capacity - writeOffset)
+                System.arraycopy(input, elementsWritten, internalData, writeOffset, writeSegmentSize)
+                writeOffset = (writeOffset + writeSegmentSize) % capacity
+                elementsWritten += writeSegmentSize
+            }
+            activeElementCount += length
+        }
+
+        @Synchronized fun read(output: FloatArray, length: Int): Boolean {
+            if (activeElementCount < length) return false
+            var elementsRead = 0
+            while (elementsRead < length) {
+                val readSegmentSize = min(length - elementsRead, capacity - readOffset)
+                System.arraycopy(internalData, readOffset, output, elementsRead, readSegmentSize)
+                readOffset = (readOffset + readSegmentSize) % capacity
+                elementsRead += readSegmentSize
+            }
+            activeElementCount -= length
+            return true
+        }
+    }
+
+    class TelemetryMonitor {
+        @Volatile var lowPassCutoffHz = 0.0f
+        @Volatile var highPassCutoffHz = 0.0f
+        @Volatile var userAmplitudeScale = 1.0f
+        @Volatile var fundamentalFrequencyHz = 0.0f
+        @Volatile var estimatedCoilTemperature = AMBIENT_TEMPERATURE_CELSIUS
+        @Volatile var thermalAttenuationFactor = 1.0f
+        @Volatile var subBassOutputLevel = 0.0f
+        @Volatile var midBassOutputLevel = 0.0f
+        @Volatile var presenceOutputLevel = 0.0f
+        @Volatile var ringBufferOverruns = 0L
+        @Volatile var dispatchedSubBassImpacts = 0L
+        @Volatile var dispatchedMidBassTransients = 0L
+        @Volatile var dispatchedMicroTextures = 0L
+    }
+}

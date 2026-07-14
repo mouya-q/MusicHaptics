@@ -1,0 +1,1007 @@
+package com.mouya.musichaptics
+
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.AnimatorSet
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.graphics.*
+import android.graphics.drawable.*
+import android.net.Uri
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.view.*
+import android.view.animation.*
+import android.widget.*
+import java.text.SimpleDateFormat
+import java.util.*
+
+/**
+ * MusicHapticsX — Liquid Glass Rendering Engine
+ * ===============================================
+ * iOS-level liquid glass renderer with 7-layer view stack,
+ * touch-driven dynamic specular sheen, spring rebound physics,
+ * and real-time motion-responsive reflections.
+ *
+ * Architecture layers (bottom->top):
+ *   [0] BlurContainer       — rounded clipped blur base
+ *   [1] BodyDrawable        — tri-gradient glass body
+ *   [2] RimLightDrawable    — edge stroke glow (#BBFFFFFF @ 1.5dp)
+ *   [3] InnerShadowLayer    — TL->BR corner shadow (alpha 0.6)
+ *   [4] SpecularSheenView   — touch-movable mirror sheen (max +/-60dp)
+ *   [5] GlossLayerView      — narrow top bright strip (alpha 0.5)
+ *   [6] ContentContainer    — hosts actual UI items
+ *   [7] TouchOverlay        — captures touch to drive sheen & spring
+ *
+ * @author Mouya
+ */
+class LiquidGlassBuilder(
+    private val activity: Activity,
+    private val prefs: SharedPreferences,
+    private val onSelectWallpaper: () -> Unit,
+    private val onClearWallpaper: () -> Unit,
+    private val onConfigChanged: () -> Unit
+) {
+    companion object {
+        private const val CARD_RADIUS_DP = 24
+        private const val CARD_ELEVATION_DP = 12
+        private const val SHEEN_MAX_OFFSET_DP = 60
+        private const val SHEEN_ALPHA_PRESS = 0.30f
+        private const val SHEEN_ALPHA_PEAK = 0.80f
+        private const val SHEEN_PULSE_ALPHA = 0.90f
+        private const val GLOSS_ALPHA = 0.50f
+        private const val SPRING_COMPRESS = 0.96f
+        private const val SPRING_OVER_PEAK = 1.02f
+        private const val SPRING_SETTLE = 0.99f
+        private const val SPRING_DURATION = 420L
+        private const val SHEEN_FOLLOW_MS = 180L
+        private const val SHEEN_RETURN_MS = 1200L
+        private const val SHEEN_FADE_MS = 400L
+        private const val SLIDER_HAPTIC_THROTTLE_MS = 40L
+
+        private val BODY_GRADIENT = intArrayOf(
+            Color.argb(0xD2, 0xF5, 0xF5, 0xF7),
+            Color.argb(0xAA, 0xF0, 0xF0, 0xF2),
+            Color.argb(0x88, 0xE8, 0xE8, 0xEC)
+        )
+        private const val RIM_LIGHT_COLOR = Color.argb(0xBB, 0xFF, 0xFF, 0xFF)
+        private const val SHADOW_TL = Color.argb(0x08, 0x00, 0x00, 0x00)
+        private const val SHADOW_BR = Color.argb(0x06, 0x00, 0x00, 0x00)
+        private const val SHADOW_ALPHA_FACTOR = 0.6f
+        private val AMBIENT_SHADOW_COLOR = Color.argb(0x33, 0x00, 0x00, 0x00)
+        private val SPOT_SHADOW_COLOR = Color.argb(0x55, 0x00, 0x00, 0x00)
+        private const val RIPPLE_COLOR = Color.argb(0x22, 0xFF, 0xFF, 0xFF)
+    }
+
+    private var lastSliderHapticTime = 0L
+    private lateinit var logTextView: TextView
+    private lateinit var logScroll: ScrollView
+    private lateinit var bgImageView: ImageView
+    private lateinit var bgOverlayView: View
+    private lateinit var rootLayout: FrameLayout
+
+    private val logTimeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
+    private val vibrator = activity.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+
+    private val density: Float get() = activity.resources.displayMetrics.density
+    private fun dp(i: Int): Int = (i * density).toInt()
+    private fun dpf(f: Float): Float = f * density
+
+    private fun getStatusBarHeight(): Int {
+        val id = activity.resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (id > 0) activity.resources.getDimensionPixelSize(id) else dp(24)
+    }
+
+    fun appendLog(msg: String) {
+        activity.runOnUiThread {
+            if (::logTextView.isInitialized && ::logScroll.isInitialized) {
+                val t = logTimeFormat.format(Date())
+                logTextView.text = if (logTextView.text.isEmpty()) "[$t] $msg"
+                else logTextView.text.toString() + "\n[$t] $msg"
+                logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+            }
+        }
+    }
+
+    fun updateBackground(uriString: String?) {
+        activity.runOnUiThread {
+            if (::bgImageView.isInitialized && ::bgOverlayView.isInitialized) {
+                bgOverlayView.setBackgroundColor(Color.TRANSPARENT)
+                bgImageView.scaleType = ImageView.ScaleType.CENTER_CROP
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                    bgImageView.setRenderEffect(null)
+                if (!uriString.isNullOrEmpty()) {
+                    try { bgImageView.setImageURI(Uri.parse(uriString)) }
+                    catch (_: Exception) { setDefaultBackground() }
+                } else setDefaultBackground()
+            }
+        }
+    }
+
+    private fun setDefaultBackground() {
+        val id = activity.resources.getIdentifier("default_bg", "drawable", activity.packageName)
+        if (id > 0) bgImageView.setImageResource(id)
+        else {
+            bgImageView.setImageDrawable(null)
+            bgOverlayView.setBackgroundColor(Color.parseColor("#2C2C2E"))
+        }
+    }
+
+    private fun vibrateClick() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                vibrator.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK))
+            else vibrator.vibrate(VibrationEffect.createOneShot(12, 180))
+        } catch (_: Exception) {}
+    }
+
+    private fun vibrateTick() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                vibrator.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK))
+            else vibrator.vibrate(VibrationEffect.createOneShot(6, 110))
+        } catch (_: Exception) {}
+    }
+
+    private fun triggerSafeSliderHaptic() {
+        val now = System.currentTimeMillis()
+        if (now - lastSliderHapticTime >= SLIDER_HAPTIC_THROTTLE_MS) {
+            vibrateTick()
+            lastSliderHapticTime = now
+        }
+    }
+
+    // ════════════════════════════════════════════════════════
+    // LIQUID_GLASS_CARD — 7-Layer Glass Rendering Primitive
+    // ════════════════════════════════════════════════════════
+    inner class LiquidGlassCard(
+        context: Context,
+        private val contentView: View
+    ) : FrameLayout(context) {
+
+        private val blurContainer: View
+        private val bodyDrawable: GradientDrawable
+        private val rimLightDrawable: GradientDrawable
+        private val specularSheen: View
+        private val glossLayerView: View
+        val contentContainer: FrameLayout
+
+        private var sheenAnimator: Animator? = null
+        private var isSheenReturning = false
+        var targetSheenAlpha = SHEEN_ALPHA_PRESS
+            private set
+
+        init {
+            // [Layer 0] BlurContainer — rounded clip container
+            blurContainer = View(context).apply {
+                layoutParams = LayoutParams(MATCH_PARENT, MATCH_PARENT)
+                outlineProvider = object : ViewOutlineProvider() {
+                    override fun getOutline(v: View, o: Outline) {
+                        o.setRoundRect(0, 0, v.width, v.height, dpf(CARD_RADIUS_DP.toFloat()))
+                    }
+                }
+                clipToOutline = true
+            }
+
+            // [Layer 1] BodyDrawable — tri-gradient glass
+            bodyDrawable = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM, BODY_GRADIENT
+            ).apply { cornerRadius = dpf(CARD_RADIUS_DP.toFloat()) }
+            blurContainer.background = bodyDrawable
+
+            // [Layer 2] RimLight — edge stroke
+            rimLightDrawable = GradientDrawable().apply {
+                cornerRadius = dpf(CARD_RADIUS_DP.toFloat())
+                setStroke(dp(1), RIM_LIGHT_COLOR)
+                setColor(Color.TRANSPARENT)
+            }
+            val rimLightOverlay = View(context).apply {
+                layoutParams = LayoutParams(MATCH_PARENT, MATCH_PARENT)
+                background = rimLightDrawable
+                isClickable = false; isFocusable = false
+            }
+
+            // [Layer 3] InnerShadow
+            val innerShadowDrawable = InnerShadowGradientDrawable(
+                cornerRadius = dpf(CARD_RADIUS_DP.toFloat()),
+                topLeftColor = SHADOW_TL,
+                bottomRightColor = SHADOW_BR,
+                alphaFactor = SHADOW_ALPHA_FACTOR
+            )
+            val shadowLayer = View(context).apply {
+                layoutParams = LayoutParams(MATCH_PARENT, MATCH_PARENT)
+                background = innerShadowDrawable
+                isClickable = false; isFocusable = false
+            }
+
+            // [Layer 4] SpecularSheen — mobile mirror highlight
+            specularSheen = View(context).apply {
+                layoutParams = LayoutParams(MATCH_PARENT, MATCH_PARENT)
+                background = GradientDrawable(
+                    GradientDrawable.Orientation.TOP_BOTTOM,
+                    intArrayOf(Color.argb(0x55,0xFF,0xFF,0xFF), Color.TRANSPARENT)
+                ).apply { cornerRadius = dpf(CARD_RADIUS_DP.toFloat()) }
+                alpha = 0f
+                isClickable = false; isFocusable = false
+            }
+
+            // [Layer 5] GlossLayer — narrow top bright strip
+            glossLayerView = View(context).apply {
+                layoutParams = LayoutParams(MATCH_PARENT, dp(80))
+                background = GradientDrawable(
+                    GradientDrawable.Orientation.TOP_BOTTOM,
+                    intArrayOf(Color.argb(0x70,0xFF,0xFF,0xFF), Color.argb(0x00,0xFF,0xFF,0xFF))
+                ).apply { cornerRadius = dpf(CARD_RADIUS_DP.toFloat()) }
+                alpha = GLOSS_ALPHA
+                isClickable = false; isFocusable = false
+            }
+
+            // [Layer 6] ContentContainer
+            contentContainer = FrameLayout(context).apply {
+                layoutParams = LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+                addView(contentView)
+            }
+
+            // Assemble stack
+            addView(blurContainer)    // [0]
+            addView(rimLightOverlay)  // [1]
+            addView(shadowLayer)      // [2]
+            addView(specularSheen)    // [3]
+            addView(glossLayerView)   // [4]
+            addView(contentContainer) // [5]
+
+            // Android P+ elevation
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                elevation = dpf(CARD_ELEVATION_DP.toFloat())
+                outlineProvider = object : ViewOutlineProvider() {
+                    override fun getOutline(v: View, o: Outline) {
+                        o.setRoundRect(0, 0, v.width, v.height, dpf(CARD_RADIUS_DP.toFloat()))
+                    }
+                }
+                clipToOutline = false
+                try {
+                    View::class.java.getField("ambientShadowColor").set(this, AMBIENT_SHADOW_COLOR)
+                    View::class.java.getField("spotShadowColor").set(this, SPOT_SHADOW_COLOR)
+                } catch (_: Exception) {}
+            }
+        }
+
+        fun updateSheenPosition(xFraction: Float) {
+            if (sheenAnimator?.isRunning == true && isSheenReturning) sheenAnimator?.cancel()
+            isSheenReturning = false
+            val maxOffset = dpf(SHEEN_MAX_OFFSET_DP.toFloat())
+            val offset = (xFraction - 0.5f) * 2f * maxOffset
+            val dist = kotlin.math.abs(xFraction - 0.5f) * 2f
+            val alpha = SHEEN_ALPHA_PRESS + (SHEEN_ALPHA_PEAK - SHEEN_ALPHA_PRESS) * dist.coerceIn(0f,1f)
+            targetSheenAlpha = alpha
+            specularSheen.animate()
+                .translationX(offset)
+                .alpha(alpha)
+                .setDuration(SHEEN_FOLLOW_MS)
+                .setInterpolator(DecelerateInterpolator())
+                .start()
+        }
+
+        fun returnSheen() {
+            if (sheenAnimator?.isRunning == true) sheenAnimator?.cancel()
+            isSheenReturning = true
+            sheenAnimator = specularSheen.animate()
+                .translationX(0f)
+                .setDuration(SHEEN_RETURN_MS)
+                .setInterpolator(DecelerateInterpolator())
+                .setUpdateListener { a ->
+                    val f = a.animatedFraction
+                    val eased = 1f - (1f - f) * (1f - f)
+                    specularSheen.alpha = SHEEN_ALPHA_PEAK * (1f - eased)
+                    if (eased > 0.95f) {
+                        val fadeAnim = ValueAnimator.ofFloat(specularSheen.alpha, 0f).apply {
+                            duration = SHEEN_FADE_MS
+                            addUpdateListener { specularSheen.alpha = it.animatedValue as Float }
+                            start()
+                        }
+                        a.removeAllUpdateListeners()
+                    }
+                }
+                .setListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        specularSheen.alpha = 0f
+                        specularSheen.translationX = 0f
+                        isSheenReturning = false
+                        sheenAnimator = null
+                    }
+                })
+                .start()
+        }
+
+        fun pulseSheen() {
+            if (sheenAnimator?.isRunning == true) sheenAnimator?.cancel()
+            specularSheen.animate().cancel()
+            specularSheen.alpha = SHEEN_PULSE_ALPHA
+            specularSheen.animate()
+                .alpha(0f)
+                .setDuration(SHEEN_FADE_MS)
+                .setStartDelay(60)
+                .setInterpolator(DecelerateInterpolator())
+                .start()
+        }
+
+        fun applySpringTouch(onClick: () -> Unit) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val mask = ColorDrawable(Color.BLACK)
+                foreground = RippleDrawable(
+                    android.content.res.ColorStateList.valueOf(RIPPLE_COLOR), null, mask
+                )
+            }
+            setOnTouchListener { v, ev ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                    v.foreground?.setHotspot(ev.x, ev.y)
+                when (ev.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        v.isPressed = true
+                        v.pivotX = v.width / 2f
+                        v.pivotY = v.height / 2f
+                        v.animate().scaleX(SPRING_COMPRESS).scaleY(SPRING_COMPRESS)
+                            .setDuration(120).setInterpolator(DecelerateInterpolator()).start()
+                        val xFraction = ev.x / v.width
+                        updateSheenPosition(xFraction)
+                        vibrateClick()
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val xFraction = ev.x / v.width
+                        updateSheenPosition(xFraction)
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        v.isPressed = false
+                        v.animate().cancel()
+                        val rx = ObjectAnimator.ofFloat(v, "scaleX",
+                            SPRING_COMPRESS, SPRING_OVER_PEAK, SPRING_SETTLE, 1.0f)
+                        val ry = ObjectAnimator.ofFloat(v, "scaleY",
+                            SPRING_COMPRESS, SPRING_OVER_PEAK, SPRING_SETTLE, 1.0f)
+                        AnimatorSet().apply {
+                            playTogether(rx, ry)
+                            duration = SPRING_DURATION
+                            interpolator = PathInterpolator(0.15f, 1.65f, 0.30f, 1.0f)
+                            start()
+                        }
+                        returnSheen()
+                        pulseSheen()
+                        vibrateTick()
+                        onClick()
+                        v.performClick()
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        v.isPressed = false
+                        v.animate().scaleX(1f).scaleY(1f).setDuration(180)
+                            .setInterpolator(DecelerateInterpolator()).start()
+                        returnSheen()
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════
+    // INNER SHADOW GRADIENT DRAWABLE
+    // ════════════════════════════════════════════════════════
+    private class InnerShadowGradientDrawable(
+        private val cornerRadius: Float,
+        private val topLeftColor: Int,
+        private val bottomRightColor: Int,
+        private val alphaFactor: Float
+    ) : Drawable() {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            isDither = true
+        }
+        private val path = Path()
+        private var needsRebuild = true
+
+        override fun draw(canvas: Canvas) {
+            if (needsRebuild) rebuildPath()
+            val bounds = bounds
+            val cx = bounds.exactCenterX()
+            val cy = bounds.exactCenterY()
+            val maxR = kotlin.math.hypot(cx.toDouble(), cy.toDouble()).toFloat()
+
+            // Top-left quadrant shadow
+            val tlShader = RadialGradient(
+                0f, 0f, maxR,
+                topLeftColor, Color.TRANSPARENT, Shader.TileMode.CLAMP
+            )
+            paint.shader = tlShader
+            paint.alpha = (Color.alpha(topLeftColor) * alphaFactor).toInt().coerceIn(0, 255)
+            canvas.save()
+            canvas.clipRect(bounds.left, bounds.top, cx.toInt(), cy.toInt())
+            canvas.drawPath(path, paint)
+            canvas.restore()
+
+            // Bottom-right quadrant shadow
+            val brShader = RadialGradient(
+                bounds.right.toFloat(), bounds.bottom.toFloat(), maxR,
+                bottomRightColor, Color.TRANSPARENT, Shader.TileMode.CLAMP
+            )
+            paint.shader = brShader
+            paint.alpha = (Color.alpha(bottomRightColor) * alphaFactor).toInt().coerceIn(0, 255)
+            canvas.save()
+            canvas.clipRect(cx.toInt(), cy.toInt(), bounds.right, bounds.bottom)
+            canvas.drawPath(path, paint)
+            canvas.restore()
+
+            // Top-right blended
+            paint.shader = null
+            paint.color = Color.argb(4, 0, 0, 0)
+            canvas.save()
+            canvas.clipRect(cx.toInt(), bounds.top, bounds.right, cy.toInt())
+            canvas.drawPath(path, paint)
+            canvas.restore()
+
+            // Bottom-left blended
+            canvas.save()
+            canvas.clipRect(bounds.left, cy.toInt(), cx.toInt(), bounds.bottom)
+            canvas.drawPath(path, paint)
+            canvas.restore()
+        }
+
+        private fun rebuildPath() {
+            path.reset()
+            val b = bounds
+            path.addRoundRect(
+                b.left.toFloat(), b.top.toFloat(),
+                b.right.toFloat(), b.bottom.toFloat(),
+                cornerRadius, cornerRadius, Path.Direction.CW
+            )
+            needsRebuild = false
+        }
+
+        override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+        override fun setColorFilter(cf: ColorFilter?) { paint.colorFilter = cf }
+        override fun getOpacity(): Int = PixelDrawable.TRANSLUCENT
+
+        override fun onBoundsChange(b: Rect) {
+            super.onBoundsChange(b)
+            needsRebuild = true
+        }
+    }
+
+    // ════════════════════════════════════════════════════════
+    // STYLED UI ITEM FACTORIES — migrate from MainUiBuilder
+    // ════════════════════════════════════════════════════════
+
+    private fun createStyledTextItem(
+        title: String,
+        subtitle: String? = null,
+        actionView: View? = null,
+        onClick: (() -> Unit)? = null
+    ): LinearLayout {
+        val finalOnClick = onClick ?: if (actionView is SpringSwitch) {
+            { actionView.isChecked = !actionView.isChecked }
+        } else null
+
+        val itemLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(18), dp(20), dp(18))
+            if (finalOnClick != null) applySpringAndLiquidClick(this, finalOnClick)
+        }
+
+        val textLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        val titleView = TextView(activity).apply {
+            text = title
+            textSize = 16f
+            setTextColor(Color.parseColor("#E6000000"))
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        }
+        textLayout.addView(titleView)
+
+        if (!subtitle.isNullOrEmpty()) {
+            textLayout.addView(TextView(activity).apply {
+                text = subtitle
+                textSize = 12f
+                setTextColor(Color.parseColor("#99000000"))
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
+
+        itemLayout.addView(textLayout)
+
+        if (actionView != null) {
+            actionView.isClickable = false
+            actionView.isFocusable = false
+            itemLayout.addView(actionView)
+        } else if (finalOnClick != null) {
+            itemLayout.addView(TextView(activity).apply {
+                text = "〉"
+                textSize = 14f
+                setTextColor(Color.parseColor("#66000000"))
+            })
+        }
+
+        return itemLayout
+    }
+
+    private fun createStyledSliderItem(
+        title: String,
+        currentVal: Float,
+        isFloat: Boolean,
+        maxProgress: Int,
+        minProgress: Int,
+        valueSuffix: String = "",
+        onValChanged: (Float) -> Unit
+    ): LinearLayout {
+        val container = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+        }
+
+        val titleLabel = if (isFloat)
+            "$title: ${String.format("%.1f", currentVal)}$valueSuffix"
+        else
+            "$title: ${currentVal.toInt()}$valueSuffix"
+
+        val titleView = TextView(activity).apply {
+            text = titleLabel
+            textSize = 15f
+            setTextColor(Color.parseColor("#E6000000"))
+            setPadding(0, 0, 0, dp(10))
+        }
+        container.addView(titleView)
+
+        val seekBar = SeekBar(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(28))
+            max = maxProgress - minProgress
+            progress = if (isFloat)
+                ((currentVal - (minProgress / 100f)) * 100).toInt().coerceIn(0, max)
+            else
+                (currentVal.toInt() - minProgress).coerceIn(0, max)
+
+            val trackGrad = GradientDrawable().apply {
+                cornerRadius = dpf(8f)
+                setColor(Color.parseColor("#40000000"))
+            }
+            val progressGrad = GradientDrawable().apply {
+                cornerRadius = dpf(8f)
+                setColor(Color.parseColor("#99000000"))
+            }
+            progressDrawable = LayerDrawable(arrayOf(
+                trackGrad, ClipDrawable(progressGrad, Gravity.START, ClipDrawable.HORIZONTAL)
+            )).apply {
+                setId(0, android.R.id.background)
+                setId(1, android.R.id.progress)
+            }
+
+            thumb = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setSize(dp(26), dp(26))
+                setColor(Color.parseColor("#F8FFFFFF"))
+                setStroke(dp(1), Color.parseColor("#1A000000"))
+            }
+            thumbOffset = dp(13)
+            splitTrack = false
+
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, prog: Int, fromUser: Boolean) {
+                    val finalVal = if (isFloat)
+                        (minProgress / 100f) + (prog / 100f)
+                    else
+                        (minProgress + prog).toFloat()
+
+                    titleView.text = if (isFloat)
+                        "$title: ${String.format("%.1f", finalVal)}$valueSuffix"
+                    else
+                        "$title: ${finalVal.toInt()}$valueSuffix"
+
+                    val key = title.substringBefore("/").trim().lowercase().replace(" ", "_")
+                    if (isFloat) prefs.edit().putFloat(key, finalVal).apply()
+                    else prefs.edit().putInt(key, finalVal.toInt()).apply()
+
+                    if (fromUser) {
+                        triggerSafeSliderHaptic()
+                        onValChanged(finalVal)
+                    }
+                }
+
+                override fun onStartTrackingTouch(sb: SeekBar?) {
+                    sb?.animate()?.scaleX(1.02f)?.scaleY(1.2f)
+                        ?.setDuration(220)
+                        ?.setInterpolator(PathInterpolator(0.2f, 1.4f, 0.4f, 1.0f))
+                        ?.start()
+                    vibrateClick()
+                }
+
+                override fun onStopTrackingTouch(sb: SeekBar?) {
+                    sb?.animate()?.scaleX(1.0f)?.scaleY(1.0f)
+                        ?.setDuration(300)
+                        ?.setInterpolator(OvershootInterpolator(1.8f))
+                        ?.start()
+                    vibrateTick()
+                }
+            })
+        }
+
+        container.addView(seekBar)
+        return container
+    }
+
+    private fun applySpringAndLiquidClick(view: View, onClick: () -> Unit) {
+        view.setOnTouchListener { v, ev ->
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    v.isPressed = true
+                    v.pivotX = v.width / 2f
+                    v.pivotY = v.height / 2f
+                    v.animate().scaleX(SPRING_COMPRESS).scaleY(SPRING_COMPRESS)
+                        .setDuration(120).setInterpolator(DecelerateInterpolator()).start()
+                }
+                MotionEvent.ACTION_UP -> {
+                    v.isPressed = false
+                    v.animate().cancel()
+                    ObjectAnimator.ofFloat(v, "scaleX",
+                        SPRING_COMPRESS, SPRING_OVER_PEAK, SPRING_SETTLE, 1.0f).apply { duration = SPRING_DURATION; interpolator = PathInterpolator(0.15f, 1.65f, 0.30f, 1.0f); start() }
+                    ObjectAnimator.ofFloat(v, "scaleY",
+                        SPRING_COMPRESS, SPRING_OVER_PEAK, SPRING_SETTLE, 1.0f).apply { duration = SPRING_DURATION; interpolator = PathInterpolator(0.15f, 1.65f, 0.30f, 1.0f); start() }
+                    vibrateTick()
+                    onClick()
+                    v.performClick()
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    v.isPressed = false
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(180)
+                        .setInterpolator(DecelerateInterpolator()).start()
+                }
+            }
+            true
+        }
+    }
+
+    private fun toggleLogWithSpring(logView: View, expand: Boolean) {
+        if (expand) {
+            logView.visibility = View.VISIBLE
+            logView.alpha = 0f
+            logView.translationY = -dpf(20f)
+            logView.animate()
+                .alpha(1f).translationY(0f)
+                .setDuration(400)
+                .setInterpolator(PathInterpolator(0.15f, 1.25f, 0.35f, 1.0f))
+                .setListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(anim: Animator) {
+                        logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+                    }
+                }).start()
+        } else {
+            logView.animate()
+                .alpha(0f).translationY(-dpf(20f))
+                .setDuration(300)
+                .setInterpolator(DecelerateInterpolator())
+                .setListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(anim: Animator) {
+                        logView.visibility = View.GONE
+                        logView.translationY = 0f
+                    }
+                }).start()
+        }
+    }
+
+    // ════════════════════════════════════════════════════════
+    // LIQUID GLASS STYLED GROUP — LGCard wrapper
+    // ════════════════════════════════════════════════════════
+
+    private fun createStyledGroup(title: String?, vararg items: View): View {
+        val groupLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                MATCH_PARENT, WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(24)) }
+        }
+
+        if (!title.isNullOrEmpty()) {
+            groupLayout.addView(TextView(activity).apply {
+                text = title
+                textSize = 13f
+                setTextColor(Color.parseColor("#B3000000"))
+                setShadowLayer(3f, 0f, 1f, Color.parseColor("#4DFFFFFF"))
+                setPadding(dp(16), 0, dp(16), dp(8))
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            })
+        }
+
+        // Build card content
+        val contentLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        for (i in items.indices) {
+            contentLayout.addView(items[i])
+            if (i < items.size - 1) {
+                contentLayout.addView(View(activity).apply {
+                    layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(1)).apply {
+                        setMargins(dp(20), 0, dp(20), 0)
+                    }
+                    setBackgroundColor(Color.parseColor("#26000000"))
+                })
+            }
+        }
+
+        // Wrap in LiquidGlassCard
+        val card = LiquidGlassCard(activity, contentLayout)
+
+        // Attach spring touch for the whole card (no external onClick by default)
+        card.applySpringTouch {}
+
+        groupLayout.addView(card)
+        return groupLayout
+    }
+
+    // ════════════════════════════════════════════════════════
+    // BUILD VIEW — Main UI Entry Point
+    // ════════════════════════════════════════════════════════
+
+    fun buildView(): View {
+        rootLayout = FrameLayout(activity).apply {
+            layoutParams = FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)
+        }
+
+        bgImageView = ImageView(activity).apply {
+            layoutParams = FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)
+        }
+        rootLayout.addView(bgImageView)
+
+        bgOverlayView = View(activity).apply {
+            layoutParams = FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)
+        }
+        rootLayout.addView(bgOverlayView)
+
+        val savedWallpaper = prefs.getString("wallpaper_uri", null)
+        updateBackground(savedWallpaper)
+
+        val rootScrollView = ScrollView(activity).apply {
+            isFillViewport = true
+            layoutParams = FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+
+        val mainLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), 0, dp(16), dp(32))
+        }
+
+        // ── Header ──
+        val headerLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            val topPadding = getStatusBarHeight() + dp(24)
+            setPadding(dp(8), topPadding, dp(8), dp(24))
+        }
+        headerLayout.addView(TextView(activity).apply {
+            text = "MusicHapticsX"
+            textSize = 38f
+            setTextColor(Color.parseColor("#E6000000"))
+            setShadowLayer(12f, 0f, 4f, Color.parseColor("#66FFFFFF"))
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        })
+        headerLayout.addView(TextView(activity).apply {
+            val verCode = try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                    activity.packageManager.getPackageInfo(activity.packageName, PackageManager.PackageInfoFlags.of(0)).longVersionCode
+                else
+                    @Suppress("DEPRECATION") activity.packageManager.getPackageInfo(activity.packageName, 0).versionCode.toLong()
+            } catch (_: Exception) { 87L }
+            text = "Liquid Glass Engine Build $verCode"
+            textSize = 14f
+            setTextColor(Color.parseColor("#99000000"))
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, dp(6), 0, 0)
+        })
+        mainLayout.addView(headerLayout)
+
+        // ── Master Switch ──
+        val masterSwitch = SpringSwitch(activity).apply {
+            isChecked = prefs.getBoolean("master_switch", true)
+            setOnCheckedChangeListener { checked ->
+                prefs.edit().putBoolean("master_switch", checked).apply()
+                onConfigChanged()
+            }
+        }
+        mainLayout.addView(createStyledGroup(
+            "CORE SYSTEM / 核心系统",
+            createStyledTextItem("Haptic Engine / 触感引擎",
+                "Status: System parameters injected / 当前状态：已注入系统参数", masterSwitch)
+        ))
+
+        // ── Sliders ──
+        val amp = createStyledSliderItem("Haptic Amplitude / 触感强度",
+            prefs.getFloat("haptic_amplitude", 1.0f), true, 200, 10, "x") { onConfigChanged() }
+        val bass = createStyledSliderItem("Haptic Bass Purity / 低频纯度",
+            prefs.getInt("haptic_bass_purity", 14).toFloat(), false, 100, 0, "%") { onConfigChanged() }
+        val gain = createStyledSliderItem("Haptic Gain / 触感增益",
+            prefs.getFloat("haptic_gain", 1.0f), true, 200, 50, "x") { onConfigChanged() }
+        val size = createStyledSliderItem("Haptic Frame Size / 分析帧大小",
+            prefs.getInt("haptic_frame_size", 240).toFloat(), false, 512, 32, " samples") { onConfigChanged() }
+        val interval = createStyledSliderItem("Haptic Interval / 触发间隔",
+            prefs.getInt("haptic_interval", 14).toFloat(), false, 100, 0, " ms") { onConfigChanged() }
+        val threshold = createStyledSliderItem("Haptic Threshold / 灵敏阈值",
+            prefs.getInt("haptic_threshold", 1200).toFloat(), false, 5000, 500, "") { onConfigChanged() }
+        mainLayout.addView(createStyledGroup(
+            "AUDIOPHILE HAPTICS / 音频振动参数",
+            gain, amp, bass, size, interval, threshold
+        ))
+
+        // ── Wallpaper ──
+        val selectWall = createStyledTextItem("Change Background / 更改底层渲染背景",
+            "Use high-resolution images for optimal glass effect / 建议搭配高清背景使用") { onSelectWallpaper() }
+        val clearWall = createStyledTextItem("Restore Default / 恢复默认背景",
+            "Revert to standard dark theme / 恢复默认暗场背景") { onClearWallpaper() }
+        mainLayout.addView(createStyledGroup("PERSONALIZATION / 视觉个性化", selectWall, clearWall))
+
+        // ── Log ──
+        logScroll = ScrollView(activity).apply {
+            visibility = View.GONE
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(
+                    Color.parseColor("#99000000"),
+                    Color.parseColor("#B3000000"),
+                    Color.parseColor("#CC000000")
+                )
+            ).apply {
+                cornerRadius = dpf(24f)
+                setStroke(dp(1), Color.parseColor("#45FFFFFF"))
+            }
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(200)).apply {
+                setMargins(dp(4), dp(4), dp(4), dp(24))
+            }
+        }
+        logTextView = TextView(activity).apply {
+            text = ""
+            textSize = 11f
+            setTextColor(Color.parseColor("#E5FFFFFF"))
+            typeface = Typeface.MONOSPACE
+        }
+        logScroll.addView(logTextView)
+        appendLog("[System Ready] Liquid Glass rendering engine mounted.")
+
+        val logTrigger = createStyledTextItem("Audit Data Stream / 开启底层审计数据流",
+            "Monitor kernel waveform injection status / 实时观测内核波形注入状态", null) {
+            val isExpanding = logScroll.visibility == View.GONE
+            toggleLogWithSpring(logScroll, isExpanding)
+        }
+        mainLayout.addView(createStyledGroup("SYSTEM LOG / 审计日志", logTrigger))
+        mainLayout.addView(logScroll)
+
+        // ── Experimental ──
+        val entryQuantum = createStyledTextItem(
+            "Enter Quantum Console / 进入量子控制台",
+            "Fluid interaction testing / 液态流体交互试验"
+        ) {
+            activity.startActivity(Intent(activity, HapticDashboardActivity::class.java))
+        }
+        mainLayout.addView(createStyledGroup("EXPERIMENTAL / 实验区", entryQuantum))
+
+        rootScrollView.addView(mainLayout)
+        rootLayout.addView(rootScrollView)
+
+        // ── Entry Animation ──
+        mainLayout.post {
+            val count = mainLayout.childCount
+            for (i in 0 until count) {
+                val child = mainLayout.getChildAt(i)
+                if (child == logScroll) continue
+                child.alpha = 0f
+                child.translationY = dpf(50f)
+                child.animate()
+                    .alpha(1f).translationY(0f)
+                    .setDuration(700)
+                    .setStartDelay(i * 80L)
+                    .setInterpolator(PathInterpolator(0.15f, 1.45f, 0.30f, 1.0f))
+                    .start()
+            }
+        }
+
+        return rootLayout
+    }
+
+    // ════════════════════════════════════════════════════════
+    // SPRING SWITCH — Toggle with Liquid Glass styling
+    // ════════════════════════════════════════════════════════
+
+    inner class SpringSwitch(context: Context) : FrameLayout(context) {
+        var isChecked = false
+            set(value) {
+                if (field != value) {
+                    field = value
+                    updateState(animate = true)
+                }
+            }
+
+        private val trackDrawable = GradientDrawable().apply {
+            cornerRadius = dpf(16f)
+            setColor(Color.parseColor("#4D000000"))
+        }
+
+        private val thumbView = View(context).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.WHITE)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) elevation = dpf(3f)
+            }
+        }
+
+        private var onCheckedChangeListener: ((Boolean) -> Unit)? = null
+
+        init {
+            background = trackDrawable
+            val thumbSize = dp(32)
+            val trackHeight = dp(32)
+            val trackWidth = dp(56)
+            layoutParams = FrameLayout.LayoutParams(trackWidth, trackHeight)
+
+            thumbView.layoutParams = FrameLayout.LayoutParams(thumbSize, thumbSize).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                marginStart = dp(2)
+            }
+            addView(thumbView)
+
+            setOnClickListener {
+                isChecked = !isChecked
+                vibrateTick()
+                onCheckedChangeListener?.invoke(isChecked)
+            }
+        }
+
+        fun setOnCheckedChangeListener(listener: (Boolean) -> Unit) {
+            onCheckedChangeListener = listener
+        }
+
+        private fun updateState(animate: Boolean) {
+            val targetMargin = if (isChecked) dp(2) + dp(24) else dp(2)
+            val targetTrackColor = if (isChecked)
+                Color.parseColor("#34C759") else Color.parseColor("#4D000000")
+            val targetThumbColor = Color.WHITE
+
+            if (animate) {
+                val marginAnim = ValueAnimator.ofInt(
+                    (thumbView.layoutParams as FrameLayout.LayoutParams).marginStart,
+                    targetMargin
+                ).apply {
+                    duration = 280
+                    interpolator = PathInterpolator(0.2f, 1.0f, 0.3f, 1.0f)
+                    addUpdateListener {
+                        val lp = thumbView.layoutParams as FrameLayout.LayoutParams
+                        lp.marginStart = it.animatedValue as Int
+                        thumbView.layoutParams = lp
+                    }
+                    start()
+                }
+
+                val trackColorAnim = ValueAnimator.ofArgb(
+                    (trackDrawable as? GradientDrawable)?.let { g -> try { (g as? Any) } catch (_: Exception) { null } }
+                        ?.let { 0 } ?: 0,
+                    targetTrackColor
+                ).apply {
+                    duration = 280
+                    interpolator = PathInterpolator(0.2f, 1.0f, 0.3f, 1.0f)
+                    addUpdateListener {
+                        trackDrawable.setColor(it.animatedValue as Int)
+                        background = trackDrawable
+                    }
+                    start()
+                }
+            } else {
+                val lp = thumbView.layoutParams as FrameLayout.LayoutParams
+                lp.marginStart = targetMargin
+                thumbView.layoutParams = lp
+                trackDrawable.setColor(targetTrackColor)
+                background = trackDrawable
+            }
+        }
+    }
+}

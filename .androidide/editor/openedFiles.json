@@ -1,212 +1,17 @@
 {
   "allFiles": [
     {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/build.gradle.kts",
-      "selection": {
-        "end": {
-          "column": 0,
-          "index": 0,
-          "line": 0
-        },
-        "start": {
-          "column": 0,
-          "index": 0,
-          "line": 0
-        }
-      }
-    },
-    {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/build.gradle.kts",
-      "selection": {
-        "end": {
-          "column": 35,
-          "index": 474,
-          "line": 22
-        },
-        "start": {
-          "column": 35,
-          "index": 474,
-          "line": 22
-        }
-      }
-    },
-    {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/res/values/themes.xml",
-      "selection": {
-        "end": {
-          "column": 0,
-          "index": 272,
-          "line": 6
-        },
-        "start": {
-          "column": 0,
-          "index": 0,
-          "line": 0
-        }
-      }
-    },
-    {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/res/values-night/themes.xml",
-      "selection": {
-        "end": {
-          "column": 0,
-          "index": 713,
-          "line": 17
-        },
-        "start": {
-          "column": 0,
-          "index": 713,
-          "line": 17
-        }
-      }
-    },
-    {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/AndroidManifest.xml",
-      "selection": {
-        "end": {
-          "column": 60,
-          "index": 216,
-          "line": 2
-        },
-        "start": {
-          "column": 60,
-          "index": 216,
-          "line": 2
-        }
-      }
-    },
-    {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/res/values/colors.xml",
-      "selection": {
-        "end": {
-          "column": 0,
-          "index": 164,
-          "line": 5
-        },
-        "start": {
-          "column": 0,
-          "index": 164,
-          "line": 5
-        }
-      }
-    },
-    {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/res/drawable/ic_launcher_background.xml",
-      "selection": {
-        "end": {
-          "column": 0,
-          "index": 361,
-          "line": 11
-        },
-        "start": {
-          "column": 0,
-          "index": 361,
-          "line": 11
-        }
-      }
-    },
-    {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/res/drawable/ic_launcher_adaptive.xml",
-      "selection": {
-        "end": {
-          "column": 0,
-          "index": 343,
-          "line": 8
-        },
-        "start": {
-          "column": 0,
-          "index": 343,
-          "line": 8
-        }
-      }
-    },
-    {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/res/drawable/ic_music_haptics_foreground.xml",
-      "selection": {
-        "end": {
-          "column": 0,
-          "index": 1529,
-          "line": 48
-        },
-        "start": {
-          "column": 0,
-          "index": 1529,
-          "line": 48
-        }
-      }
-    },
-    {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/res/drawable/ic_foreground_wrapper.xml",
-      "selection": {
-        "end": {
-          "column": 0,
-          "index": 493,
-          "line": 15
-        },
-        "start": {
-          "column": 0,
-          "index": 493,
-          "line": 15
-        }
-      }
-    },
-    {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/MainHook.kt",
-      "selection": {
-        "end": {
-          "column": 71,
-          "index": 15662,
-          "line": 345
-        },
-        "start": {
-          "column": 71,
-          "index": 15662,
-          "line": 345
-        }
-      }
-    },
-    {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/MainActivity.kt",
-      "selection": {
-        "end": {
-          "column": 44,
-          "index": 1380,
-          "line": 43
-        },
-        "start": {
-          "column": 44,
-          "index": 1380,
-          "line": 43
-        }
-      }
-    },
-    {
       "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/MainUiBuilder.kt",
       "selection": {
         "end": {
-          "column": 2,
-          "index": 30039,
-          "line": 757
-        },
-        "start": {
-          "column": 2,
-          "index": 30039,
-          "line": 757
-        }
-      }
-    },
-    {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/ConfigProvider.kt",
-      "selection": {
-        "end": {
           "column": 0,
-          "index": 1591,
-          "line": 37
+          "index": 1366,
+          "line": 38
         },
         "start": {
           "column": 0,
-          "index": 1591,
-          "line": 37
+          "index": 1366,
+          "line": 38
         }
       }
     },
@@ -214,29 +19,104 @@
       "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/HapticEngine.kt",
       "selection": {
         "end": {
-          "column": 2,
-          "index": 16719,
-          "line": 451
+          "column": 22,
+          "index": 1034,
+          "line": 23
         },
         "start": {
-          "column": 2,
-          "index": 16719,
-          "line": 451
+          "column": 22,
+          "index": 1034,
+          "line": 23
         }
       }
     },
     {
-      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/AudioFifoBuffer.kt",
+      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/HapticDashboardActivity.kt",
       "selection": {
         "end": {
-          "column": 2,
-          "index": 1980,
-          "line": 72
+          "column": 20,
+          "index": 8995,
+          "line": 269
         },
         "start": {
-          "column": 2,
-          "index": 1980,
-          "line": 72
+          "column": 20,
+          "index": 8995,
+          "line": 269
+        }
+      }
+    },
+    {
+      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/build.gradle.kts",
+      "selection": {
+        "end": {
+          "column": 29,
+          "index": 631,
+          "line": 26
+        },
+        "start": {
+          "column": 29,
+          "index": 631,
+          "line": 26
+        }
+      }
+    },
+    {
+      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/LiquidGlassBuilder.kt",
+      "selection": {
+        "end": {
+          "column": 0,
+          "index": 36213,
+          "line": 903
+        },
+        "start": {
+          "column": 0,
+          "index": 36213,
+          "line": 903
+        }
+      }
+    },
+    {
+      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/AndroidManifest.xml",
+      "selection": {
+        "end": {
+          "column": 34,
+          "index": 511,
+          "line": 10
+        },
+        "start": {
+          "column": 34,
+          "index": 511,
+          "line": 10
+        }
+      }
+    },
+    {
+      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/MainActivity.kt",
+      "selection": {
+        "end": {
+          "column": 28,
+          "index": 642,
+          "line": 20
+        },
+        "start": {
+          "column": 28,
+          "index": 642,
+          "line": 20
+        }
+      }
+    },
+    {
+      "file": "/storage/emulated/0/AndroidIDEProjects/MusicHapticsX/app/src/main/java/com/mouya/musichaptics/HapticEventGenerator.kt",
+      "selection": {
+        "end": {
+          "column": 0,
+          "index": 0,
+          "line": 0
+        },
+        "start": {
+          "column": 0,
+          "index": 0,
+          "line": 0
         }
       }
     }

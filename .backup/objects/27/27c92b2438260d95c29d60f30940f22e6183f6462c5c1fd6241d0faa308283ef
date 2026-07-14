@@ -1,0 +1,418 @@
+#include <jni.h>
+#include <string>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cmath>
+#include <thread>
+#include <atomic>
+#include <algorithm>
+#include <mutex>
+#include <android/log.h>
+#include <sched.h>
+#include <vector>
+#include <fstream>
+#include <cstring>
+#include <errno.h>
+#include <sys/syscall.h>
+
+#define LOG_TAG "QuantumHapticKernel"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
+
+// ----- Fully dynamic configuration with automatic path detection -----
+std::mutex g_config_mutex;
+std::string g_rtp_node_path = "/sys/class/leds/vibrator/rtp";
+// AW8697 RTP candidate paths (ordered by priority, from standard to dedicated bus).
+// The Xiaomi 10 (umi/cm) uses the i2c-3 bus, but all variants are retained for
+// compatibility across MIUI / HyperOS builds.
+std::vector<std::string> g_rtp_candidates = {
+
+    // === Standard generic path (AOSP default) ===
+    "/sys/class/leds/vibrator/rtp",
+
+    // === i2c-3 bus (Xiaomi 10 umi — actual AW8697 location) ===
+    "/sys/devices/platform/soc/a8c000.i2c/i2c-3/3-005a/rtp",
+
+    // === i2c-9 bus (some HyperOS / legacy kernel variants) ===
+    "/sys/devices/platform/soc/a8c000.i2c/i2c-9/9-005a/rtp",
+
+    // === i2c-2 bus (certain ported kernels) ===
+    "/sys/devices/platform/soc/a8c000.i2c/i2c-2/2-005a/rtp",
+
+    // === i2c-0 bus (rare variant) ===
+    "/sys/devices/platform/soc/a8c000.i2c/i2c-0/0-005a/rtp",
+
+    // === Symlink variants (HyperOS new directory layout) ===
+    "/sys/devices/virtual/timed_output/vibrator/rtp",
+    "/sys/devices/virtual/misc/vibrator/rtp",
+
+    // === OnePlus / Oppo compatible paths (ported kernel reuse) ===
+    "/sys/devices/platform/soc/a8c000.i2c/i2c-3/3-005a/aw8697_rtp",
+    "/sys/devices/platform/soc/a8c000.i2c/i2c-3/3-005a/aw8697/rtp"
+
+};
+/** Motor resonant frequency (Hz), updated dynamically from JNI. */
+std::atomic<float> g_motor_f0{170.0f};
+
+std::atomic<bool> is_running(false);
+std::thread render_thread;
+
+struct HapticEnvelope {
+    std::atomic<float> sub{0.0f};
+    std::atomic<float> mid{0.0f};
+    std::atomic<float> presence{0.0f};
+    std::atomic<float> pitch{150.0f};
+} g_envelope;
+
+struct HapticTelemetry {
+
+    std::atomic<bool> kernelReady{false};
+    std::atomic<bool> rtpConnected{false};
+
+    std::atomic<float> intensity{0};
+    std::atomic<int> amplitude{0};
+
+    std::atomic<long> frameCount{0};
+
+    std::atomic<float> latencyMs{0};
+
+} g_telemetry;
+
+bool file_exists(const std::string& path)
+{
+    return access(path.c_str(), F_OK) == 0;
+}
+
+
+/**
+ * Scans all candidate RTP sysfs paths in priority order and returns the first
+ * that exists on the current device. Falls back to diagnostic dumps if none
+ * are found.
+ * @return A valid absolute RTP path, or an empty string on failure.
+ */
+std::string detect_aw8697_rtp()
+{
+    LOGI("[PATH_SCAN] Scanning %zu RTP candidate paths...", g_rtp_candidates.size());
+    for(size_t i = 0; i < g_rtp_candidates.size(); i++)
+    {
+        bool exists = file_exists(g_rtp_candidates[i]);
+        LOGI("[PATH_SCAN] [%zu/%zu] %s -> %s",
+             i + 1, g_rtp_candidates.size(),
+             g_rtp_candidates[i].c_str(),
+             exists ? "✓ EXISTS" : "✗ NOT_FOUND");
+
+        if(exists)
+        {
+            LOGI("[PATH_SCAN] ✓ Valid AW8697 RTP node found: %s", g_rtp_candidates[i].c_str());
+            return g_rtp_candidates[i];
+        }
+    }
+
+
+    LOGE("[PATH_SCAN] ✗ FATAL: All %zu candidate paths are missing! AW8697 driver may not be loaded or path has changed.", g_rtp_candidates.size());
+    // Dump all i2c directories under /sys/devices/platform/soc/ for diagnostic purposes
+    LOGI("[PATH_SCAN] Attempting dump of i2c node listings under /sys/devices/platform/soc/...");
+    system("ls -d /sys/devices/platform/soc/*i2c* 2>/dev/null | head -20");
+    system("ls -d /sys/devices/platform/soc/a8c000.i2c/i2c-*/*-005a/ 2>/dev/null | head -10");
+    system("cat /proc/device-tree/soc/*i2c*/status 2>/dev/null | head -10");
+
+    return "";
+}
+
+double get_current_time_sec() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+void haptic_render_loop() {
+    LOGI("Quantum Haptic AW8697 Driver Start");
+    int tid = syscall(SYS_gettid);
+    std::string chrt_cmd = "chrt -f -p 99 " + std::to_string(tid);
+    //system(chrt_cmd.c_str());
+    
+    std::string active_path;
+
+
+    {
+        std::lock_guard<std::mutex> lock(g_config_mutex);
+
+        active_path = g_rtp_node_path;
+    }
+
+
+    if(!file_exists(active_path))
+    {
+        active_path = detect_aw8697_rtp();
+    }
+
+
+    if(active_path.empty())
+    {
+        g_telemetry.rtpConnected=false;
+
+        LOGE(
+        "[HAPTIC] RTP FAILED - no valid node found"
+        );
+
+        return;
+    }
+    g_telemetry.rtpConnected=true;
+
+    LOGI(
+    "[HAPTIC] RTP CONNECTED : %s",
+    active_path.c_str()
+    );
+    
+    LOGI("RTP:%s", active_path.c_str());
+    
+    // 动态提取 base 路径（去掉末尾的 /rtp 部分）
+    std::string base;
+    size_t last_slash = active_path.rfind('/');
+    if (last_slash != std::string::npos) {
+        base = active_path.substr(0, last_slash) + "/";
+    } else {
+        base = "/sys/class/leds/vibrator/";  // fallback
+    }
+    LOGI("[BASE] 动态 RTP 基路径: %s", base.c_str());
+
+
+    auto write_node=[&](std::string node,std::string value)
+    {
+        std::ofstream f(base+node);
+
+        if(f)
+        {
+            f<<value;
+            LOGI("[ACTIVATE] 写入 %s%s=%s", base.c_str(), node.c_str(), value.c_str());
+        } else {
+            LOGE("[ACTIVATE] 打开 %s%s 失败! errno=%d", base.c_str(), node.c_str(), errno);
+        }
+    };
+
+
+    write_node("activate","1");
+
+    int rtp_fd = open(active_path.c_str(), O_WRONLY | O_NONBLOCK);
+    if (rtp_fd < 0) {
+        LOGE("无法打开动态内核 RTP 通道: %s", active_path.c_str());
+        g_telemetry.kernelReady = true;
+        return;
+    }
+
+    LOGI("渲染线程成功绑定动态物理节点: %s", active_path.c_str());
+    char rtp_buffer[16];
+
+    while (is_running) {
+
+    auto start =
+    std::chrono::steady_clock::now();
+
+
+    // ===== DSP输入 =====
+    float s = g_envelope.sub.load();
+    float m = g_envelope.mid.load();
+    float p = g_envelope.presence.load();
+
+
+    // ===== Haptic混合算法 =====
+    float total_intensity =
+        (s * 0.7f) +
+        (m * 0.4f) +
+        (p * 0.15f);
+
+
+    // ===== 转换AW8697振幅 =====
+    int amplitude =
+        static_cast<int>(total_intensity * 255.0f);
+
+
+    // clamp
+    if(amplitude > 255)
+        amplitude = 255;
+
+    if(amplitude < 0)
+        amplitude = 0;
+
+
+
+    // ===== telemetry回传 =====
+    g_telemetry.intensity.store(total_intensity);
+
+    g_telemetry.amplitude.store(amplitude);
+
+    g_telemetry.frameCount.fetch_add(1);
+
+
+
+    // ===== RTP输出 =====
+    if (amplitude > 0) {
+
+        lseek(rtp_fd, 0, SEEK_SET);
+
+        int len =
+        snprintf(
+            rtp_buffer,
+            sizeof(rtp_buffer),
+            "%d\n",
+            amplitude
+        );
+
+
+        int ret =
+        write(
+            rtp_fd,
+            rtp_buffer,
+            len
+        );
+
+
+        if(ret < 0)
+        {
+            LOGE(
+            "[RTP] write failed errno=%d",
+            errno
+            );
+        }
+
+    }
+
+
+
+    // 10ms周期
+    std::this_thread::sleep_for(
+        std::chrono::microseconds(10000)
+    );
+
+
+
+    auto end =
+    std::chrono::steady_clock::now();
+
+
+    float cost =
+    std::chrono::duration<float,std::milli>
+    (end-start)
+    .count();
+
+
+    g_telemetry.latencyMs.store(cost);
+
+
+
+    // ===== 调试日志 =====
+    static int debugCounter = 0;
+
+
+    if(debugCounter++ >= 100)
+    {
+
+        LOGI(
+        "[DSP]"
+        " Sub %.2f"
+        " Mid %.2f"
+        " High %.2f"
+        " INT %.2f"
+        " AMP %d"
+        " LAT %.2fms",
+
+        s,
+        m,
+        p,
+        total_intensity,
+        amplitude,
+        cost
+        );
+
+
+        debugCounter=0;
+    }
+
+}
+    lseek(rtp_fd, 0, SEEK_SET);
+    write(rtp_fd, "0\n", 2);
+    close(rtp_fd);
+}
+
+
+// JNI 配置动态注入接口
+extern "C" JNIEXPORT void JNICALL
+Java_com_mouya_musichaptics_HapticEngine_updateKernelConfig(JNIEnv* env, jobject thiz, jstring path_jstr, jfloat f0) {
+    const char* path_chars = env->GetStringUTFChars(path_jstr, nullptr);
+    if (path_chars != nullptr) {
+        std::lock_guard<std::mutex> lock(g_config_mutex);
+        g_rtp_node_path = std::string(path_chars);
+        g_motor_f0.store(f0);
+        env->ReleaseStringUTFChars(path_jstr, path_chars);
+        LOGI("内核已应用动态新配置。路径: %s, 频率: %.1fHz", g_rtp_node_path.c_str(), f0);
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_mouya_musichaptics_HapticEngine_startKernelTunnel(JNIEnv* env, jobject thiz) {
+    if (!is_running) {
+        is_running = true;
+        render_thread = std::thread(haptic_render_loop);
+        return JNI_TRUE;
+    }
+    return JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_mouya_musichaptics_HapticEngine_stopKernelTunnel(JNIEnv* env, jobject thiz) {
+    if (is_running) {
+        is_running = false;
+        if (render_thread.joinable()) {
+            render_thread.join();
+        }
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_mouya_musichaptics_HapticEngine_pushDspTelemetry(JNIEnv* env, jobject thiz, jfloat sub, jfloat mid, jfloat presence, jfloat pitch) {
+    g_envelope.sub.store(sub);
+    g_envelope.mid.store(mid);
+    g_envelope.presence.store(presence);
+    g_envelope.pitch.store(pitch);
+}
+JNIEXPORT jstring JNICALL
+Java_com_mouya_musichaptics_HapticEngine_getTelemetry(
+JNIEnv* env,
+jobject thiz)
+{
+
+char buf[256];
+
+snprintf(
+buf,
+sizeof(buf),
+
+"RTP:%s\n"
+"KERNEL:%s\n"
+"AMP:%d\n"
+"INT:%.2f\n"
+"LAT:%.2fms\n"
+"FRAME:%lld",
+
+g_telemetry.rtpConnected?"OK":"NO",
+
+g_telemetry.kernelReady?"READY":"NO",
+
+g_telemetry.amplitude.load(),
+
+g_telemetry.intensity.load(),
+
+g_telemetry.latencyMs.load(),
+
+(long long)g_telemetry.frameCount.load()
+
+);
+
+
+return env->NewStringUTF(buf);
+
+}

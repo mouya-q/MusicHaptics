@@ -62,6 +62,40 @@ class LiquidGlassBuilder(
     private lateinit var bgOverlayView: View
     private lateinit var rootLayout: FrameLayout
 
+    // ── 预设档位系统 ──
+    private var currentPresetLevel = prefs.getInt("haptic_preset_level", 1) // 0-3,默认Standard
+
+    private val presetDefs = listOf(
+        PresetDef("Light",  "轻柔", 0.70f, 0.50f, 15, 256, 30,  3500, 0.55f),
+        PresetDef("Std",    "标准", 1.20f, 1.00f, 40, 192, 18,  2000, 1.00f),
+        PresetDef("Strong", "强劲", 1.80f, 1.50f, 60, 160, 10,  1000, 1.70f),
+        PresetDef("Extreme","狂暴", 2.50f, 2.00f, 80, 128, 5,    400, 2.50f)
+    )
+
+    data class PresetDef(
+        val label: String, val labelCN: String,
+        val gain: Float, val amplitude: Float, val bassPurity: Int,
+        val frameSize: Int, val interval: Int, val threshold: Int,
+        val boostLevel: Float
+    )
+
+    private fun applyPreset(level: Int) {
+        if (level !in 0..3) return
+        currentPresetLevel = level
+        val p = presetDefs[level]
+        prefs.edit()
+            .putInt("haptic_preset_level", level)
+            .putFloat("haptic_gain", p.gain)
+            .putFloat("haptic_amplitude", p.amplitude)
+            .putInt("haptic_bass_purity", p.bassPurity)
+            .putInt("haptic_frame_size", p.frameSize)
+            .putInt("haptic_interval", p.interval)
+            .putInt("haptic_threshold", p.threshold)
+            .putFloat("haptic_boost_level", p.boostLevel)
+            .apply()
+        onConfigChanged()
+    }
+
     private val logTimeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
     private val vibrator = activity.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
 
@@ -725,7 +759,46 @@ class LiquidGlassBuilder(
                 "Status: System parameters injected / 当前状态：已注入系统参数", masterSwitch)
         ))
 
-        // Sliders
+        // ── 预设档位选择器 ──
+        val presetContainer = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            gravity = Gravity.CENTER
+        }
+        val presetBtns = mutableListOf<TextView>()
+        for ((idx, def) in presetDefs.withIndex()) {
+            val btn = TextView(activity).apply {
+                text = "${def.label}\n${def.labelCN}"
+                textSize = 11f; gravity = Gravity.CENTER
+                setTextColor(if (idx == currentPresetLevel) Color.WHITE else Color.parseColor("#99000000"))
+                background = GradientDrawable().apply {
+                    cornerRadius = dpf(12f)
+                    setColor(if (idx == currentPresetLevel) Color.parseColor("#80000000") else Color.TRANSPARENT)
+                }
+                setPadding(dp(10), dp(10), dp(10), dp(10))
+                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { setMargins(dp(4), 0, dp(4), 0) }
+                setOnClickListener {
+                    applyPreset(idx)
+                    for (j in presetBtns.indices) {
+                        val b = presetBtns[j]
+                        (b.background as GradientDrawable).setColor(
+                            if (j == idx) Color.parseColor("#80000000") else Color.TRANSPARENT
+                        )
+                        b.setTextColor(if (j == idx) Color.WHITE else Color.parseColor("#99000000"))
+                    }
+                    vibrateClick()
+                }
+            }
+            presetBtns.add(btn)
+            presetContainer.addView(btn)
+        }
+        mainLayout.addView(createStyledGroup("HAPTIC PRESET / 触感预设", presetContainer))
+
+        // ── 高级设置折叠 ──
+        val advancedPanel = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
         val amp = createStyledSliderItem("Haptic Amplitude / 触感强度",
             prefs.getFloat("haptic_amplitude", 1.0f), true, 200, 10, "x") { onConfigChanged() }
         val bass = createStyledSliderItem("Haptic Bass Purity / 低频纯度",
@@ -738,10 +811,27 @@ class LiquidGlassBuilder(
             prefs.getInt("haptic_interval", 14).toFloat(), false, 100, 0, " ms") { onConfigChanged() }
         val threshold = createStyledSliderItem("Haptic Threshold / 灵敏阈值",
             prefs.getInt("haptic_threshold", 1200).toFloat(), false, 5000, 500, "") { onConfigChanged() }
-        mainLayout.addView(createStyledGroup(
-            "AUDIOPHILE HAPTICS / 音频振动参数",
-            gain, amp, bass, size, interval, threshold
-        ))
+        listOf(amp, bass, gain, size, interval, threshold).forEach { advancedPanel.addView(it) }
+
+        val advToggle = createStyledTextItem("Advanced Settings / 高级调校",
+            "Fine-tune all DSP parameters manually / 手动微调全部DSP参数", null) {
+            val expanding = advancedPanel.visibility == View.GONE
+            if (expanding) {
+                advancedPanel.visibility = View.VISIBLE
+                advancedPanel.alpha = 0f
+                advancedPanel.translationY = -dpf(16f)
+                advancedPanel.animate().alpha(1f).translationY(0f).setDuration(400)
+                    .setInterpolator(quantumBounceInterpolator).start()
+            } else {
+                advancedPanel.animate().alpha(0f).translationY(-dpf(16f)).setDuration(250)
+                    .setInterpolator(DecelerateInterpolator())
+                    .setListener(object : AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(a: Animator) { advancedPanel.visibility = View.GONE }
+                    }).start()
+            }
+        }
+        mainLayout.addView(createStyledGroup("ADVANCED TUNING / 高级调校", advToggle))
+        mainLayout.addView(advancedPanel)
 
         // Wallpaper
         val selectWall = createStyledTextItem("Change Background / 更改底层渲染背景",
@@ -772,24 +862,24 @@ class LiquidGlassBuilder(
             typeface = Typeface.MONOSPACE
         }
         logScroll.addView(logTextView)
-        appendLog("[System Ready] Liquid Glass rendering engine mounted.")
+        appendLog("[System Ready] HapticEventGenerator v2 initialized.")
 
-        val logTrigger = createStyledTextItem("Audit Data Stream / 开启底层审计 data 流",
-            "Monitor kernel waveform injection status / 实时观测内核波形注入状态", null) {
+        val logTrigger = createStyledTextItem("Event Stream Monitor / 事件流监视器",
+            "Monitor haptic event generation in real-time / 实时观测触觉事件生成", null) {
             val isExpanding = logScroll.visibility == View.GONE
             toggleLogWithSpring(logScroll, isExpanding)
         }
-        mainLayout.addView(createStyledGroup("SYSTEM LOG / 审计日志", logTrigger))
+        mainLayout.addView(createStyledGroup("EVENT MONITOR / 事件监视", logTrigger))
         mainLayout.addView(logScroll)
 
-        // Experimental
-        val entryQuantum = createStyledTextItem(
-            "Enter Quantum Console / 进入量子控制台",
-            "Fluid interaction testing / 液态流体交互试验"
+        // Telemetry
+        val entryDashboard = createStyledTextItem(
+            "Haptic Dashboard / 触感仪表盘",
+            "Real-time frequency spectrum & haptic telemetry / 实时频谱与触感遥测"
         ) {
             activity.startActivity(Intent(activity, HapticDashboardActivity::class.java))
         }
-        mainLayout.addView(createStyledGroup("EXPERIMENTAL / 实验区", entryQuantum))
+        mainLayout.addView(createStyledGroup("TELEMETRY / 遥测数据", entryDashboard))
 
         rootScrollView.addView(mainLayout)
         rootLayout.addView(rootScrollView)

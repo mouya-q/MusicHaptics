@@ -1,6 +1,7 @@
 package com.mouya.musichaptics
 
 import android.content.Context
+import android.content.Intent
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
@@ -16,10 +17,22 @@ import java.nio.ByteOrder
 class MainHook : IXposedHookLoadPackage {
 
     companion object {
-        private const val TAG = "MusicHapticsHook"
+        private const val TAG = "MusicHapticsX-Hook"
         private const val MAX_SANE_SAMPLE_RATE = 384000
         private const val MIN_SANE_SAMPLE_RATE = 8000
         private const val MAX_SANE_CHANNELS = 12
+        private const val ACTION_LOG = "com.mouya.musichaptics.ACTION_LOG"
+
+        /** 向 UI 事件监视器发送日志 */
+        private fun sendUiLog(context: Context, msg: String) {
+            try {
+                val intent = Intent(ACTION_LOG).apply {
+                    setPackage("com.mouya.musichaptics")
+                    putExtra("log_msg", "[Hook] $msg")
+                }
+                context.sendBroadcast(intent)
+            } catch (_: Exception) {}
+        }
     }
 
     private var hapticEngine: HapticEngine? = null
@@ -42,7 +55,7 @@ class MainHook : IXposedHookLoadPackage {
 
         // 判断3：严防套娃，绝对不能 Hook 咱们自己的控制台 UI 进程
         if (pkg == "com.mouya.musichaptics") {
-            Log.d(TAG, "(ᗜ ˰ ᗜ) 扫描到自家主场，自觉退避，优雅路过")
+            Log.d(TAG, "(ᗜ ˰ ᗜ) 扫描到自家do，自觉退避，优雅路过")
             return
         }
 
@@ -274,7 +287,7 @@ class MainHook : IXposedHookLoadPackage {
                 }
             })
 
-            Log.i(TAG, "( ⩌⤚⩌) 绝对防御网部署完毕。[$pkg] 听好了，乖乖把好茶交出来摇一摇！")
+            Log.i(TAG, "( ⩌⤚⩌) 绝对防御网部署完毕。")
         } catch (t: Throwable) {
             Log.e(TAG, "(´ཫ`) 饱和Hook防线被未知虚空力量重创: ${t.message}")
         }
@@ -333,6 +346,7 @@ class MainHook : IXposedHookLoadPackage {
             if (prefs != null) {
                 hapticEngine = HapticEngine(context, prefs)
                 Log.i(TAG, "(ᗜ ˰ ᗜ) 跨进程高能输电引擎彻底部署成功！(via Android Haptic API)")
+                sendUiLog(context, "引擎部署成功 → ${hapticEngine?.hapticEventGenerator?.hasVibrator} vibrator")
             }
         } catch (t: Throwable) {
             Log.e(TAG, "˶>ᗜ<˶穿透机制被系统彻底扼杀: ${t.message}")

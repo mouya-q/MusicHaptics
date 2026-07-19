@@ -63,7 +63,7 @@ class HapticEngine(
     // -----------------------------------------------------------------------
 
     /** Maps DSP telemetry to Android VibrationEffect calls via system Vibrator HAL. */
-    val hapticEventGenerator = HapticEventGenerator(context)
+    val hapticEventGenerator = HapticEventGenerator(context, detectDeviceProfile())
 
     /** Reference to the UI builder passed from [MainUiBuilder], for log display. */
     var uiBuilder: MainUiBuilder? = null
@@ -132,7 +132,8 @@ class HapticEngine(
         // Synchronize DSP parameters from SharedPreferences.
         // The HapticEventGenerator is ready immediately — no root or sysfs needed.
         synchronizeParameters()
-        Log.i(TAG, "DSP parameters initialized. HapticEventGenerator ready (hasVibrator=${hapticEventGenerator.hasVibrator}).")
+        Log.i(TAG, "DSP parameters initialized. HapticEventGenerator ready (hasVibrator=${hapticEventGenerator.hasVibrator}, profile=${hapticEventGenerator.profile.name}).")
+        uiBuilder?.appendLog("[System Ready] 设备: ${hapticEventGenerator.profile.name} · ${hapticEventGenerator.profile.description}")
     }
 
     /**
@@ -163,18 +164,25 @@ class HapticEngine(
 
         val blockRate = sampleRate.toFloat() / FRAME_BLOCK_SIZE.toFloat()
         dynamicCompressor.setParameters(
-            thresholdDb = -18.0f,
+            thresholdDb = -32.0f,
             ratio = 4.5f,
             kneeWidthDb = 6.0f,
             attackMs = 4.0f,
             releaseMs = 75.0f,
-            makeupGainDb = 3.5f + (inputGain * 2.0f),
+            makeupGainDb = 14.0f + (inputGain * 4.0f),
             blockRate = blockRate
         )
 
         telemetryData.lowPassCutoffHz = lowCutoffFreq
         telemetryData.highPassCutoffHz = highCutoffFreq
         telemetryData.userAmplitudeScale = outputAmp
+
+        // 注入 boostLevel 到 HapticEventGenerator（来自预设档位）
+        val boostLevel = try { prefs.getFloat("haptic_boost_level", 1.0f) } catch (e: Exception) { 1.0f }
+        hapticEventGenerator.boostLevel = boostLevel
+
+        // 挂载 UI 日志管道
+        hapticEventGenerator.logListener = { msg -> uiBuilder?.appendLog(msg) }
     }
 
     /**
@@ -259,9 +267,9 @@ class HapticEngine(
                     }
                 }
                 2 -> {
-                    // Stereo: sum left+right then downscale by 1/65536 to avoid clipping
+                    // Stereo: sum left+right, scale to ~±1.36 max (48k divisor, ~36% more gain vs /65536)
                     var i = 0
-                    val scaleFactor = 1.0f / 65536.0f
+                    val scaleFactor = 1.0f / 48000.0f
                     while (i < sampleLength - 1) {
                         val monoSum = (pcmData[i].toFloat() + pcmData[i + 1].toFloat()) * scaleFactor
                         normalizedBuffer[writerOffset++] = monoSum
@@ -391,12 +399,16 @@ class HapticEngine(
                     currentTimeMs
                 )
 
-                // Log every 15th frame to avoid flooding the UI log panel
-                if (currentFrameId % 15L == 0L) {
+                // Log every 12th frame to avoid flooding the UI log panel
+                if (currentFrameId % 12L == 0L) {
+                    val estAmp = (finalSubIntensity.pow(0.5f) * 255).toInt().coerceIn(1, 255)
+                    val latency = hapticEventGenerator.currentFrameLatencyMs
+                    telemetryData.frameLatencyMs = latency
                     uiBuilder?.appendLog(
                         String.format(
-                            "Haptic -> Sub: %.2f | Mid: %.2f | F0: %.1fHz",
-                            finalSubIntensity, finalMidIntensity, detectedFundamentalFreq
+                            "DSP | S:%.2f M:%.2f P:%.2f | F0:%.0fHz amp~%d Δ=%dms",
+                            finalSubIntensity, finalMidIntensity, finalPresenceIntensity,
+                            detectedFundamentalFreq, estAmp.coerceIn(1, 255), latency
                         )
                     )
                     telemetryData.dispatchedSubBassImpacts++
@@ -680,12 +692,12 @@ class HapticEngine(
      */
     private class DualKneeCompressor {
         // DRC parameters (set via [setParameters])
-        private var thresholdDb = -18.0f
+        private var thresholdDb = -32.0f
         private var ratio = 4.5f
         private var kneeWidthDb = 6.0f
         private var attackMs = 4.0f
         private var releaseMs = 75.0f
-        private var makeupGainDb = 4.0f
+        private var makeupGainDb = 18.0f
         private var blockRateHz = 93.75f
 
         /** Envelope follower state in dB (initialized to effectively -infinity). */
@@ -829,5 +841,6 @@ class HapticEngine(
         @Volatile var dispatchedSubBassImpacts = 0L
         @Volatile var dispatchedMidBassTransients = 0L
         @Volatile var dispatchedMicroTextures = 0L
+        @Volatile var frameLatencyMs = 0L   // 最近一帧 DSP→振动延迟
     }
 }

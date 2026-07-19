@@ -23,9 +23,8 @@ android {
         
         // ᔦ ° ꒳ ° ᔨ ̖́-  版本号进位 → Liquid Glass Engine v2
         //♡ ( ᗜ ˰ ᗜ )
-        versionCode = 91
-        versionName = "1.6.1_glass"
-        //声明：我没打暗广！！！！！
+        versionCode = 96
+        versionName = "1.6.6_glass"
     }
 
     compileOptions {

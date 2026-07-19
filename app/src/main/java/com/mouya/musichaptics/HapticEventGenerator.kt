@@ -9,51 +9,34 @@ import android.util.Log
 import kotlin.math.*
 
 /**
- * iPhone Music Haptics 风格的触觉事件生成器。
+ * iPhone Music Haptics 风格触觉事件生成器 — 增强版 v2。
  *
- * 将 DSP 管线输出的三频段强度 + 音高信息映射为 Android VibrationEffect，
- * 不再直接操作 AW8697 RTP sysfs。Android VibratorService 会自动通过
- * Vibrator HAL → AW8697 kernel driver → LRA 完成硬件驱动。
+ * 将 DSP 管线输出的三频段强度 + 音高信息映射为 Android VibrationEffect。
+ * 数据流：DSP → [能量累积 + 振幅增强] → [Waveform/Predefined/OneShot] → Vibrator HAL
  *
- * 设计目标：
- * - 低频（sub-bass）→ 深沉、持续的低频振动（类似 iPhone Taptic Engine 的"重击"）
- * - 中频（mid-bass）→ 有节奏的中频敲击（类似鼓点反馈）
- * - 高频（presence）→ 细腻的"纹理"微振动（类似弦乐/擦片质感）
- * - 音高（pitch）→ 动态调整振动事件的时间间隔
+ * ## 增强特性
+ * - **振幅增强**：sqrt 幂律压缩 + 保底振幅(MIN_GUARANTEED_AMPLITUDE=40)
+ * - **振动模式分层**：Sub→衰减Waveform, Mid→HEAVY_CLICK, Presence→TICK
+ * - **能量累积触发**：弱信号攒够了再发射，避免无效微弱振动
+ * - **boostLevel 外部注入**：预设档位可动态调节整体强度
  */
-class HapticEventGenerator(context: Context) {
+class HapticEventGenerator(
+    context: Context,
+    /** 设备马达配置。运行时根据机型自动匹配。 */
+    val profile: DeviceProfile = detectDeviceProfile()
+) {
 
     companion object {
         private const val TAG = "HapticEventGen"
 
-        /** 最小振动幅度 (VibrationEffect 的 amplitude 范围 1-255，0=不振动) */
+        // ── 物理极限（不随设备变化） ──
         private const val MIN_AMPLITUDE = 1
-
-        /** 最大振动幅度 */
         private const val MAX_AMPLITUDE = 255
-
-        /** 静默阈值：低于此强度的信号将被忽略 */
-        private const val SILENCE_THRESHOLD = 0.02f
-
-        /** Composition 中单个基元的最大时长（ms），防止单个事件过长导致延迟堆积 */
-        private const val MAX_PRIMITIVE_DURATION_MS = 50
-
-        /** 事件生成间隔上限（ms），对应最低可听频率 ~35 Hz */
-        private const val MAX_EVENT_INTERVAL_MS = 28
-
-        /** 事件生成间隔下限（ms），对应 ~300 Hz */
-        private const val MIN_EVENT_INTERVAL_MS = 3
-
-        /** 低频带权重（重击感） */
-        private const val SUB_WEIGHT = 0.7f
-
-        /** 中频带权重（节奏感） */
-        private const val MID_WEIGHT = 0.4f
-
-        /** 高频带权重（纹理感） */
-        private const val PRESENCE_WEIGHT = 0.25f
+        /** 累积能量上限，防止静音后第一帧爆发 */
+        private const val ENERGY_CAP = 1.5f
     }
 
+    // ── Vibrator 基础设施 ──
     private val vibrator: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
         vm.defaultVibrator
@@ -62,37 +45,44 @@ class HapticEventGenerator(context: Context) {
         context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
     }
 
-    /** 是否有硬件振动器 */
     val hasVibrator: Boolean = vibrator.hasVibrator()
 
-    /** 是否支持振幅控制 */
     private val hasAmplitudeControl: Boolean =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try {
-                vibrator.hasAmplitudeControl()
-            } catch (e: Exception) {
-                false
-            }
+            try { vibrator.hasAmplitudeControl() } catch (_: Exception) { false }
         } else false
 
-    /** 上一帧的时间戳，用于节流 */
+    private val isApi29Plus = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+    private val isApi26Plus = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+
+    // ── 状态 ──
     private var lastEventTimeMs = 0L
-
-    /** 事件计数器，用于周期性日志 */
+    private var accumulatedEnergy = 0f
     private var eventCounter = 0L
+    private var silentFrameCount = 0  // 连续静默帧计数，用于微振填充
+    private var frameEntryLatency = 0L // 最近一帧从DSP到这里的延迟(ms)
 
-    /** 主开关 */
-    @Volatile
-    var isEnabled = true
+    /** Public read-only access for telemetry */
+    val currentFrameLatencyMs: Long get() = frameEntryLatency
+
+    @Volatile var isEnabled = true
+
+    /** 外部注入的整体强度倍率。1.0=标准，2.0=双倍。由预设档位设置。 */
+    @Volatile var boostLevel: Float = 1.0f
+
+    /** UI 日志回调：将事件数据推送到前端事件监视器 */
+    var logListener: ((String) -> Unit)? = null
+
+    // ── 预定义效果缓存 ──
+    private val cachedHeavyClick: VibrationEffect? =
+        if (isApi29Plus) VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK) else null
+    private val cachedClick: VibrationEffect? =
+        if (isApi29Plus) VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK) else null
+    private val cachedTick: VibrationEffect? =
+        if (isApi29Plus) VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK) else null
 
     /**
      * 将 DSP 输出转化为触觉事件并播放。
-     *
-     * @param sub       Sub-bass 频段强度 (0.0 .. ~2.0，经 DRC 后)
-     * @param mid       Mid-bass 频段强度
-     * @param presence  Presence 频段强度
-     * @param pitch     检测到的基频（Hz），用于动态调整事件间隔
-     * @param currentTimeMs 当前时间戳 (SystemClock.elapsedRealtime)
      */
     fun generateAndPlay(
         sub: Float,
@@ -103,102 +93,140 @@ class HapticEventGenerator(context: Context) {
     ) {
         if (!isEnabled || !hasVibrator) return
 
-        // 加权合并为总强度
-        val blendedIntensity = (sub * SUB_WEIGHT) + (mid * MID_WEIGHT) + (presence * PRESENCE_WEIGHT)
+        // ── 延迟测量 ──
+        val now = android.os.SystemClock.elapsedRealtime()
+        frameEntryLatency = (now - currentTimeMs).coerceAtLeast(0L)
 
-        // 静默跳过
-        if (blendedIntensity < SILENCE_THRESHOLD) return
+        // ── Step 1: 加权混合 ──
+        val blendedIntensity = (sub * profile.subWeight * profile.bassBoost) + (mid * profile.midWeight) + (presence * profile.presenceWeight)
 
-        // 基于音高计算事件间隔（动态速率）
-        val eventIntervalMs = if (pitch > 0f && pitch < 500f) {
-            (1000f / pitch).coerceIn(
-                MIN_EVENT_INTERVAL_MS.toFloat(),
-                MAX_EVENT_INTERVAL_MS.toFloat()
-            ).toLong()
-        } else {
-            MAX_EVENT_INTERVAL_MS.toLong()
+        if (blendedIntensity < profile.silenceThreshold) {
+            // 静默帧缓慢泄放累积能量
+            accumulatedEnergy = (accumulatedEnergy * 0.9f).coerceAtMost(ENERGY_CAP)
+            // ── 微振填充: 马达不闲着 ──
+            silentFrameCount++
+            if (silentFrameCount >= profile.fillerFrameThreshold && hasAmplitudeControl) {
+                try { vibrator.vibrate(VibrationEffect.createOneShot(profile.fillerDurationMs, profile.fillerAmplitude)) }
+                catch (_: Exception) {}
+                silentFrameCount = 0
+            }
+            return
         }
+        silentFrameCount = 0  // 有信号，重置填充计数
 
-        // 节流：避免在短时间内生成过多事件
-        if (currentTimeMs - lastEventTimeMs < eventIntervalMs) return
+        // ── Step 2: 能量累积触发 ──
+        accumulatedEnergy = (accumulatedEnergy + blendedIntensity).coerceAtMost(ENERGY_CAP)
+        if (accumulatedEnergy < profile.energyThreshold) return
+        accumulatedEnergy = 0f
+
+        // ── Step 3: 音高间隔硬上限保护 ──
+        val pitchIntervalMs = if (pitch > 0f && pitch < 500f) {
+            (1000f / pitch).coerceIn(profile.minIntervalMs.toFloat(), profile.maxIntervalMs.toFloat()).toLong()
+        } else profile.maxIntervalMs
+
+        if (currentTimeMs - lastEventTimeMs < pitchIntervalMs) return
         lastEventTimeMs = currentTimeMs
 
-        // 将强度映射为振动幅度 (1-255)
+        // ── Step 4: 振幅增强 (sqrt幂律 + 保底 + boostLevel) ──
+        val boostedIntensity = blendedIntensity.pow(profile.boostExponent) * boostLevel
         val targetAmplitude = if (hasAmplitudeControl) {
-            (blendedIntensity * MAX_AMPLITUDE).toInt().coerceIn(MIN_AMPLITUDE, MAX_AMPLITUDE)
+            (boostedIntensity * MAX_AMPLITUDE).toInt()
+                .coerceAtLeast(profile.minGuaranteedAmplitude)
+                .coerceAtMost(MAX_AMPLITUDE)
         } else {
-            // 无振幅控制时回退到默认强度（255 = 全振幅）
             VibrationEffect.DEFAULT_AMPLITUDE
         }
 
-        // 根据频段特征选择振动模式
-        val isSubDominant = (sub * SUB_WEIGHT) > (mid * MID_WEIGHT) &&
-                (sub * SUB_WEIGHT) > (presence * PRESENCE_WEIGHT)
-        val isPresenceDominant = (presence * PRESENCE_WEIGHT) > (sub * SUB_WEIGHT) &&
-                (presence * PRESENCE_WEIGHT) > (mid * MID_WEIGHT)
+        // ── Step 5: 频段判定 ──
+        val subPower = sub * profile.subWeight * profile.bassBoost
+        val midPower = mid * profile.midWeight
+        val presPower = presence * profile.presenceWeight
+        val isSubDominant = subPower >= midPower && subPower >= presPower
+        val isPresenceDominant = presPower > subPower && presPower > midPower
 
+        // ── Step 6: 振动模式分层 ──
         try {
             when {
-                // 高频主导 → 细腻纹理：极短脉冲
-                isPresenceDominant && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> {
-                    val effect = VibrationEffect.createOneShot(
-                        MAX_PRIMITIVE_DURATION_MS.coerceAtMost(15).toLong(),
-                        targetAmplitude
-                    )
-                    vibrator.vibrate(effect)
+                // 低频主导 → 衰减Waveform（重击+余震包络）
+                isSubDominant && isApi26Plus -> {
+                    vibrator.vibrate(buildSubImpactWaveform(targetAmplitude, blendedIntensity))
                 }
-                // 低频主导 → 沉重打击：较长但可控的脉冲
-                isSubDominant && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> {
-                    val durationMs = (blendedIntensity * MAX_PRIMITIVE_DURATION_MS).toLong()
-                        .coerceIn(10, MAX_PRIMITIVE_DURATION_MS.toLong())
-                    val effect = VibrationEffect.createOneShot(durationMs, targetAmplitude)
-                    vibrator.vibrate(effect)
+                // 中频主导 → HEAVY_CLICK（强节奏感）
+                !isPresenceDominant && isApi29Plus -> {
+                    vibrator.vibrate(cachedHeavyClick)
                 }
-                // 中频主导 / 混合 → 标准一击
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> {
-                    val effect = VibrationEffect.createOneShot(
-                        MAX_PRIMITIVE_DURATION_MS.coerceAtMost(25).toLong(),
-                        targetAmplitude
-                    )
-                    vibrator.vibrate(effect)
+                // 高频主导 → TICK（细腻纹理）
+                isPresenceDominant && isApi29Plus -> {
+                    vibrator.vibrate(cachedTick)
                 }
-                // API < 26 回退：仅时长振动
+                // API 26-28 回退
+                isApi26Plus -> {
+                    val dur = when {
+                        isSubDominant -> (boostedIntensity * 45f).toLong().coerceIn(15, 50)
+                        isPresenceDominant -> 10L
+                        else -> 20L
+                    }
+                    vibrator.vibrate(VibrationEffect.createOneShot(dur, targetAmplitude))
+                }
+                // API < 26 最简回退
                 else -> {
                     @Suppress("DEPRECATION")
-                    vibrator.vibrate(MAX_PRIMITIVE_DURATION_MS.coerceAtMost(25).toLong())
+                    vibrator.vibrate(if (isSubDominant) 40L else 15L)
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Vibration effect failed: ${e.message}")
         }
 
-        // 周期性日志
+        // ── 周期性日志 → 事件监视器 ──
         eventCounter++
-        if (eventCounter % 60L == 0L) {
-            Log.d(
-                TAG,
-                "Haptic event #$eventCounter | blend=$blendedIntensity | amp=$targetAmplitude | " +
-                "pitch=$pitch Hz | interval=${eventIntervalMs}ms | " +
-                "sub-dom=$isSubDominant pres-dom=$isPresenceDominant"
+        if (eventCounter % 20L == 0L) {
+            val modeStr = when {
+                isSubDominant -> "SUB-Wave"
+                isPresenceDominant -> "PRES-Tick"
+                else -> "MID-Click"
+            }
+            logListener?.invoke(
+                "#%d | %s amp=%d blend=%.2f boost=%.2f F0=%.0fHz Δ=%dms"
+                    .format(eventCounter, modeStr, targetAmplitude,
+                        blendedIntensity, boostLevel, pitch, frameEntryLatency)
             )
         }
     }
 
     /**
-     * 立即停止所有振动并重置状态。
+     * 构建低频衰减波形：模拟重击后的余震衰减包络。
+     * 包络: 高振幅 → 暂停 → 中振幅 → 暂停 → 余韵
      */
-    fun cancel() {
-        try {
-            vibrator.cancel()
-        } catch (e: Exception) {
-            Log.w(TAG, "Cancel vibration failed: ${e.message}")
-        }
-        lastEventTimeMs = 0L
+    private fun buildSubImpactWaveform(amplitude: Int, intensity: Float): VibrationEffect {
+        val amp1 = amplitude
+        val amp2 = (amplitude * profile.subAmpDecay2).toInt().coerceAtLeast(profile.minGuaranteedAmplitude / 2)
+        val amp3 = (amplitude * profile.subAmpDecay3).toInt().coerceAtLeast(MIN_AMPLITUDE)
+
+        // 强度越高，各阶段越长（在设备预设范围内线性插值）
+        val dur1 = (profile.subDur1Min + intensity * (profile.subDur1Max - profile.subDur1Min)).toLong()
+            .coerceIn(profile.subDur1Min, profile.subDur1Max)
+        val gap1 = (profile.subGap1Min + intensity * (profile.subGap1Max - profile.subGap1Min)).toLong()
+            .coerceIn(profile.subGap1Min, profile.subGap1Max)
+        val dur2 = (profile.subDur2Min + intensity * (profile.subDur2Max - profile.subDur2Min)).toLong()
+            .coerceIn(profile.subDur2Min, profile.subDur2Max)
+        val gap2 = (profile.subGap2Min + intensity * (profile.subGap2Max - profile.subGap2Min)).toLong()
+            .coerceIn(profile.subGap2Min, profile.subGap2Max)
+        val dur3 = (profile.subDur3Min + intensity * (profile.subDur3Max - profile.subDur3Min)).toLong()
+            .coerceIn(profile.subDur3Min, profile.subDur3Max)
+
+        // timings: [wait, sustain0, wait, sustain1, wait, sustain2]
+        val timings = longArrayOf(0, dur1, gap1, dur2, gap2, dur3)
+        val amps = intArrayOf(amp1, amp2, amp3)
+        return VibrationEffect.createWaveform(timings, amps, -1)
     }
 
-    /**
-     * 释放资源。
-     */
+    fun cancel() {
+        try { vibrator.cancel() } catch (_: Exception) {}
+        lastEventTimeMs = 0L
+        accumulatedEnergy = 0f
+    }
+
     fun release() {
         cancel()
         eventCounter = 0L

@@ -1,1 +1,1 @@
-大部分bug已修
+fix bug

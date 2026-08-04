@@ -45,6 +45,9 @@ data class DeviceProfile(
     val presenceWeight: Float = 0.4f,
 
     val bassBoost: Float = 1.0f,
+
+    // v1.9: Actuator physical model for LRA simulation
+    val actuator: ActuatorProfile = ActuatorProfile.DEFAULT,
 ) {
     companion object {
 
@@ -70,6 +73,7 @@ data class DeviceProfile(
             fillerDurationMs = 4L,
             fillerAmplitude = 18,
             bassBoost = 1.2f,
+            actuator = ActuatorProfile.DEFAULT,
         )
 
         val XIAOMI13_XAXIS = DeviceProfile(
@@ -93,6 +97,7 @@ data class DeviceProfile(
             fillerFrameThreshold = 6,
             fillerDurationMs = 2L,
             fillerAmplitude = 1,
+            actuator = ActuatorProfile.XIAOMI_13_XAXIS,
         )
 
         val XIAOMI10_XAXIS = DeviceProfile(
@@ -117,6 +122,7 @@ data class DeviceProfile(
             fillerDurationMs = 6L,
             fillerAmplitude = 35,
             bassBoost = 1.2f,
+            actuator = ActuatorProfile.XIAOMI_10_0809,
         )
 
         val REDMI_K80U_0809 = DeviceProfile(
@@ -144,6 +150,7 @@ data class DeviceProfile(
             midWeight = 0.55f,
             presenceWeight = 0.35f,
             bassBoost = 1.30f,
+            actuator = ActuatorProfile.REDMI_K80U_ZAXIS,
         )
 
         val FLAGSHIP_XAXIS = DeviceProfile(
@@ -165,6 +172,7 @@ data class DeviceProfile(
             fillerFrameThreshold = 5,
             fillerDurationMs = 2L,
             fillerAmplitude = 4,
+            actuator = ActuatorProfile.FLAGSHIP_XAXIS,
         )
     }
 }

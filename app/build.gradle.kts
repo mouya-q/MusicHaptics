@@ -12,8 +12,8 @@ android {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
         targetSdk = 34
-        versionCode = 350
-        versionName = "3.5.0"
+        versionCode = 360
+        versionName = "3.6.0"
     }
 
     buildFeatures {

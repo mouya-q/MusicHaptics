@@ -119,7 +119,7 @@ class HapticEngine(
             runContinuousHapticLoop()
         }
 
-        val readyMsg = "[System Ready] v3.5 Haptic Engine: ${if (nativeBridge.isLoaded) "NATIVE ACTIVE" else "FALLBACK"} | Device: ${hapticEventGenerator.profile.name} | C++ 4-Layer: Beat+Bass+Texture(Noise)+Melody | Semantic Bridge: ON | Fusion: Dual-Track (Semantic+Continuous)"
+        val readyMsg = "[System Ready] v3.6 Haptic Engine: ${if (nativeBridge.isLoaded) "NATIVE ACTIVE" else "FALLBACK"} | Device: ${hapticEventGenerator.profile.name} | Actuator: ${hapticEventGenerator.profile.actuator.resonanceFreq.toInt()}Hz/${hapticEventGenerator.profile.actuator.responseTimeMs.toInt()}ms | C++ 4-Layer: Beat+Bass+Texture(Noise)+Melody | Semantic Bridge: ON | Fusion: Dual-Track (Semantic+Continuous)"
         Log.i(TAG, readyMsg)
         logCallback?.onLog(readyMsg)
         LogBroadcaster.sendLog(context, readyMsg)
@@ -343,7 +343,7 @@ class HapticEngine(
                                     longVibeAmp > 0 -> "LONG"
                                     else -> "SILENCE"
                                 }
-                                Log.i(TAG, "▶ FUSION v3.5 | mode=$fusionMode prim=$primitive | samples=$sampleCount amps=[$ampStr] max=${frameBuffer.maxOrNull()?.toInt() ?: 0} smooth=$directDriveSmoothAmp bodyScale=$bodyAmpScale")
+                                Log.i(TAG, "▶ FUSION v3.6 | mode=$fusionMode prim=$primitive | samples=$sampleCount amps=[$ampStr] max=${frameBuffer.maxOrNull()?.toInt() ?: 0} smooth=$directDriveSmoothAmp bodyScale=$bodyAmpScale")
                             }
                         }
                     } else {
@@ -378,7 +378,7 @@ class HapticEngine(
                     val thermalGain = telemetryData.thermalAttenuationFactor
 
                     val logMsg = String.format(
-                        "DSP v3.5 [Fusion] | S:%.2f M:%.2f T:%.2f | F0:%.0fHz samples=%d smooth=%.2f Δ=%dms",
+                        "DSP v3.6 [Fusion] | S:%.2f M:%.2f T:%.2f | F0:%.0fHz samples=%d smooth=%.2f Δ=%dms",
                         subLevel, midLevel, texLevel, f0, sampleCount, directDriveSmoothAmp, latency
                     )
                     logCallback?.onLog(logMsg)

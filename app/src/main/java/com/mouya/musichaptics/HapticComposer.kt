@@ -70,6 +70,13 @@ class HapticComposer(
         const val FM_MOD_RATE = 0.5f
     }
 
+    // v1.9: LRA physical parameters from ActuatorProfile (per-device)
+    private val lraF0: Float = profile.actuator.resonanceFreq
+    private val lraDamping: Float = profile.actuator.dampingRatio
+    private val lraW0: Float = profile.actuator.angularFreq
+    private val lraMaxVoltage: Float = 3.6f  // Max drive voltage (hardware constant)
+    private val lraResponseTimeMs: Float = profile.actuator.responseTimeMs
+
     private var prevFrameEnergy = 0f
     private var prevFrameSpectrum = FloatArray(128)
     private val reusableFrameSpectrum = FloatArray(128)
@@ -134,9 +141,17 @@ class HapticComposer(
     private var waveBufferIndex = 0
     private var waveBufferCount = 0
 
+    // v1.9: LRA physical state — declared before init block
+    private var lraPhase = 0f
+    private var lraPhaseVelocity = 0f
+    private var lraDisplacement = 0f
+    private var lraVelocity = 0f
+    private var lraLastTimeMs = 0L
+
     init {
         loadPreferences()
-        Log.i(TAG, "HapticComposer v3.5 initialized | Persona=${currentPersona.name} | KeyStrike=ON | ADSR=ON | Thermal=ON | LRA(f0=${LRA_F0}Hz Q=${LRA_Q} lat=${lraStartLatencyMs}ms)")
+        lraPhaseVelocity = lraW0  // Initialize phase velocity from actuator resonance
+        Log.i(TAG, "HapticComposer v3.6 initialized | Persona=${currentPersona.name} | KeyStrike=ON | ADSR=ON(actuatorCompensated) | Thermal=ON | LRA(f0=${lraF0}Hz ζ=${lraDamping} resp=${lraResponseTimeMs}ms lat=${lraStartLatencyMs}ms)")
     }
 
     private fun loadPreferences() {
@@ -445,12 +460,6 @@ class HapticComposer(
         return Pair(weights, semanticType)
     }
 
-    private var lraPhase = 0f
-    private var lraPhaseVelocity = LRA_W0
-    private var lraDisplacement = 0f
-    private var lraVelocity = 0f
-    private var lraLastTimeMs = 0L
-
     private var adsrEnvelopeValue = 0f
     private var adsrState = 0
     private var adsrTargetDrive = 0f
@@ -485,6 +494,14 @@ class HapticComposer(
         val triggerAttack = isTransient || isBeat || isKeyStrike
         val triggerRelease = !triggerAttack && targetDrive < 0.03f
 
+        // v1.9: Actuator-aware ADSR — scale attack/decay/release taus
+        // based on physical response time. Slow actuators (high responseTimeMs)
+        // need longer taus to avoid driving the LRA faster than it can physically move.
+        val actuatorScale = (lraResponseTimeMs / 4.5f).coerceIn(0.8f, 3.0f)  // 4.5ms = reference fast LRA
+        val attackTau = ADSR_ATTACK_TAU * actuatorScale
+        val decayTau = ADSR_DECAY_TAU * actuatorScale
+        val releaseTau = ADSR_RELEASE_TAU * actuatorScale
+
         when (adsrState) {
             0 -> {
                 if (triggerAttack) {
@@ -493,7 +510,7 @@ class HapticComposer(
                 }
             }
             1 -> {
-                val attackAlpha = 1f - exp(-dt / ADSR_ATTACK_TAU)
+                val attackAlpha = 1f - exp(-dt / attackTau)
                 adsrEnvelopeValue += (1f - adsrEnvelopeValue) * attackAlpha
                 if (adsrEnvelopeValue >= 0.95f) {
                     adsrEnvelopeValue = 1f
@@ -501,7 +518,7 @@ class HapticComposer(
                 }
             }
             2 -> {
-                val decayAlpha = exp(-dt / ADSR_DECAY_TAU)
+                val decayAlpha = exp(-dt / decayTau)
                 adsrEnvelopeValue = ADSR_SUSTAIN_LEVEL + (adsrEnvelopeValue - ADSR_SUSTAIN_LEVEL) * decayAlpha
                 if (abs(adsrEnvelopeValue - ADSR_SUSTAIN_LEVEL) < 0.02f) {
                     adsrEnvelopeValue = ADSR_SUSTAIN_LEVEL
@@ -517,7 +534,7 @@ class HapticComposer(
                 }
             }
             4 -> {
-                val releaseAlpha = exp(-dt / ADSR_RELEASE_TAU)
+                val releaseAlpha = exp(-dt / releaseTau)
                 adsrEnvelopeValue *= releaseAlpha
                 if (adsrEnvelopeValue <= 0.001f) {
                     adsrEnvelopeValue = 0f
@@ -537,23 +554,26 @@ class HapticComposer(
 
         if (triggerAttack && (isKeyStrike || isBeat || isTransient)) {
             val eventFreq = when {
-                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.SUB_STRIKE -> LRA_F0 * 0.85f
-                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.KICK_DRUM -> LRA_F0 * 1.05f
-                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.SNARE_ACCENT -> LRA_F0 * 1.2f
-                isBeat -> LRA_F0
-                else -> LRA_F0
+                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.SUB_STRIKE -> lraF0 * 0.85f
+                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.KICK_DRUM -> lraF0 * 1.05f
+                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.SNARE_ACCENT -> lraF0 * 1.2f
+                isBeat -> lraF0
+                else -> lraF0
             }
 
             val eventAmp = (adsrEnvelopeValue * semanticGain).coerceAtMost(1.5f)
+            // v1.9: For slow actuators (high responseTimeMs), extend impact duration
+            // to give the LRA enough time to reach full displacement.
+            val responseScale = (lraResponseTimeMs / 4.5f).coerceIn(1.0f, 2.5f)  // 4.5ms = reference
             val eventDurMs = when {
-                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.SUB_STRIKE -> 180L
-                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.KICK_DRUM -> 80L
-                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.SNARE_ACCENT -> 120L
-                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.RHYTHM_PATTERN -> 200L
-                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.BASS_GHOST -> 300L
-                isBeat -> 60L
-                isTransient -> 40L
-                else -> 30L
+                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.SUB_STRIKE -> (180L * responseScale).toLong()
+                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.KICK_DRUM -> (80L * responseScale).toLong()
+                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.SNARE_ACCENT -> (120L * responseScale).toLong()
+                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.RHYTHM_PATTERN -> (200L * responseScale).toLong()
+                isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.BASS_GHOST -> (300L * responseScale).toLong()
+                isBeat -> (60L * responseScale).toLong()
+                isTransient -> (40L * responseScale).toLong()
+                else -> (30L * responseScale).toLong()
             }
 
             val alignedPhase = (lraPhase + (Math.random() * 0.1 - 0.05).toFloat()) % (2f * Math.PI.toFloat())
@@ -588,7 +608,7 @@ class HapticComposer(
                 val instFreq = event.frequency * (1f + fmMod)
                 val instPhase = (event.phase + instFreq * 2f * Math.PI.toFloat() * (ageMs / 1000f)) % (2f * Math.PI.toFloat())
 
-                val force = event.amplitude * eventEnv * cos(instPhase) * LRA_MAX_VOLTAGE
+                val force = event.amplitude * eventEnv * cos(instPhase) * lraMaxVoltage
                 totalForce += force
 
                 activeEvents.add(event)
@@ -598,14 +618,14 @@ class HapticComposer(
         pendingEvents.addAll(activeEvents)
 
         val invMass = 1f
-        val dampingTerm = 2f * LRA_ZETA * LRA_W0 * lraVelocity
-        val springTerm = LRA_W0 * LRA_W0 * lraDisplacement
+        val dampingTerm = 2f * lraDamping * lraW0 * lraVelocity
+        val springTerm = lraW0 * lraW0 * lraDisplacement
         val acceleration = (totalForce * invMass - dampingTerm - springTerm)
 
         lraVelocity += acceleration * dt
         lraDisplacement += lraVelocity * dt
 
-        lraPhaseVelocity = LRA_W0 * (1f + FM_MOD_INDEX * sin(FM_MOD_RATE * lraPhase))
+        lraPhaseVelocity = lraW0 * (1f + FM_MOD_INDEX * sin(FM_MOD_RATE * lraPhase))
         lraPhase = (lraPhase + lraPhaseVelocity * dt) % (2f * Math.PI.toFloat())
 
         val lraDriveOutput = (lraDisplacement.absoluteValue * 50f).coerceIn(0f, 2f)

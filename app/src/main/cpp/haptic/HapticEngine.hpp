@@ -105,6 +105,28 @@ public:
 };
 
 // ════════════════════════════════════════════════════════════════
+//  Haptic Telemetry — structured output for Kotlin layer
+//  Accessed via direct ByteBuffer (zero-copy, no FloatArray)
+// ════════════════════════════════════════════════════════════════
+struct HapticTelemetry {
+    // DSP band energies (pre-gain, pre-thermal)
+    float sub;            // Sub-bass RMS
+    float mid;            // Mid-bass RMS
+    float texture;        // Texture RMS
+    float pitch;          // F0 estimate
+
+    // Thermal model
+    float temperature;    // Coil temperature (°C)
+    float thermalGain;    // Thermal safety gain (0-1)
+
+    // Beat/Onset (v1.7 — Semantic Bridge)
+    float beatStrength;   // Beat envelope intensity (0-1, decays after onset)
+    float onsetFlag;      // Onset detected this frame (1.0=yes, 0.0=no)
+    float beatIntervalMs; // Estimated inter-beat interval (ms)
+    float beatConfidence; // Beat detection confidence (0-1)
+};
+
+// ════════════════════════════════════════════════════════════════
 //  Continuous Haptic Synthesis Engine
 //  Five-layer model: Beat + Bass + Texture + Melody + Emotion
 //  Output: continuous amplitude stream (0-255) for VibrationEffect
@@ -146,6 +168,13 @@ private:
     float prevSubRms_ = 0.0f;
     int onsetRefractoryCounter_ = 1000;  // Blocks since last onset (start high = ready)
 
+    // v1.7: Beat interval tracking for Kotlin Composer
+    int frameCounter_ = 0;           // Total frames processed
+    int lastOnsetFrame_ = -1000;     // Frame index of last onset
+    float beatIntervalFrames_ = 0.0f; // Smoothed inter-onset interval (in frames)
+    float beatConfidence_ = 0.0f;    // Confidence: how regular the beats are
+    bool onsetThisFrame_ = false;    // Flag for current frame
+
     // ──────────────────────────────────────────────
     //  Layer 2: BASS BODY (subtle floor only)
     //  Very faint sustained pressure — capped low, never dominant
@@ -180,6 +209,9 @@ private:
     float lastBeatLayer_ = 0.0f;
     float lastBassLayer_ = 0.0f;
     float lastMelodyLayer_ = 0.0f;
+
+    // v1.7: ValueNoise for texture layer (activated in composeHapticLayer)
+    ValueNoise1D textureNoise_;
 
 public:
     HapticEngine() {
@@ -249,11 +281,14 @@ public:
     // ══════════════════════════════════════════════
     //  Main audio processing block
     //  Performs: crossover → RMS → pitch → thermal → 5-layer compose
-    //  Outputs telemetry to outTelemetry[6]
+    //  Outputs telemetry to outTelemetry (10 floats, v1.7)
     //  Stores continuous haptic amplitude to ring buffer
     // ══════════════════════════════════════════════
     void processAudioBlock(const float* input, int size, float* outTelemetry) {
         if (size > 256) size = 256;
+
+        // Reset per-frame onset flag
+        onsetThisFrame_ = false;
 
         // 1. Three-band crossover
         for (int i = 0; i < size; ++i) {
@@ -294,26 +329,35 @@ public:
             thermalGain = 0.5f * (1.0f + cosf(ratio * M_PI));
         }
 
-        // 6. Write telemetry (backward-compatible)
+        // ════════════════════════════════════════════
+        //  6. Five-Layer Continuous Haptic Composition
+        // ════════════════════════════════════════════
+        composeHapticLayer(subRms, midRms, textureRms, pitch, thermalGain, amp, dt);
+
+        // 7. Write telemetry (10 floats — backward compatible with first 6)
         outTelemetry[0] = subRms * amp * thermalGain;
         outTelemetry[1] = midRms * amp * thermalGain;
         outTelemetry[2] = textureRms * amp * thermalGain;
         outTelemetry[3] = pitch;
         outTelemetry[4] = coilTemp_;
         outTelemetry[5] = thermalGain;
-
-        // ════════════════════════════════════════════
-        //  7. Five-Layer Continuous Haptic Composition
-        // ════════════════════════════════════════════
-        composeHapticLayer(subRms, midRms, textureRms, pitch, thermalGain, amp, dt);
+        // v1.7 Semantic Bridge: beat/onset info
+        outTelemetry[6] = beatEnvelope_;           // beatStrength (0-1)
+        outTelemetry[7] = onsetThisFrame_ ? 1.0f : 0.0f; // onsetFlag
+        // Convert frame interval to milliseconds
+        float frameDurationMs = dt * 1000.0f;
+        outTelemetry[8] = beatIntervalFrames_ * frameDurationMs; // beatIntervalMs
+        outTelemetry[9] = beatConfidence_;         // beatConfidence
 
         prevSubRms_ = subRms;
+        frameCounter_++;
     }
 
     // ══════════════════════════════════════════════
     //  Haptic Composer — Event-Driven Transient Model
     //  Onset detection triggers sharp ADSR envelope.
     //  Between hits: near-zero.  On hit: fast attack → punchy decay.
+    //  v1.7: Beat interval tracking + ValueNoise texture modulation
     //  Output: single amplitude sample (0-255) pushed to ring buffer
     // ══════════════════════════════════════════════
     void composeHapticLayer(float subRms, float midRms, float textureRms,
@@ -345,6 +389,23 @@ public:
             float triggerLevel = std::clamp(0.4f + hitStrength * 0.35f, 0.4f, 1.0f);
             beatEnvelope_ = std::max(beatEnvelope_, triggerLevel);
             onsetRefractoryCounter_ = 0;
+
+            // v1.7: Track beat interval for Kotlin Composer
+            onsetThisFrame_ = true;
+            if (lastOnsetFrame_ > 0 && frameCounter_ > lastOnsetFrame_) {
+                int interval = frameCounter_ - lastOnsetFrame_;
+                if (beatIntervalFrames_ < 1.0f) {
+                    beatIntervalFrames_ = static_cast<float>(interval);
+                } else {
+                    // EMA smoothing: adapt slowly
+                    beatIntervalFrames_ = beatIntervalFrames_ * 0.7f + interval * 0.3f;
+                }
+                // Confidence: higher if intervals are consistent
+                float expected = beatIntervalFrames_;
+                float deviation = std::abs(static_cast<float>(interval) - expected) / (expected + 1.0f);
+                beatConfidence_ = std::clamp(1.0f - deviation * 2.0f, 0.0f, 1.0f);
+            }
+            lastOnsetFrame_ = frameCounter_;
         }
         onsetRefractoryCounter_++;
 
@@ -367,14 +428,23 @@ public:
         melodySmoothed_ += 0.15f * (melodyRaw - melodySmoothed_);
         float melodyLayer = std::clamp(melodySmoothed_, 0.0f, 0.10f);
 
+        // ─── TEXTURE: ValueNoise-modulated micro-vibration ───
+        // v1.7: ValueNoise1D now enters the main synthesis chain.
+        // Instead of flat textureRms * weight, noise modulation gives
+        // a "granular" quality to high-frequency texture layer.
+        // Modulation capped at ±15% to avoid "electric current" feel on bass-heavy tracks.
+        float noiseVal = textureNoise_.next(dt * 8.0f);  // 8Hz advance rate
+        float textureMod = 0.85f + 0.15f * noiseVal;      // 0.85–1.0 range
+        float textureLayer = textureRms * 0.15f * textureMod;
+
         // ─── COMPOSITE: beat-dominant with subtle layers ───
-        // Beat is the star. Bass/Melody are faint garnish.
-        // Weights adjusted for Kugou: Beat 0.85 (up from 0.80),
-        // Bass 0.08 (down from 0.12), Melody 0.07 (same).
-        // This increases transient punch while reducing sustained rumble.
-        float composite = beatLayer   * 0.85f
+        // Beat is the star. Bass/Melody/Texture are faint garnish.
+        // v1.7: Texture layer now uses ValueNoise modulation.
+        // Weights: Beat 0.80, Bass 0.08, Texture 0.07, Melody 0.05
+        float composite = beatLayer   * 0.80f
                         + bassLayer    * 0.08f
-                        + melodyLayer  * 0.07f;
+                        + textureLayer * 0.07f
+                        + melodyLayer  * 0.05f;
 
         // ─── Apply thermal safety + user gain ───
         composite *= thermalGain * userAmp;
@@ -443,6 +513,13 @@ public:
         std::memset(energyHistory_, 0, sizeof(energyHistory_));
         lastComposedAmp_ = 0.0f;
         lastComposite_ = 0.0f;
+        // v1.7: Reset beat tracking state
+        frameCounter_ = 0;
+        lastOnsetFrame_ = -1000;
+        beatIntervalFrames_ = 0.0f;
+        beatConfidence_ = 0.0f;
+        onsetThisFrame_ = false;
+        textureNoise_.reset();
     }
 
     // Telemetry accessors
@@ -450,6 +527,10 @@ public:
     float getLastBeatLayer() const { return lastBeatLayer_; }
     float getLastBassLayer() const { return lastBassLayer_; }
     float getLastMelodyLayer() const { return lastMelodyLayer_; }
+    float getLastComposite() const { return lastComposite_; }
+    float getBeatEnvelope() const { return beatEnvelope_; }
+    float getBeatIntervalMs() const { return beatIntervalFrames_ * (256.0f / sampleRate_) * 1000.0f; }
+    float getBeatConfidence() const { return beatConfidence_; }
 };
 
 } // namespace haptic

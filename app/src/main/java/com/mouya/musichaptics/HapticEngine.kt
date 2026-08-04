@@ -70,7 +70,7 @@ class HapticEngine(
     }
     private val floatPcmView: FloatBuffer = directPcmBuffer.asFloatBuffer()
 
-    private val nativeTelemetryResult = FloatArray(6)
+    private val nativeTelemetryResult = FloatArray(10)
 
     val hapticEventGenerator = HapticEventGenerator(context, detectDeviceProfile())
 
@@ -96,6 +96,17 @@ class HapticEngine(
     // === Continuous Waveform State ===
     @Volatile private var directDriveSmoothAmp = 0f  // Smoothed amplitude for telemetry display
 
+    // ══════════════════════════════════════════════════════════════════
+    // v1.8 Haptic Fusion: Semantic primitive bridge
+    // The Composer produces HapticCommands at ~50Hz. The latest command
+    // is stored here and consumed by runContinuousHapticLoop at 40ms intervals.
+    // Primitive events (Impact/Pulse/Texture) are overlaid on top of the
+    // C++ continuous waveform — not replacing it.
+    // ══════════════════════════════════════════════════════════════════
+    @Volatile private var pendingPrimitive: HapticPrimitive? = null
+    @Volatile private var pendingSemanticLabel: String = "NONE"
+    @Volatile private var pendingPrimitiveTime: Long = 0L
+
     val telemetryData = TelemetryMonitor()
 
     // Channels and DspFrameData removed — C++ 5-layer synthesizer handles all synthesis internally
@@ -108,7 +119,7 @@ class HapticEngine(
             runContinuousHapticLoop()
         }
 
-        val readyMsg = "[System Ready] Continuous Haptic Engine: ${if (nativeBridge.isLoaded) "ACTIVE" else "FALLBACK"} | Device: ${hapticEventGenerator.profile.name} | 5-Layer Composer: C++ Native | Mode: Continuous Waveform"
+        val readyMsg = "[System Ready] v3.5 Haptic Engine: ${if (nativeBridge.isLoaded) "NATIVE ACTIVE" else "FALLBACK"} | Device: ${hapticEventGenerator.profile.name} | C++ 4-Layer: Beat+Bass+Texture(Noise)+Melody | Semantic Bridge: ON | Fusion: Dual-Track (Semantic+Continuous)"
         Log.i(TAG, readyMsg)
         logCallback?.onLog(readyMsg)
         LogBroadcaster.sendLog(context, readyMsg)
@@ -145,6 +156,10 @@ class HapticEngine(
         val kickRefractoryMs = 80L
         val shortTickRefractoryMs = 40L
 
+        // v1.8: Semantic primitive refractory — prevent double-firing
+        var lastSemanticImpactTime = 0L
+        val semanticImpactRefractoryMs = 60L   // Min 60ms between semantic impacts
+
         // ── Primitive classification thresholds (0-255 scale) ──
         val kickThreshold = 200         // >200 → KICK (EFFECT_HEAVY_CLICK)
         val longVibeThreshold = 100      // 100-200 → sustained vibration (createOneShot)
@@ -179,62 +194,119 @@ class HapticEngine(
                 if (hasAudioActivity && sampleCount > 0) {
                     val maxAmp = (0 until sampleCount).maxOfOrNull { frameBuffer[it] } ?: 0f
                     if (maxAmp > 2) {
-                        // ═══ Multi-Primitive Fusion ═══
-                        // Classify each sample into a primitive type and trigger accordingly.
-                        // Strategy: Mix discrete primitives (KICK, TICK) with continuous waveform body.
+                        // ═══ v1.8 Haptic Fusion ═══
+                        // Two-layer fusion: C++ continuous waveform + Composer semantic primitives
                         //
-                        // 1. If any sample > kickThreshold → fire KICK (EFFECT_HEAVY_CLICK) via HapticFeedbackEngine
-                        // 2. For sustained mid-range (100-200) → createOneShot as "body" vibration
-                        // 3. For low-range (<100) fire short TICK primitives for texture
-                        // 4. Fall back to waveform for the remainder to maintain continuity
+                        // Layer 1 (Continuous): C++ amplitude → waveform body (rumble/sustain)
+                        // Layer 2 (Semantic):   Composer primitive → discrete impact (punch/texture)
+                        //
+                        // Fusion strategy:
+                        // - If Composer has a pending semantic Impact primitive (KICK_DRUM/SUB_STRIKE/etc.),
+                        //   fire it as a discrete predefined effect, and REDUCE waveform body to 40%
+                        //   so the LRA isn't overloaded. This gives "punch + rumble" feel.
+                        // - If Composer has a Texture primitive, fire TICK and keep waveform at 80%.
+                        // - If no semantic primitive pending, fall back to amplitude-threshold
+                        //   classification (legacy v1.7 behavior).
 
                         val vib = hapticEventGenerator.getVibratorInstance()
                         if (vib != null && hapticEventGenerator.hasVibrator) {
+
+                            // ── Check for semantic primitive from Composer ──
+                            val semanticPrim = pendingPrimitive
+                            val semanticAge = frameStartTime - pendingPrimitiveTime
+                            val semanticFresh = semanticPrim != null && semanticAge < 100L  // 100ms freshness window
+
                             var kickTriggered = false
                             var longVibeAmp = 0
                             var shortTickTriggered = false
+                            var semanticFired = false
 
-                            // Classify samples
-                            for (i in 0 until sampleCount) {
-                                val amp = frameBuffer[i].toInt().coerceIn(0, 255)
-                                when {
-                                    amp > kickThreshold && !kickTriggered -> {
-                                        // KICK: fire once per pull cycle (debounced)
-                                        val timeSinceKick = frameStartTime - lastKickTime
-                                        if (timeSinceKick >= kickRefractoryMs) {
+                            if (semanticFresh) {
+                                // semanticPrim guaranteed non-null by semanticFresh check
+                                val prim = semanticPrim!!
+                                val timeSinceSemantic = frameStartTime - lastSemanticImpactTime
+                                if (timeSinceSemantic >= semanticImpactRefractoryMs) {
+                                    when (prim) {
+                                        is HapticPrimitive.Impact -> {
+                                            // Semantic impact: fire predefined KICK or IMPACT based on sharpness
+                                            val style = if (prim.sharpness > 0.7f && prim.intensity > 150) {
+                                                kickTriggered = true
+                                                lastKickTime = frameStartTime
+                                                HapticFeedbackEngine.HapticStyle.KICK
+                                            } else {
+                                                HapticFeedbackEngine.HapticStyle.IMPACT
+                                            }
+                                            feedbackEngine.perform(style)
+                                            semanticFired = true
+                                            lastSemanticImpactTime = frameStartTime
+                                        }
+                                        is HapticPrimitive.Pulse -> {
+                                            // Rhythmic pulse: fire as KICK (predefined heavy click)
+                                            // The repeat count is handled by natural beat recurrence
+                                            feedbackEngine.perform(HapticFeedbackEngine.HapticStyle.KICK)
                                             kickTriggered = true
                                             lastKickTime = frameStartTime
-                                            feedbackEngine.perform(HapticFeedbackEngine.HapticStyle.KICK)
+                                            semanticFired = true
+                                            lastSemanticImpactTime = frameStartTime
                                         }
-                                    }
-                                    amp >= longVibeThreshold -> {
-                                        // Long vibration: accumulate for body
-                                        longVibeAmp = maxOf(longVibeAmp, amp)
-                                        // Continue — waveform body will handle this
-                                    }
-                                    amp in 1..99 -> {
-                                        // Short tick: fire rapid TICK for texture
-                                        val timeSinceTick = frameStartTime - lastShortTickTime
-                                        if (timeSinceTick >= shortTickRefractoryMs && !shortTickTriggered) {
+                                        is HapticPrimitive.Texture -> {
+                                            // Texture: fire TICK for micro-texture
                                             shortTickTriggered = true
                                             lastShortTickTime = frameStartTime
+                                            semanticFired = true
+                                            lastSemanticImpactTime = frameStartTime
+                                        }
+                                        is HapticPrimitive.Wave -> {
+                                            // Wave: let continuous waveform handle it
+                                        }
+                                    }
+                                    // Clear pending primitive after consumption
+                                    pendingPrimitive = null
+                                }
+                            }
+
+                            // ── Amplitude-threshold fallback (when no semantic primitive) ──
+                            if (!semanticFired) {
+                                for (i in 0 until sampleCount) {
+                                    val amp = frameBuffer[i].toInt().coerceIn(0, 255)
+                                    when {
+                                        amp > kickThreshold && !kickTriggered -> {
+                                            val timeSinceKick = frameStartTime - lastKickTime
+                                            if (timeSinceKick >= kickRefractoryMs) {
+                                                kickTriggered = true
+                                                lastKickTime = frameStartTime
+                                                feedbackEngine.perform(HapticFeedbackEngine.HapticStyle.KICK)
+                                            }
+                                        }
+                                        amp >= longVibeThreshold -> {
+                                            longVibeAmp = maxOf(longVibeAmp, amp)
+                                        }
+                                        amp in 1..99 -> {
+                                            val timeSinceTick = frameStartTime - lastShortTickTime
+                                            if (timeSinceTick >= shortTickRefractoryMs && !shortTickTriggered) {
+                                                shortTickTriggered = true
+                                                lastShortTickTime = frameStartTime
+                                            }
                                         }
                                     }
                                 }
                             }
 
-                            // ── Waveform body: play a reduced-amplitude continuous waveform ──
-                            // For the "body" of the vibration, use waveform at 60% of the original amplitude
-                            // to avoid overwhelming the LRA when KICK is also firing.
-                            // This gives the "rumble" feel while KICK provides the "punch".
-                            if (!kickTriggered || longVibeAmp > 0) {
-                                val bodyAmpScale = if (kickTriggered) 0.5f else 1.0f
+                            // ── Waveform body: continuous layer with semantic-aware scaling ──
+                            // When a semantic Impact/KICK fired, reduce body to 40% to let the
+                            // discrete punch breathe. When Texture fired, keep at 80%.
+                            // Otherwise full amplitude.
+                            val bodyAmpScale = when {
+                                kickTriggered -> 0.4f    // Heavy impact: reduce body significantly
+                                shortTickTriggered -> 0.8f  // Texture: slight reduction
+                                else -> 1.0f
+                            }
+                            if (longVibeAmp > 0 || !kickTriggered) {
                                 val timings = LongArray(sampleCount) { sampleDurationMs }
                                 val amplitudes = IntArray(sampleCount) { idx ->
                                     (frameBuffer[idx] * bodyAmpScale).toInt().coerceIn(0, 255)
                                 }
 
-                                // Only play waveform if there's meaningful amplitude in the body
                                 val bodyMax = amplitudes.maxOrNull() ?: 0
                                 if (bodyMax > 20) {
                                     try {
@@ -259,19 +331,19 @@ class HapticEngine(
                             }
 
                             LinkHealthMonitor.heartbeatVibrateCall()
-                            // Update smoothed amplitude for telemetry display (normalized to 0-1.0)
                             val normalizedMaxAmp = maxAmp / 255.0f
                             directDriveSmoothAmp = directDriveSmoothAmp * 0.5f + normalizedMaxAmp * 0.5f
 
                             if (frameCounter % 30L == 0L) {
                                 val ampStr = (0 until sampleCount).joinToString(",") { frameBuffer[it].toInt().coerceIn(0, 255).toString() }
+                                val fusionMode = if (semanticFired) "SEMANTIC(${pendingSemanticLabel})" else "AMPLITUDE"
                                 val primitive = when {
                                     kickTriggered -> "KICK"
                                     shortTickTriggered -> "TICK"
                                     longVibeAmp > 0 -> "LONG"
                                     else -> "SILENCE"
                                 }
-                                Log.i(TAG, "▶ FUSION VIBRATE | samples=$sampleCount amps=[$ampStr] max=${frameBuffer.maxOrNull()?.toInt() ?: 0} smooth=$directDriveSmoothAmp primitive=$primitive")
+                                Log.i(TAG, "▶ FUSION v3.5 | mode=$fusionMode prim=$primitive | samples=$sampleCount amps=[$ampStr] max=${frameBuffer.maxOrNull()?.toInt() ?: 0} smooth=$directDriveSmoothAmp bodyScale=$bodyAmpScale")
                             }
                         }
                     } else {
@@ -306,7 +378,7 @@ class HapticEngine(
                     val thermalGain = telemetryData.thermalAttenuationFactor
 
                     val logMsg = String.format(
-                        "DSP [Fusion] | S:%.2f M:%.2f T:%.2f | F0:%.0fHz samples=%d smooth=%.2f Δ=%dms",
+                        "DSP v3.5 [Fusion] | S:%.2f M:%.2f T:%.2f | F0:%.0fHz samples=%d smooth=%.2f Δ=%dms",
                         subLevel, midLevel, texLevel, f0, sampleCount, directDriveSmoothAmp, latency
                     )
                     logCallback?.onLog(logMsg)
@@ -329,21 +401,21 @@ class HapticEngine(
                         subCount = telemetryData.dispatchedSubBassImpacts,
                         midCount = telemetryData.dispatchedMidBassTransients,
                         texCount = telemetryData.dispatchedMicroTextures,
-                        keyStrikeActive = false,
-                        keyStrikeSemantic = "FUSION",
-                        semanticType = "MULTI-PRIMITIVE",
-                        lraDisp = directDriveSmoothAmp,
-                        lraVel = 0f,
-                        lraForce = directDriveSmoothAmp,
-                        lraPhase = f0,
-                        adsrEnv = directDriveSmoothAmp,
-                        thermalGain = thermalGain,
-                        personaName = "Fusion-MultiPrimitive",
-                        primitiveType = "",
-                        primitiveSemantic = "",
-                        primitiveIntensity = 0,
-                        primitiveDuration = 0,
-                        gammaValue = 1f
+                        keyStrikeActive = hapticComposer.lastKeyStrikeActive,
+                        keyStrikeSemantic = hapticComposer.lastKeyStrikeSemantic,
+                        semanticType = hapticComposer.lastSemanticType,
+                        lraDisp = hapticComposer.lastDisplacement,
+                        lraVel = hapticComposer.lastVelocity,
+                        lraForce = hapticComposer.lastForce,
+                        lraPhase = hapticComposer.lastPhase,
+                        adsrEnv = hapticComposer.lastEnvelope,
+                        thermalGain = hapticComposer.lastThermalGain,
+                        personaName = hapticComposer.currentPersona.displayName,
+                        primitiveType = hapticComposer.lastPrimitive?.typeName ?: "",
+                        primitiveSemantic = hapticComposer.lastSemanticEvent?.label ?: "",
+                        primitiveIntensity = hapticComposer.lastPrimitive?.let { when(it) { is HapticPrimitive.Impact -> it.intensity; is HapticPrimitive.Pulse -> it.intensity; is HapticPrimitive.Texture -> it.intensity; is HapticPrimitive.Wave -> 0 } } ?: 0,
+                        primitiveDuration = hapticComposer.lastPrimitive?.let { when(it) { is HapticPrimitive.Impact -> it.durationMs; is HapticPrimitive.Pulse -> it.periodMs; is HapticPrimitive.Texture -> it.durationMs; is HapticPrimitive.Wave -> it.durationMs } } ?: 0,
+                        gammaValue = hapticComposer.getEffectiveGamma()
                     )
                 }
 
@@ -473,6 +545,8 @@ class HapticEngine(
         
         nativeBridge.clearHapticBuffer()
         directDriveSmoothAmp = 0f
+        pendingPrimitive = null  // v1.8: Clear semantic bridge
+        pendingSemanticLabel = "NONE"
         hapticSynthesizer.forceDecay()
         audioRingBuffer.clear()
         hapticEventGenerator.cancel()
@@ -577,15 +651,20 @@ class HapticEngine(
         val detectedFundamentalFreq = nativeTelemetryResult[3]
         val estimatedCoilTemperature = nativeTelemetryResult[4]
         val thermalSafetyGain = nativeTelemetryResult[5]
+        // v1.7 Semantic Bridge: beat/onset telemetry from C++
+        val beatStrength = nativeTelemetryResult[6]
+        val onsetFlag = nativeTelemetryResult[7] > 0.5f
+        val beatIntervalMs = nativeTelemetryResult[8]
+        val beatConfidence = nativeTelemetryResult[9]
 
         LinkHealthMonitor.heartbeatDspOutput()
 
         if (currentFrameId % 20L == 0L) {
-            Log.d("HapticLink", "【节点 2】Native 输出 | Sub: $finalSubIntensity | Mid: $finalMidIntensity | Texture: $finalPresenceIntensity | F0: ${detectedFundamentalFreq}Hz | Temp: ${estimatedCoilTemperature}°C | ThermalGain: $thermalSafetyGain")
+            Log.d("HapticLink", "【节点 2】Native 输出 | Sub: $finalSubIntensity | Mid: $finalMidIntensity | Texture: $finalPresenceIntensity | F0: ${detectedFundamentalFreq}Hz | Temp: ${estimatedCoilTemperature}°C | ThermalGain: $thermalSafetyGain | Beat: ${"%.2f".format(beatStrength)} onset=$onsetFlag IBI=${beatIntervalMs.toInt()}ms conf=${"%.2f".format(beatConfidence)}")
         }
 
         if (currentFrameId % 12L == 0L) {
-            Log.d("HapticDebug", "Sub: $finalSubIntensity | Mid: $finalMidIntensity | Temp: ${estimatedCoilTemperature}°C | ThermalGain: $thermalSafetyGain | Pitch: ${detectedFundamentalFreq}Hz")
+            Log.d("HapticDebug", "Sub: $finalSubIntensity | Mid: $finalMidIntensity | Temp: ${estimatedCoilTemperature}°C | ThermalGain: $thermalSafetyGain | Pitch: ${detectedFundamentalFreq}Hz | Beat: ${"%.2f".format(beatStrength)} IBI=${beatIntervalMs.toInt()}ms")
         }
 
         telemetryData.subBassOutputLevel = finalSubIntensity
@@ -595,17 +674,61 @@ class HapticEngine(
         telemetryData.estimatedCoilTemperature = estimatedCoilTemperature
         telemetryData.thermalAttenuationFactor = thermalSafetyGain
 
+        // ══════════════════════════════════════════════════════════════════
+        // v1.7 Semantic Bridge: Feed DSP output to HapticComposer
+        // Composer runs at reduced rate (every 2nd frame = ~50Hz at 100Hz DSP)
+        // It analyzes the music semantically but does NOT directly drive vibration.
+        // Output is logged for verification — no haptic changes yet.
+        // ══════════════════════════════════════════════════════════════════
         if (isEngineEnabled.get()) {
             if (thermalSafetyGain <= 0.01f) {
-                // Thermal protection engaged — clear C++ haptic buffer and stop vibration
                 nativeBridge.clearHapticBuffer()
                 hapticEventGenerator.cancel()
                 directDriveSmoothAmp = 0f
             }
-            // Note: Continuous waveform playback is handled entirely by
-            // runContinuousHapticLoop(), which pulls amplitude frames from
-            // the C++ 5-layer synthesizer at 50ms intervals.
-            // This pipeline only processes audio → updates telemetry data.
+
+            // Feed Composer every 2nd frame (~50Hz, matching human semantic resolution)
+            if (currentFrameId % 2L == 0L) {
+                try {
+                    hapticComposer.processFrame(
+                        subBass = finalSubIntensity,
+                        midBass = finalMidIntensity,
+                        texture = finalPresenceIntensity,
+                        pitch = detectedFundamentalFreq,
+                        timestamp = currentTimeMs
+                    )
+
+                    // Non-blocking poll for HapticCommand from Composer
+                    // Drain channel: take latest, discard stale ones to prevent backlog
+                    var latestCommand: HapticCommand? = null
+                    while (true) {
+                        val cmd = hapticComposer.hapticCommands.tryReceive().getOrNull() ?: break
+                        latestCommand = cmd
+                    }
+                    val command = latestCommand
+                    if (command != null) {
+                        // v1.8: Store primitive for Fusion layer in runContinuousHapticLoop
+                        // Only store non-null primitives — waveform body handles continuous
+                        if (command.primitive != null) {
+                            pendingPrimitive = command.primitive
+                            pendingSemanticLabel = command.semanticEvent?.label ?: "UNKNOWN"
+                            pendingPrimitiveTime = currentTimeMs
+                        }
+
+                        // Log semantic detection (reduced rate)
+                        if (currentFrameId % 10L == 0L) {
+                            val beatStr = if (command.isBeat) "BEAT" else "---"
+                            val ksStr = if (command.isKeyStrike) "KS=${command.keyStrikeSemantic.name}" else ""
+                            val primStr = command.primitive?.typeName ?: "none"
+                            val semStr = command.semanticEvent?.label ?: "none"
+                            Log.i("SemanticBridge", "▶ Composer | $beatStr $ksStr | Sem=$semStr | Prim=$primStr | I=${"%.2f".format(command.intensity)} | Persona=${hapticComposer.currentPersona.name} | Env=${"%.2f".format(command.adsrEnvelope)} | C++Beat=${"%.2f".format(beatStrength)} IBI=${beatIntervalMs.toInt()}ms")
+                            LogBroadcaster.sendLog(context, "SemanticBridge | $beatStr $ksStr | Sem=$semStr | Prim=$primStr | Persona=${hapticComposer.currentPersona.name} | C++IBI=${beatIntervalMs.toInt()}ms conf=${"%.2f".format(beatConfidence)}")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Composer processFrame error: ${e.message}")
+                }
+            }
         }
     }
 

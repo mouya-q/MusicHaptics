@@ -136,7 +136,7 @@ class HapticComposer(
 
     init {
         loadPreferences()
-        Log.i(TAG, "HapticComposer v3.0 initialized | Persona=${currentPersona.name} | KeyStrike=ON | ADSR=ON | Thermal=ON | LRA(f0=${LRA_F0}Hz Q=${LRA_Q} lat=${lraStartLatencyMs}ms)")
+        Log.i(TAG, "HapticComposer v3.5 initialized | Persona=${currentPersona.name} | KeyStrike=ON | ADSR=ON | Thermal=ON | LRA(f0=${LRA_F0}Hz Q=${LRA_Q} lat=${lraStartLatencyMs}ms)")
     }
 
     private fun loadPreferences() {

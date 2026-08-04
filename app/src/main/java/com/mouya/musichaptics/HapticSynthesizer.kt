@@ -52,9 +52,16 @@ class HapticSynthesizer(
 
     @Volatile private var currentConfig = SynthConfig()
 
+    // v1.9: LRA physical params from ActuatorProfile (per-device, not hardcoded)
+    private val actuatorF0: Float = profile.actuator.resonanceFreq
+    private val actuatorDamping: Float = profile.actuator.dampingRatio
+    private val actuatorW0: Float = profile.actuator.angularFreq
+    private val actuatorResponseMs: Float = profile.actuator.responseTimeMs
+    private val actuatorScale: Float = (actuatorResponseMs / 4.5f).coerceIn(0.8f, 3.0f)
+
     fun updateParameters(config: SynthConfig) {
         currentConfig = config
-
+        Log.i(TAG, "SynthConfig updated | lraF0=${config.lraF0}Hz actuator=${actuatorF0}Hz/${actuatorResponseMs}ms scale=${"%.2f".format(actuatorScale)}")
     }
 
     private var impactAdsr = AdsrState()
@@ -72,12 +79,16 @@ class HapticSynthesizer(
     private val pendingImpacts = mutableListOf<PendingImpact>()
     private val pendingTextures = mutableListOf<PendingTexture>()
 
-    private var continuousFreq = LRA_F0
+    private var continuousFreq = 0f  // v1.9: init from actuator in init block
     private var continuousAmp = 0f
     private var continuousTargetAmp = 0f
 
     private var textureNoisePhase = 0f
     private var textureNextEventTime = 0L
+
+    init {
+        continuousFreq = actuatorF0 * 0.9f
+    }
 
     @Volatile var lastDisplacement = 0f
     @Volatile var lastVelocity = 0f
@@ -143,9 +154,15 @@ class HapticSynthesizer(
 
         updateTextureTarget(texture, pitch, timestampMs)
 
-        advanceAdsr(impactAdsr, dt, currentConfig.attackTauImpact, currentConfig.decayTauImpact)
-        advanceAdsr(continuousAdsr, dt, currentConfig.attackTauContinuous, currentConfig.decayTauContinuous)
-        advanceAdsr(textureAdsr, dt, currentConfig.attackTauImpact, currentConfig.decayTauImpact)
+        // v1.9: Actuator-aware ADSR — scale tau by physical response time
+        val impactAttack = currentConfig.attackTauImpact * actuatorScale
+        val impactDecay = currentConfig.decayTauImpact * actuatorScale
+        val contAttack = currentConfig.attackTauContinuous * actuatorScale
+        val contDecay = currentConfig.decayTauContinuous * actuatorScale
+
+        advanceAdsr(impactAdsr, dt, impactAttack, impactDecay)
+        advanceAdsr(continuousAdsr, dt, contAttack, contDecay)
+        advanceAdsr(textureAdsr, dt, impactAttack, impactDecay)
 
         updateThermalModel(dt)
 
@@ -192,7 +209,7 @@ private fun processInputEvents(
                 val density = (texture * 2f).coerceIn(0.1f, 1f)
                 pendingTextures.add(PendingTexture(
                     amplitude = texture.coerceIn(0.1f, 1f),
-                    frequency = (currentConfig.lraF0 * 1.5f).coerceIn(300f, 800f),
+                    frequency = (actuatorF0 * 1.5f).coerceIn(300f, 800f),
                     density = density,
                     startTimeMs = timestampMs,
                     durationMs = 80L
@@ -231,30 +248,24 @@ private fun processInputEvents(
     ): ImpactParams {
         return when (semantic) {
             KeyStrikeSemantic.SUB_STRIKE -> {
-
-                ImpactParams(1.0f, LRA_F0 * 0.8f, 0.3f, 180L)
+                ImpactParams(1.0f, actuatorF0 * 0.8f, 0.3f, (180L * actuatorScale).toLong())
             }
             KeyStrikeSemantic.KICK_DRUM -> {
-
-                ImpactParams(0.9f, LRA_F0 * 1.05f, 0.6f, 80L)
+                ImpactParams(0.9f, actuatorF0 * 1.05f, 0.6f, (80L * actuatorScale).toLong())
             }
             KeyStrikeSemantic.SNARE_ACCENT -> {
-
-                ImpactParams(0.85f, LRA_F0 * 1.3f, 0.9f, 120L)
+                ImpactParams(0.85f, actuatorF0 * 1.3f, 0.9f, (120L * actuatorScale).toLong())
             }
             KeyStrikeSemantic.RHYTHM_PATTERN -> {
-
-                ImpactParams(0.8f, LRA_F0, 0.5f, 100L)
+                ImpactParams(0.8f, actuatorF0, 0.5f, (100L * actuatorScale).toLong())
             }
             KeyStrikeSemantic.BASS_GHOST -> {
-
-                ImpactParams(0.4f, LRA_F0 * 0.7f, 0.1f, 200L)
+                ImpactParams(0.4f, actuatorF0 * 0.7f, 0.1f, (200L * actuatorScale).toLong())
             }
             else -> {
-
-                val freq = if (subBass > midBass) LRA_F0 * 0.85f else LRA_F0 * 1.1f
+                val freq = if (subBass > midBass) actuatorF0 * 0.85f else actuatorF0 * 1.1f
                 val amp = maxOf(subBass, midBass, texture).coerceIn(0.3f, 1f)
-                ImpactParams(amp, freq, 0.5f, 100L)
+                ImpactParams(amp, freq, 0.5f, (100L * actuatorScale).toLong())
             }
         }
     }
@@ -266,7 +277,7 @@ private fun processInputEvents(
         if (pitch > 0f && pitch < 200f) {
             continuousFreq = pitch.coerceIn(60f, 180f)
         } else {
-            continuousFreq = LRA_F0 * 0.9f
+            continuousFreq = actuatorF0 * 0.9f
         }
     }
 
@@ -358,9 +369,9 @@ private fun processInputEvents(
     }
 
     private fun solveLraPhysics(drive: Float, dt: Float) {
-
-        val w = 2f * Math.PI.toFloat() * currentConfig.lraF0
-        val zeta = 1f / (2f * currentConfig.lraQ)
+        // v1.9: Use per-device actuator physical model instead of config defaults
+        val w = actuatorW0
+        val zeta = actuatorDamping
 
         val acceleration = drive - 2f * zeta * w * lraVelocity - w * w * lraDisplacement
 
@@ -395,7 +406,7 @@ private fun processInputEvents(
             )
         }
 
-        val instantaneousFreq = currentConfig.lraF0 + sin(lraPhase * 0.5f) * 10f
+        val instantaneousFreq = actuatorF0 + sin(lraPhase * 0.5f) * 10f
         val periodMs = (1000f / instantaneousFreq).toLong().coerceAtLeast(1L)
         val cycles = (instantaneousFreq * dt).toInt().coerceAtLeast(1)
 
@@ -442,7 +453,7 @@ private fun processInputEvents(
     private fun updateTelemetry() {
         lastDisplacement = lraDisplacement
         lastVelocity = lraVelocity
-        lastForce = lraDisplacement * (2f * Math.PI.toFloat() * currentConfig.lraF0) * (2f * Math.PI.toFloat() * currentConfig.lraF0)
+        lastForce = lraDisplacement * actuatorW0 * actuatorW0
         lastPhase = lraPhase
         lastEnvelope = maxOf(impactAdsr.value, continuousAdsr.value, textureAdsr.value)
         lastImpactEnvelope = impactAdsr.value

@@ -151,7 +151,7 @@ class HapticComposer(
     init {
         loadPreferences()
         lraPhaseVelocity = lraW0  // Initialize phase velocity from actuator resonance
-        Log.i(TAG, "HapticComposer v3.6 initialized | Persona=${currentPersona.name} | KeyStrike=ON | ADSR=ON(actuatorCompensated) | Thermal=ON | LRA(f0=${lraF0}Hz ζ=${lraDamping} resp=${lraResponseTimeMs}ms lat=${lraStartLatencyMs}ms)")
+        Log.i(TAG, "HapticComposer v3.7 initialized | Persona=${currentPersona.name} | KeyStrike=ON | ADSR=ON(asymmetricRise/Fall) | Thermal=ON | LRA(f0=${lraF0}Hz ζ=${lraDamping} rise=${profile.actuator.riseTimeMs}ms fall=${profile.actuator.fallTimeMs}ms lat=${lraStartLatencyMs}ms)")
     }
 
     private fun loadPreferences() {
@@ -494,13 +494,14 @@ class HapticComposer(
         val triggerAttack = isTransient || isBeat || isKeyStrike
         val triggerRelease = !triggerAttack && targetDrive < 0.03f
 
-        // v1.9: Actuator-aware ADSR — scale attack/decay/release taus
-        // based on physical response time. Slow actuators (high responseTimeMs)
-        // need longer taus to avoid driving the LRA faster than it can physically move.
-        val actuatorScale = (lraResponseTimeMs / 4.5f).coerceIn(0.8f, 3.0f)  // 4.5ms = reference fast LRA
-        val attackTau = ADSR_ATTACK_TAU * actuatorScale
-        val decayTau = ADSR_DECAY_TAU * actuatorScale
-        val releaseTau = ADSR_RELEASE_TAU * actuatorScale
+        // v2.0: Asymmetric actuator-aware ADSR — rise/fall separated
+        // Rise time → attack tau (how fast LRA reaches full displacement)
+        // Fall time → decay/release tau (how long the LRA keeps vibrating after drive stops)
+        val riseScale = profile.actuator.riseScale
+        val fallScale = profile.actuator.fallScale
+        val attackTau = ADSR_ATTACK_TAU * riseScale
+        val decayTau = ADSR_DECAY_TAU * fallScale
+        val releaseTau = ADSR_RELEASE_TAU * fallScale
 
         when (adsrState) {
             0 -> {
@@ -562,9 +563,8 @@ class HapticComposer(
             }
 
             val eventAmp = (adsrEnvelopeValue * semanticGain).coerceAtMost(1.5f)
-            // v1.9: For slow actuators (high responseTimeMs), extend impact duration
-            // to give the LRA enough time to reach full displacement.
-            val responseScale = (lraResponseTimeMs / 4.5f).coerceIn(1.0f, 2.5f)  // 4.5ms = reference
+            // v2.0: Event duration scaled by actuator response (rise-biased for impact reach)
+            val responseScale = profile.actuator.riseScale
             val eventDurMs = when {
                 isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.SUB_STRIKE -> (180L * responseScale).toLong()
                 isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.KICK_DRUM -> (80L * responseScale).toLong()

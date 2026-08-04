@@ -52,16 +52,16 @@ class HapticSynthesizer(
 
     @Volatile private var currentConfig = SynthConfig()
 
-    // v1.9: LRA physical params from ActuatorProfile (per-device, not hardcoded)
+    // v2.0: LRA physical params from ActuatorProfile (per-device, not hardcoded)
     private val actuatorF0: Float = profile.actuator.resonanceFreq
     private val actuatorDamping: Float = profile.actuator.dampingRatio
     private val actuatorW0: Float = profile.actuator.angularFreq
-    private val actuatorResponseMs: Float = profile.actuator.responseTimeMs
-    private val actuatorScale: Float = (actuatorResponseMs / 4.5f).coerceIn(0.8f, 3.0f)
+    private val actuatorRiseScale: Float = profile.actuator.riseScale
+    private val actuatorFallScale: Float = profile.actuator.fallScale
 
     fun updateParameters(config: SynthConfig) {
         currentConfig = config
-        Log.i(TAG, "SynthConfig updated | lraF0=${config.lraF0}Hz actuator=${actuatorF0}Hz/${actuatorResponseMs}ms scale=${"%.2f".format(actuatorScale)}")
+        Log.i(TAG, "SynthConfig updated | lraF0=${config.lraF0}Hz actuator=${actuatorF0}Hz rise=${profile.actuator.riseTimeMs}ms fall=${profile.actuator.fallTimeMs}ms")
     }
 
     private var impactAdsr = AdsrState()
@@ -154,11 +154,11 @@ class HapticSynthesizer(
 
         updateTextureTarget(texture, pitch, timestampMs)
 
-        // v1.9: Actuator-aware ADSR — scale tau by physical response time
-        val impactAttack = currentConfig.attackTauImpact * actuatorScale
-        val impactDecay = currentConfig.decayTauImpact * actuatorScale
-        val contAttack = currentConfig.attackTauContinuous * actuatorScale
-        val contDecay = currentConfig.decayTauContinuous * actuatorScale
+        // v2.0: Actuator-aware ADSR — asymmetric rise/fall scaling
+        val impactAttack = currentConfig.attackTauImpact * actuatorRiseScale
+        val impactDecay = currentConfig.decayTauImpact * actuatorFallScale
+        val contAttack = currentConfig.attackTauContinuous * actuatorRiseScale
+        val contDecay = currentConfig.decayTauContinuous * actuatorFallScale
 
         advanceAdsr(impactAdsr, dt, impactAttack, impactDecay)
         advanceAdsr(continuousAdsr, dt, contAttack, contDecay)
@@ -248,24 +248,24 @@ private fun processInputEvents(
     ): ImpactParams {
         return when (semantic) {
             KeyStrikeSemantic.SUB_STRIKE -> {
-                ImpactParams(1.0f, actuatorF0 * 0.8f, 0.3f, (180L * actuatorScale).toLong())
+                ImpactParams(1.0f, actuatorF0 * 0.8f, 0.3f, (180L * actuatorRiseScale).toLong())
             }
             KeyStrikeSemantic.KICK_DRUM -> {
-                ImpactParams(0.9f, actuatorF0 * 1.05f, 0.6f, (80L * actuatorScale).toLong())
+                ImpactParams(0.9f, actuatorF0 * 1.05f, 0.6f, (80L * actuatorRiseScale).toLong())
             }
             KeyStrikeSemantic.SNARE_ACCENT -> {
-                ImpactParams(0.85f, actuatorF0 * 1.3f, 0.9f, (120L * actuatorScale).toLong())
+                ImpactParams(0.85f, actuatorF0 * 1.3f, 0.9f, (120L * actuatorRiseScale).toLong())
             }
             KeyStrikeSemantic.RHYTHM_PATTERN -> {
-                ImpactParams(0.8f, actuatorF0, 0.5f, (100L * actuatorScale).toLong())
+                ImpactParams(0.8f, actuatorF0, 0.5f, (100L * actuatorRiseScale).toLong())
             }
             KeyStrikeSemantic.BASS_GHOST -> {
-                ImpactParams(0.4f, actuatorF0 * 0.7f, 0.1f, (200L * actuatorScale).toLong())
+                ImpactParams(0.4f, actuatorF0 * 0.7f, 0.1f, (200L * actuatorRiseScale).toLong())
             }
             else -> {
                 val freq = if (subBass > midBass) actuatorF0 * 0.85f else actuatorF0 * 1.1f
                 val amp = maxOf(subBass, midBass, texture).coerceIn(0.3f, 1f)
-                ImpactParams(amp, freq, 0.5f, (100L * actuatorScale).toLong())
+                ImpactParams(amp, freq, 0.5f, (100L * actuatorRiseScale).toLong())
             }
         }
     }

@@ -174,6 +174,29 @@ data class DeviceProfile(
             fillerAmplitude = 4,
             actuator = ActuatorProfile.FLAGSHIP_XAXIS,
         )
+
+        val ONEPLUS_13T = DeviceProfile(
+            name = "OnePlus 13T · X-axis LRA",
+            description = "OnePlus 13T flagship X-axis LRA, ~190 Hz resonance, fast response, needs primitive fallback support",
+            minGuaranteedAmplitude = 20,
+            maxAmplitude = 255,
+            boostExponent = 0.42f,
+            subDur1Min = 12, subDur1Max = 30,
+            subGap1Min = 4,  subGap1Max = 10,
+            subDur2Min = 6,  subDur2Max = 16,
+            subGap2Min = 2,  subGap2Max = 8,
+            subDur3Min = 4,  subDur3Max = 12,
+            subAmpDecay2 = 0.50f,
+            subAmpDecay3 = 0.22f,
+            minIntervalMs = 3L,
+            maxIntervalMs = 35L,
+            silenceThreshold = 0.001f,
+            energyThreshold = 0.04f,
+            fillerFrameThreshold = 5,
+            fillerDurationMs = 3L,
+            fillerAmplitude = 8,
+            actuator = ActuatorProfile.ONEPLUS_13T,
+        )
     }
 }
 
@@ -213,6 +236,10 @@ fun detectDeviceProfile(): DeviceProfile {
     }
 
     if (manufacturer == "oneplus" || manufacturer == "oppo") {
+        // OnePlus 13T specific detection
+        if (model.contains("CPH2653") || model.contains("13T") || device.contains("aston")) {
+            return DeviceProfile.ONEPLUS_13T
+        }
         if (model.startsWith("CPH") || model.startsWith("PH") || model.contains("ONEPLUS")) {
             return DeviceProfile.FLAGSHIP_XAXIS
         }

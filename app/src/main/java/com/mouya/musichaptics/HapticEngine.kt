@@ -126,6 +126,8 @@ class HapticEngine(
         // v2.1.2: Initialize vibration proxy (auto-detects direct vs IPC path)
         val proxyReady = vibrateProxy.init()
         Log.i(TAG, "VibrateProxy initialized: ready=$proxyReady path=${if (vibrateProxy.isProxyActive) "IPC_PROXY" else "DIRECT"}")
+        Log.i(TAG, "[Device Profile] name=${hapticEventGenerator.profile.name} actuator.f0=${hapticEventGenerator.profile.actuator.resonanceFreq}Hz maxAmp=${hapticEventGenerator.profile.actuator.maxAmplitude} damping=${hapticEventGenerator.profile.actuator.dampingRatio} q=${hapticEventGenerator.profile.actuator.qFactor}")
+        Log.i(TAG, "[Vibrator Capability] hasAmpCtrl=${vibrateProxy.hasAmplitudeControl} primitives: CLICK=${vibrateProxy.primitiveClickSupported} TICK=${vibrateProxy.primitiveTickSupported} THUD=${vibrateProxy.primitiveHeavyClickSupported}")
 
         // v2.1: Wire native scheduler callback — C++ thread becomes SOLE ring buffer consumer
         if (nativeBridge.isLoaded) {
@@ -746,7 +748,7 @@ class HapticEngine(
         LogBroadcaster.sendLog(context, "[PLAYBACK PAUSED] Forcing immediate haptic decay")
         
         hapticPaused = true  // v2.1.1: Immediately block native callbacks from driving vibrator
-        vibrateProxy.cancel()  // v2.1.2: Cancel via proxy
+        vibrateProxy.setPaused()  // v2.1.2: Hard pause gate at proxy level — blocks all performXxx() calls
         nativeBridge.clearHapticBuffer()
         directDriveSmoothAmp = 0f
         pendingPrimitive = null  // v1.8: Clear semantic bridge
@@ -768,6 +770,7 @@ class HapticEngine(
         // v2.1.1: Clear pause flag — new audio means playback resumed
         if (hapticPaused) {
             hapticPaused = false
+            vibrateProxy.setResumed()  // v2.1.2: Re-enable proxy output
             nativeBridge.clearHapticBuffer()  // Flush any stale samples from C++ ring buffer
             Log.i(TAG, "[PLAYBACK RESUMED] hapticPaused cleared, native callbacks re-enabled")
         }
@@ -958,6 +961,7 @@ class HapticEngine(
         engineJob.cancel()
         audioRingBuffer.clear()
         nativeBridge.release()
+        vibrateProxy.setPaused()  // v2.1.2: Block any pending vibrations during shutdown
         vibrateProxy.unbind()  // v2.1.2: Unbind IPC proxy service
         Log.i(TAG, "DSP Engine successfully shutdown.")
     }

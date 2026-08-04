@@ -98,6 +98,17 @@ data class ActuatorProfile(
             thermalResistance = 20f
         )
 
+        /** OnePlus 13T X-axis LRA — ~190Hz, fast response, rich haptic */
+        val ONEPLUS_13T = ActuatorProfile(
+            resonanceFreq = 190f,
+            dampingRatio = 0.035f,
+            riseTimeMs = 3.5f,
+            fallTimeMs = 5.5f,
+            maxDisplacement = 1.0f,
+            qFactor = 14f,
+            thermalResistance = 22f
+        )
+
         /** 通用默认 — 保守参数，适配未知设备 */
         val DEFAULT = ActuatorProfile(
             resonanceFreq = 180f,

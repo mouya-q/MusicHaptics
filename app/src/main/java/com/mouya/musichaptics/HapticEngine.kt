@@ -96,6 +96,10 @@ class HapticEngine(
     // === Continuous Waveform State ===
     @Volatile private var directDriveSmoothAmp = 0f  // Smoothed amplitude for telemetry display
 
+    // v2.1: Native scheduler state — must be declared before init block
+    @Volatile private var nativeSchedulerActive = false
+    @Volatile private var nativeLastAudioTime = 0L  // Tracked from native callback for silence detection
+
     // ══════════════════════════════════════════════════════════════════
     // v1.8 Haptic Fusion: Semantic primitive bridge
     // The Composer produces HapticCommands at ~50Hz. The latest command
@@ -115,11 +119,26 @@ class HapticEngine(
 
         synchronizeParameters()
 
-        engineScope.launch {
-            runContinuousHapticLoop()
+        // v2.1: Wire native scheduler callback — C++ thread becomes SOLE ring buffer consumer
+        if (nativeBridge.isLoaded) {
+            nativeBridge.onFrameCallback = { samples, count ->
+                onNativeHapticFrame(samples, count)
+            }
+            val started = nativeBridge.startScheduler()
+            nativeSchedulerActive = started
+            Log.i(TAG, "Native Haptic Scheduler: ${if (started) "STARTED (10ms precision, sole consumer)" else "FAILED — falling back to coroutine"}")
         }
 
-        val readyMsg = "[System Ready] v3.7 Haptic Engine: ${if (nativeBridge.isLoaded) "NATIVE ACTIVE" else "FALLBACK"} | Device: ${hapticEventGenerator.profile.name} | Actuator: ${hapticEventGenerator.profile.actuator.resonanceFreq.toInt()}Hz rise=${hapticEventGenerator.profile.actuator.riseTimeMs.toInt()}ms fall=${hapticEventGenerator.profile.actuator.fallTimeMs.toInt()}ms | C++ 4-Layer: Beat+Bass+Texture(Noise)+Melody | Semantic Bridge: ON | Fusion: Dual-Track (Semantic+Continuous)"
+        // v2.1: Only launch coroutine loop if native scheduler is NOT active
+        // This prevents double-consumption of the ring buffer
+        if (!nativeSchedulerActive) {
+            engineScope.launch {
+                runContinuousHapticLoop()
+            }
+            Log.i(TAG, "Using coroutine-based haptic loop (fallback mode)")
+        }
+
+        val readyMsg = "[System Ready] v3.7 Haptic Engine: ${if (nativeBridge.isLoaded) "NATIVE ACTIVE" else "FALLBACK"} | Device: ${hapticEventGenerator.profile.name} | Actuator: ${hapticEventGenerator.profile.actuator.resonanceFreq.toInt()}Hz rise=${hapticEventGenerator.profile.actuator.riseTimeMs.toInt()}ms fall=${hapticEventGenerator.profile.actuator.fallTimeMs.toInt()}ms | C++ 4-Layer: Beat+Bass+Texture(Noise)+Melody | Semantic Bridge: ON | Fusion: Dual-Track (Semantic+Continuous) | Scheduler: ${if (nativeSchedulerActive) "NATIVE (10ms)" else "COROUTINE (40ms fallback)"}"
         Log.i(TAG, readyMsg)
         logCallback?.onLog(readyMsg)
         LogBroadcaster.sendLog(context, readyMsg)
@@ -447,6 +466,188 @@ class HapticEngine(
     // updateSynthesizerTelemetry removed — C++ 5-layer engine handles all synthesis internally.
     // Telemetry is now updated directly in executeDspPipeline from nativeTelemetryResult.
 
+    // ════════════════════════════════════════════════════════════════
+    //  v2.1: Native Haptic Frame Callback
+    //  Called from the C++ scheduler thread at 20ms intervals.
+    //  Receives a batch of amplitude samples and immediately drives the vibrator.
+    //  This bypasses coroutine delay entirely — the native thread uses
+    //  clock_nanosleep(CLOCK_MONOTONIC) for precise 10ms timing.
+    // ════════════════════════════════════════════════════════════════
+    private val nativeFrameFeedbackEngine = lazy { HapticFeedbackEngine.create(context) }
+    private val nativeFrameVib by lazy { hapticEventGenerator.getVibratorInstance() }
+    private val nativeFrameIsApi29Plus = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+    private var nativeFrameLastKick = 0L
+    private var nativeFrameLastTick = 0L
+    private var nativeFrameLastSemantic = 0L
+    private var nativeFrameCounter = 0L
+
+    private fun onNativeHapticFrame(samples: FloatArray, count: Int) {
+        if (count <= 0) return
+
+        val now = SystemClock.elapsedRealtime()
+        nativeFrameCounter++
+        nativeLastAudioTime = now  // Track for silence detection
+
+        val maxAmp = (0 until count).maxOfOrNull { samples[it] } ?: 0f
+        if (maxAmp <= 2f) {
+            // Near-silence: stop vibration
+            if (nativeFrameCounter % 50L == 0L) hapticEventGenerator.cancel()
+            directDriveSmoothAmp *= 0.3f  // Fast decay on silence
+            return
+        }
+
+        val vib = nativeFrameVib
+        if (vib == null || !hapticEventGenerator.hasVibrator) return
+
+        // ── Semantic primitive check (same logic as runContinuousHapticLoop) ──
+        val semanticPrim = pendingPrimitive
+        val semanticAge = now - pendingPrimitiveTime
+        val semanticFresh = semanticPrim != null && semanticAge < 100L
+
+        var kickTriggered = false
+        var shortTickTriggered = false
+        var semanticFired = false
+
+        if (semanticFresh) {
+            val prim = semanticPrim!!
+            val timeSinceSemantic = now - nativeFrameLastSemantic
+            if (timeSinceSemantic >= 60L) {
+                when (prim) {
+                    is HapticPrimitive.Impact -> {
+                        if (prim.sharpness > 0.7f && prim.intensity > 150) {
+                            kickTriggered = true
+                            nativeFrameLastKick = now
+                            nativeFrameFeedbackEngine.value.perform(HapticFeedbackEngine.HapticStyle.KICK)
+                        } else {
+                            nativeFrameFeedbackEngine.value.perform(HapticFeedbackEngine.HapticStyle.IMPACT)
+                        }
+                        semanticFired = true
+                        nativeFrameLastSemantic = now
+                    }
+                    is HapticPrimitive.Pulse -> {
+                        nativeFrameFeedbackEngine.value.perform(HapticFeedbackEngine.HapticStyle.KICK)
+                        kickTriggered = true
+                        nativeFrameLastKick = now
+                        semanticFired = true
+                        nativeFrameLastSemantic = now
+                    }
+                    is HapticPrimitive.Texture -> {
+                        shortTickTriggered = true
+                        nativeFrameLastTick = now
+                        semanticFired = true
+                        nativeFrameLastSemantic = now
+                    }
+                    is HapticPrimitive.Wave -> { /* let waveform handle it */ }
+                }
+                pendingPrimitive = null
+            }
+        }
+
+        // ── Amplitude-threshold fallback ──
+        if (!semanticFired) {
+            for (i in 0 until count) {
+                val amp = samples[i].toInt().coerceIn(0, 255)
+                when {
+                    amp > 200 && (now - nativeFrameLastKick) >= 80L -> {
+                        kickTriggered = true
+                        nativeFrameLastKick = now
+                        nativeFrameFeedbackEngine.value.perform(HapticFeedbackEngine.HapticStyle.KICK)
+                    }
+                    amp in 1..99 && (now - nativeFrameLastTick) >= 40L && !shortTickTriggered -> {
+                        shortTickTriggered = true
+                        nativeFrameLastTick = now
+                    }
+                }
+            }
+        }
+
+        // ── Waveform body with semantic-aware scaling ──
+        val bodyScale = when {
+            kickTriggered -> 0.4f
+            shortTickTriggered -> 0.8f
+            else -> 1.0f
+        }
+        val timings = LongArray(count) { 10L }
+        val amplitudes = IntArray(count) { idx ->
+            (samples[idx] * bodyScale).toInt().coerceIn(0, 255)
+        }
+        val bodyMax = amplitudes.maxOrNull() ?: 0
+        if (bodyMax > 20) {
+            try {
+                vib.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+            } catch (e: Exception) {
+                Log.w(TAG, "Native frame playback failed: ${e.message}")
+            }
+        }
+
+        // ── Short tick for texture ──
+        if (shortTickTriggered && !kickTriggered) {
+            try {
+                if (nativeFrameIsApi29Plus) {
+                    vib.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK))
+                } else {
+                    vib.vibrate(VibrationEffect.createOneShot(8, 80))
+                }
+            } catch (_: Exception) {}
+        }
+
+        LinkHealthMonitor.heartbeatVibrateCall()
+
+        // Smooth amplitude for telemetry display
+        val normalizedMaxAmp = maxAmp / 255.0f
+        directDriveSmoothAmp = directDriveSmoothAmp * 0.5f + normalizedMaxAmp * 0.5f
+
+        // Periodic parameter sync (every ~2s at 20ms intervals ≈ 100 frames)
+        if (nativeFrameCounter % 100L == 0L) {
+            synchronizeParameters()
+        }
+
+        // Periodic telemetry output (every ~1s ≈ 50 frames)
+        if (nativeFrameCounter % 50L == 0L) {
+            val mode = if (semanticFired) "SEMANTIC" else "AMP"
+            val prim = when {
+                kickTriggered -> "KICK"
+                shortTickTriggered -> "TICK"
+                else -> "BODY"
+            }
+            Log.i(TAG, "▶ NATIVE v3.7 | mode=$mode prim=$prim cnt=$count max=${maxAmp.toInt()} scale=$bodyScale smooth=${"%.2f".format(directDriveSmoothAmp)}")
+
+            // Send telemetry broadcast
+            LogBroadcaster.sendTelemetry(
+                context = context,
+                sub = telemetryData.subBassOutputLevel,
+                mid = telemetryData.midBassOutputLevel,
+                pres = telemetryData.presenceOutputLevel,
+                f0 = telemetryData.fundamentalFrequencyHz,
+                temp = telemetryData.estimatedCoilTemperature,
+                atten = telemetryData.thermalAttenuationFactor,
+                latency = 20L,  // Native scheduler: 20ms fixed latency
+                loFreq = telemetryData.lowPassCutoffHz,
+                hiFreq = telemetryData.highPassCutoffHz,
+                ampScale = telemetryData.userAmplitudeScale,
+                overruns = telemetryData.ringBufferOverruns,
+                subCount = telemetryData.dispatchedSubBassImpacts,
+                midCount = telemetryData.dispatchedMidBassTransients,
+                texCount = telemetryData.dispatchedMicroTextures,
+                keyStrikeActive = hapticComposer.lastKeyStrikeActive,
+                keyStrikeSemantic = hapticComposer.lastKeyStrikeSemantic,
+                semanticType = hapticComposer.lastSemanticType,
+                lraDisp = hapticComposer.lastDisplacement,
+                lraVel = hapticComposer.lastVelocity,
+                lraForce = hapticComposer.lastForce,
+                lraPhase = hapticComposer.lastPhase,
+                adsrEnv = hapticComposer.lastEnvelope,
+                thermalGain = hapticComposer.lastThermalGain,
+                personaName = hapticComposer.currentPersona.displayName,
+                primitiveType = hapticComposer.lastPrimitive?.typeName ?: "",
+                primitiveSemantic = hapticComposer.lastSemanticEvent?.label ?: "",
+                primitiveIntensity = hapticComposer.lastPrimitive?.let { when(it) { is HapticPrimitive.Impact -> it.intensity; is HapticPrimitive.Pulse -> it.intensity; is HapticPrimitive.Texture -> it.intensity; is HapticPrimitive.Wave -> 0 } } ?: 0,
+                primitiveDuration = hapticComposer.lastPrimitive?.let { when(it) { is HapticPrimitive.Impact -> it.durationMs; is HapticPrimitive.Pulse -> it.periodMs; is HapticPrimitive.Texture -> it.durationMs; is HapticPrimitive.Wave -> it.durationMs } } ?: 0,
+                gammaValue = hapticComposer.getEffectiveGamma()
+            )
+        }
+    }
+
     fun synchronizeParameters() {
         val masterState = try { prefs.getBoolean("master_switch", true) } catch (e: Exception) { true }
         isEngineEnabled.set(masterState)
@@ -733,6 +934,13 @@ class HapticEngine(
     }
 
     fun release() {
+
+        // v2.1: Stop native scheduler first — pthread_join ensures clean exit
+        if (nativeSchedulerActive) {
+            nativeBridge.stopScheduler()
+            nativeSchedulerActive = false
+            Log.i(TAG, "Native Haptic Scheduler stopped (pthread_join complete).")
+        }
 
         LinkHealthMonitor.setPlayingState(false)
         hapticEventGenerator.release()

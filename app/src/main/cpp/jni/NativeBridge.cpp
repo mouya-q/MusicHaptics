@@ -1,6 +1,115 @@
 #include <jni.h>
 #include <cmath>
+#include <pthread.h>
+#include <time.h>
+#include <atomic>
 #include "haptic/HapticEngine.hpp"
+
+// ════════════════════════════════════════════════════════════════
+//  v2.1 Native Haptic Scheduler
+//  A dedicated native thread that pulls from the C++ ring buffer
+//  at precise 10ms intervals using clock_nanosleep(CLOCK_MONOTONIC).
+//  Batches 2 samples (20ms) per JNI callback to reduce overhead.
+//
+//  The native thread is the SOLE consumer of the ring buffer.
+//  The Kotlin coroutine loop (runContinuousHapticLoop) is disabled
+//  when the scheduler is active to prevent double-consumption.
+// ════════════════════════════════════════════════════════════════
+
+static JavaVM* g_jvm = nullptr;
+static std::atomic<bool> g_scheduler_running{false};
+static pthread_t g_scheduler_thread{};
+// Track the global ref so we can clean it up reliably on stop
+static std::atomic<jobject> g_bridge_ref{nullptr};
+
+struct SchedulerArgs {
+    haptic::HapticEngine* engine;
+    jobject bridgeGlobalRef;
+};
+
+static void* scheduler_thread_func(void* arg) {
+    auto* sargs = static_cast<SchedulerArgs*>(arg);
+    auto* engine = sargs->engine;
+    jobject bridgeRef = sargs->bridgeGlobalRef;
+    delete sargs;
+
+    if (!engine || !bridgeRef || !g_jvm) return nullptr;
+
+    JNIEnv* env = nullptr;
+    JavaVMAttachArgs attachArgs = {JNI_VERSION_1_6, "HapticScheduler", nullptr};
+    if (g_jvm->AttachCurrentThread(&env, &attachArgs) != JNI_OK) {
+        return nullptr;
+    }
+
+    // Cache method IDs once
+    jclass bridgeClass = env->GetObjectClass(bridgeRef);
+    jmethodID onFrameReady = env->GetMethodID(bridgeClass, "onNativeFrameReady", "([FI)V");
+    env->DeleteLocalRef(bridgeClass);
+    if (!onFrameReady) {
+        g_jvm->DetachCurrentThread();
+        // Clean up the global ref before exiting
+        JNIEnv* cleanupEnv = nullptr;
+        if (g_jvm->AttachCurrentThread(&cleanupEnv, nullptr) == JNI_OK) {
+            cleanupEnv->DeleteGlobalRef(bridgeRef);
+            g_jvm->DetachCurrentThread();
+        }
+        g_bridge_ref.store(nullptr, std::memory_order_relaxed);
+        return nullptr;
+    }
+
+    // 10ms precise timing using absolute-time clock_nanosleep
+    const long frame_period_ns = 10000000L;  // 10ms
+    const int batch_size = 2;                 // 2 samples = 20ms per callback
+    float batchBuffer[batch_size];
+
+    struct timespec nextWake;
+    clock_gettime(CLOCK_MONOTONIC, &nextWake);
+
+    while (g_scheduler_running.load(std::memory_order_relaxed)) {
+        // Accumulate a batch of samples (one per 10ms boundary)
+        int batchCount = 0;
+        for (int b = 0; b < batch_size && g_scheduler_running.load(std::memory_order_relaxed); b++) {
+            float s = 0.0f;
+            int n = engine->getHapticFrame(&s, 1);
+            if (n > 0) {
+                batchBuffer[batchCount++] = s;
+            }
+            // Wait for next 10ms boundary (absolute time sleep = zero jitter)
+            nextWake.tv_nsec += frame_period_ns;
+            if (nextWake.tv_nsec >= 1000000000L) {
+                nextWake.tv_sec++;
+                nextWake.tv_nsec -= 1000000000L;
+            }
+            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &nextWake, nullptr);
+        }
+
+        // If we have samples, callback to Java
+        if (batchCount > 0) {
+            jfloatArray jArr = env->NewFloatArray(batchCount);
+            if (jArr) {
+                env->SetFloatArrayRegion(jArr, 0, batchCount, batchBuffer);
+                env->CallVoidMethod(bridgeRef, onFrameReady, jArr, batchCount);
+                env->DeleteLocalRef(jArr);
+            }
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+        }
+    }
+
+    // Thread exit: detach and clean up the global ref
+    g_jvm->DetachCurrentThread();
+
+    // Re-attach briefly to delete the global ref
+    JNIEnv* cleanupEnv = nullptr;
+    if (g_jvm->AttachCurrentThread(&cleanupEnv, nullptr) == JNI_OK) {
+        cleanupEnv->DeleteGlobalRef(bridgeRef);
+        g_jvm->DetachCurrentThread();
+    }
+    g_bridge_ref.store(nullptr, std::memory_order_relaxed);
+
+    return nullptr;
+}
 
 extern "C" {
 
@@ -46,7 +155,7 @@ Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
 }
 
 // ════════════════════════════════════════════════════════════════
-//  Continuous Haptic Frame Pull
+//  Continuous Haptic Frame Pull (legacy — used when scheduler is off)
 //  Copies amplitude samples from C++ ring buffer to Java array.
 //  Returns number of samples actually copied.
 // ════════════════════════════════════════════════════════════════
@@ -69,7 +178,7 @@ Java_com_mouya_musichaptics_NativeBridge_nativeGetHapticFrame(
 //  Clear Haptic Buffer
 //  Flushes ring buffer and resets all envelope states.
 //  Called on pause / stop / thermal shutdown.
-// ════════════════════════════════════════════════════════════════
+// ═════════════                       ═════════════════════════════
 JNIEXPORT void JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeClearHapticBuffer(
     JNIEnv* env, jobject thiz, jlong ptr) {
@@ -77,6 +186,67 @@ Java_com_mouya_musichaptics_NativeBridge_nativeClearHapticBuffer(
     if (engine) {
         engine->clearHapticBuffer();
     }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  v2.1 Native Haptic Scheduler — start/stop
+//  Starts a dedicated native thread that pulls from the C++ ring
+//  buffer at precise 10ms intervals and calls back to Java.
+//  This eliminates coroutine delay jitter and JNI polling overhead.
+// ════════════════════════════════════════════════════════════════
+JNIEXPORT jboolean JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeStartScheduler(
+    JNIEnv* env, jobject thiz, jlong ptr) {
+    if (ptr == 0) return JNI_FALSE;
+    if (g_scheduler_running.load(std::memory_order_relaxed)) return JNI_TRUE;
+
+    auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
+    if (!engine) return JNI_FALSE;
+
+    // Create global ref to the NativeBridge Java object for callbacks
+    jobject bridgeRef = env->NewGlobalRef(thiz);
+
+    auto* sargs = new SchedulerArgs{engine, bridgeRef};
+    g_scheduler_running.store(true, std::memory_order_relaxed);
+    g_bridge_ref.store(bridgeRef, std::memory_order_relaxed);
+
+    int result = pthread_create(&g_scheduler_thread, nullptr, scheduler_thread_func, sargs);
+    if (result != 0) {
+        g_scheduler_running.store(false, std::memory_order_relaxed);
+        g_bridge_ref.store(nullptr, std::memory_order_relaxed);
+        env->DeleteGlobalRef(bridgeRef);
+        delete sargs;
+        return JNI_FALSE;
+    }
+
+    // Set thread name for debugging
+    pthread_setname_np(g_scheduler_thread, "HapticScheduler");
+
+    return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeStopScheduler(
+    JNIEnv* env, jobject thiz) {
+    if (!g_scheduler_running.load(std::memory_order_relaxed)) return;
+
+    g_scheduler_running.store(false, std::memory_order_relaxed);
+    pthread_join(g_scheduler_thread, nullptr);
+
+    // GlobalRef cleanup is done inside scheduler_thread_func on exit.
+    // But as a safety net, check if it's still around and clean it.
+    jobject ref = g_bridge_ref.exchange(nullptr, std::memory_order_acq_rel);
+    if (ref) {
+        env->DeleteGlobalRef(ref);
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  JNI_OnLoad — cache JavaVM pointer for scheduler thread
+// ════════════════════════════════════════════════════════════════
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+    g_jvm = vm;
+    return JNI_VERSION_1_6;
 }
 
 } // extern "C"

@@ -151,4 +151,36 @@ class NativeBridge {
     private external fun nativeProcessAudioDirect(ptr: Long, directBuffer: ByteBuffer, size: Int, outTelemetry: FloatArray)
     private external fun nativeGetHapticFrame(ptr: Long, outBuffer: FloatArray, maxCount: Int): Int
     private external fun nativeClearHapticBuffer(ptr: Long)
+    private external fun nativeStartScheduler(ptr: Long): Boolean
+    private external fun nativeStopScheduler()
+
+    /**
+     * v2.1: Native callback — called from the C++ scheduler thread.
+     * Receives a batch of amplitude samples (20ms = 2 samples).
+     * Override or set [onFrameCallback] to handle these in HapticEngine.
+     */
+    @Volatile var onFrameCallback: ((FloatArray, Int) -> Unit)? = null
+
+    fun onNativeFrameReady(samples: FloatArray, count: Int) {
+        onFrameCallback?.invoke(samples, count)
+    }
+
+    fun startScheduler(): Boolean {
+        if (nativePtr != 0L) {
+            try {
+                return nativeStartScheduler(nativePtr)
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "startScheduler failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    fun stopScheduler() {
+        try {
+            nativeStopScheduler()
+        } catch (e: Exception) {
+            Log.e("NativeBridge", "stopScheduler failed: ${e.message}")
+        }
+    }
 }

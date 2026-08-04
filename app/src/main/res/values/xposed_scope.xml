@@ -8,6 +8,8 @@
         <item>com.kugou.android</item>
         <!-- 酷狗概念版 -->
         <item>com.kugou.android.lite</item>
+        <!-- md3music (酷狗概念版第三方) -->
+        <item>com.md3music.md3music</item>
         <!-- 网易云音乐 -->
         <item>com.netease.cloudmusic</item>
         <!-- QQ音乐 -->

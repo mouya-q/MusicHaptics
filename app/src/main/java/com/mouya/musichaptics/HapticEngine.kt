@@ -937,7 +937,7 @@ class HapticEngine(
 
         // v2.1: Stop native scheduler first — pthread_join ensures clean exit
         if (nativeSchedulerActive) {
-            nativeBridge.stopScheduler()
+            try { nativeBridge.stopScheduler() } catch (_: Throwable) {}
             nativeSchedulerActive = false
             Log.i(TAG, "Native Haptic Scheduler stopped (pthread_join complete).")
         }

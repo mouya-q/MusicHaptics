@@ -169,8 +169,9 @@ class NativeBridge {
         if (nativePtr != 0L) {
             try {
                 return nativeStartScheduler(nativePtr)
-            } catch (e: Exception) {
-                Log.e("NativeBridge", "startScheduler failed: ${e.message}")
+            } catch (e: Throwable) {
+                // UnsatisfiedLinkError extends Error, not Exception — must catch Throwable
+                Log.e("NativeBridge", "startScheduler failed: ${e.javaClass.simpleName}: ${e.message}")
             }
         }
         return false
@@ -179,8 +180,8 @@ class NativeBridge {
     fun stopScheduler() {
         try {
             nativeStopScheduler()
-        } catch (e: Exception) {
-            Log.e("NativeBridge", "stopScheduler failed: ${e.message}")
+        } catch (e: Throwable) {
+            Log.e("NativeBridge", "stopScheduler failed: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 }

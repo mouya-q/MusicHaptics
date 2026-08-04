@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 💥 焦土大革命：彻底开除 Material3！改用纯原生的系统暗黑主题作为基类 -->
+    <!-- 焦土大革命：开除 Material3！改用纯原生的系统暗黑主题作为基类 -->
     <!-- // 看不到外面的依赖库了吧？乖乖向原生的力量低头吧，小杂鱼组件们~ ( ᗜ ˰ ᗜ ) -->
     <style name="Theme.MusicHaptics" parent="@android:style/Theme.DeviceDefault.NoActionBar" />
 </resources>

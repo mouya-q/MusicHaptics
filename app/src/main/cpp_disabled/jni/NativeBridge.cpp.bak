@@ -1,0 +1,52 @@
+#include <jni.h>
+#include "HapticEngine.hpp"
+
+extern "C" {
+
+// 创建 C++ 引擎实例，返回内存句柄地址给 Java 挂载
+JNIEXPORT jlong JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeCreateEngine(JNIEnv* env, jobject thiz) {
+    auto* engine = new haptic::HapticEngine();
+    return reinterpret_cast<jlong>(engine);
+}
+
+// 销毁 Native 句柄，防止内存泄漏
+JNIEXPORT void JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeDestroyEngine(JNIEnv* env, jobject thiz, jlong ptr) {
+    if (ptr != 0) {
+        auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
+        delete engine;
+    }
+}
+
+// 参数重构配置
+JNIEXPORT void JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeConfigure(
+    JNIEnv* env, jobject thiz, jlong ptr, jfloat sampleRate, jfloat lowCut, jfloat highCut, jfloat amp) {
+    auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
+    if (engine) {
+        engine->configure(sampleRate, lowCut, highCut);
+        engine->setUserAmplitude(amp);
+    }
+}
+
+// 零拷贝DirectBuffer处理音频快
+JNIEXPORT void JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
+    JNIEnv* env, jobject thiz, jlong ptr, jobject directInputBuffer, jint size, jfloatArray outTelemetry) {
+    
+    auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
+    if (!engine) return;
+
+    // 获取 Direct Buffer 零拷贝原生地址
+    auto* inputPtr = static_cast<float*>(env->GetDirectBufferAddress(directInputBuffer));
+    if (!inputPtr) return;
+
+    jfloat telemetry[5];
+    engine->processAudioBlock(inputPtr, size, telemetry);
+
+    // 将结果一次性写回数组
+    env->SetFloatArrayRegion(outTelemetry, 0, 5, telemetry);
+}
+
+} // extern "C"

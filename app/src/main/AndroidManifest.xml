@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.VIBRATE"/>
     
-    <!-- 指向全新的自适应图标 XML 资源，彻底干掉 legacy 缩水 -->
+    <!-- 干掉 legacy 缩水 -->
     <application 
         android:allowBackup="false"
         android:icon="@drawable/ic_launcher_adaptive"
@@ -12,8 +12,9 @@
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
         <meta-data android:name="xposedmodule" android:value="true" />
-        <meta-data android:name="xposeddescription" android:value="音乐音频拦截与高级振动协同模块" />
+        <meta-data android:name="xposeddescription" android:value="音乐音频拦截与振动协同模块" />
         <meta-data android:name="xposedminversion" android:value="82" />
+        <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
 
         <provider android:name="com.itsaky.androidide.logsender.utils.LogSenderInstaller" tools:node="remove" />
         <service android:name="com.itsaky.androidide.logsender.LogSenderService" tools:node="remove" />
@@ -36,7 +37,7 @@
         
         
         
-        <!-- 并入：全新液态模糊高斯物理控制台 ps.听AI吹这个公式很nb -->
+        <!-- 并入：“控制台”-->
         <activity
             android:name=".HapticDashboardActivity"
             android:exported="false"

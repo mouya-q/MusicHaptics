@@ -2,7 +2,7 @@
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
     
-    <!-- 🎨 完美复刻原图：从顶部的极光柔绿（#F2FBF2）一路丝滑晕染到底部的薄荷浓绿（#A4DFA6） -->
+    <!-- 复刻：从顶部的极光柔绿（#F2FBF2）丝滑晕染到底部的薄荷浓绿（#A4DFA6）🤨 -->
     <gradient
         android:startColor="#F2FBF2"
         android:endColor="#A4DFA6"

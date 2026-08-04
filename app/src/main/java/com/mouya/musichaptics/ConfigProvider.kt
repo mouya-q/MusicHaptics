@@ -12,14 +12,14 @@ class ConfigProvider : ContentProvider() {
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
         val ctx = context ?: return null
-        
+
         when (method) {
-            // Single-key query: avoid blindly dumping all preferences into memory
+
             "get_pref" -> {
                 val key = arg ?: return null
                 val prefs = ctx.getSharedPreferences("haptics_config", Context.MODE_PRIVATE)
                 if (!prefs.contains(key)) return null
-                
+
                 val bundle = Bundle()
                 when (val value = prefs.all[key]) {
                     is Boolean -> bundle.putBoolean(key, value)
@@ -31,12 +31,11 @@ class ConfigProvider : ContentProvider() {
                 return bundle
             }
 
-            // Bulk query (kept for backward compatibility), with reduced intermediate overhead
             "get_prefs" -> {
                 val prefs = ctx.getSharedPreferences("haptics_config", Context.MODE_PRIVATE)
                 val allEntries = prefs.all
                 if (allEntries.isEmpty()) return null
-                
+
                 val bundle = Bundle()
                 for ((key, value) in allEntries) {
                     when (value) {

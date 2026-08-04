@@ -1,15 +1,7 @@
-repositories {
-    google()
-    mavenCentral()
-    maven { url = uri("https://jitpack.io") }
-    maven { url = uri("https://api.xposed.info/") }
-}
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    
-    // id("org.jetbrains.kotlin.plugin.compose") version "2.0.0" 
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
@@ -18,13 +10,22 @@ android {
 
     defaultConfig {
         applicationId = "com.mouya.musichaptics"
-        minSdk = 31
+        minSdk = 28
         targetSdk = 34
-        
-        // ᔦ ° ꒳ ° ᔨ ̖́-  版本号进位 → Liquid Glass Engine v2
-        //♡ ( ᗜ ˰ ᗜ )
-        versionCode = 96
-        versionName = "1.6.6_glass"
+        versionCode = 340
+        versionName = "3.4.0-alpha"
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    composeOptions {
+        kotlinCompilerExtensionVersion = "2.0.21"
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
     }
 
     compileOptions {
@@ -32,36 +33,51 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    buildFeatures {
-        viewBinding = false
-        compose = true // 开启 Compose 特性
+    // 使用预编译的 native library (jniLibs)
+    sourceSets.configureEach {
+        if (name == "main") {
+            jniLibs.srcDirs("src/main/jniLibs")
+        }
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.4.7" 
+    packagingOptions {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1,ASL2.0,NOTICE,LICENSE,LICENSE.txt,LICENSE.md,NOTICE.txt,NOTICE.md}"
+        }
     }
 }
 
 dependencies {
-    // Xposed 编译时依赖
     compileOnly("de.robv.android.xposed:api:82")
-
-    // AndroidX 核心与 Activity 支持（修复 ComponentActivity 和 setContent）
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.activity:activity-compose:1.8.2")
-
-    // Jetpack Compose 依赖（使用 BOM 统一管理版本）
-    implementation(platform("androidx.compose:compose-bom:2024.02.00"))
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation(platform("androidx.compose:compose-bom:2024.08.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.foundation:foundation-layout")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.runtime:runtime-livedata")
+    implementation("androidx.compose.animation:animation")
+    implementation("androidx.compose.animation:animation-core")
+    implementation("androidx.compose.ui:ui-text")
+    implementation("androidx.interpolator:interpolator:1.0.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
+    // AGSL RuntimeShader support for liquid glass effects - use older compatible version
+    implementation("androidx.graphics:graphics-core:1.0.0")
+    // Haze blur (librepods style)
+    implementation("dev.chrisbanes.haze:haze:1.5.0")
 
-    // kotlinx 协程支持（修复 delay 和 CoroutineScope 报错）
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    implementation("com.github.Dimezis:BlurView:version-2.0.3")
+    configurations.all {
+        resolutionStrategy.eachDependency {
+            when {
+                requested.group == "androidx.core" && requested.name.startsWith("core") ->
+                    useVersion("1.13.1")
+                requested.group == "androidx.activity" && requested.name.startsWith("activity") ->
+                    useVersion("1.9.3")
+            }
+        }
+    }
 }
-/*
- (ᗜ ˰ ᗜ) ​   ₍ᵔ･•･ᵔ₎      ㅎㅅㅎ      ♪(′ε′‧̣̥̇)      ૮⸝⸝o̴̶̷᷄ ·̭ o̴̶̥᷅⸝⸝ა  
- ᡴ⁽˶ᵔᴗᵔ˶⁾ꪫ
-*/

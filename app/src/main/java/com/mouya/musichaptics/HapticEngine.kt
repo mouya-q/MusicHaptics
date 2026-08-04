@@ -3,251 +3,497 @@ package com.mouya.musichaptics
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.SystemClock
+import android.os.VibrationEffect
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.*
 
-/**
- * High-Performance Electro-Haptic DSP Synthesis Engine (MusicHapticsX Super-Core).
- *
- * This engine receives normalized PCM frames from the AudioTrack interception layer,
- * processes them through a complete DSP pipeline (Linkwitz-Riley crossover, autocorrelation
- * pitch detection, dual-knee dynamic range compression, dual-node thermal simulation),
- * and routes the resulting multi-band intensity values to the HapticEventGenerator,
- * which maps them to native Android VibrationEffect calls — going through the system
- * Vibrator HAL → AW8697 kernel driver → LRA, rather than directly writing RTP sysfs.
- *
- * Architecture: DSP → HapticEventGenerator → Android Haptic API → Vibrator HAL → AW8697 → LRA
- */
+import com.mouya.musichaptics.LinkHealthMonitor
+import com.mouya.musichaptics.LogBroadcaster
+import com.mouya.musichaptics.NativeBridge
+import android.os.Build
+
+interface LogCallback {
+    fun onLog(message: String)
+}
+
 class HapticEngine(
     private val context: Context,
     private val prefs: SharedPreferences
 ) {
     companion object {
-        /** Logcat tag for filtering DSP engine diagnostic output. */
         private const val TAG = "HapticDSPCore"
 
-        /** Capacity (in number of float elements) of the concurrent ring buffer. */
         private const val RING_BUFFER_CAPACITY = 131072
 
-        /** Fixed processing block size (number of float samples per DSP iteration). */
-        private const val FRAME_BLOCK_SIZE = 512
+        private const val FRAME_BLOCK_SIZE = 256
 
-        /**
-         * Maximum number of interleaved audio channels the engine will accept.
-         * Prevents memory exhaustion from malformed multi-channel configurations.
-         */
         private const val MAXIMUM_CHANNELS = 8
 
-        // Thermal modeling temperature thresholds (degrees Celsius)
-        /** Ambient (room) temperature baseline for thermal simulation start state. */
         private const val AMBIENT_TEMPERATURE_CELSIUS = 25.0f
-
-        /**
-         * Temperature above which the thermal safety gain begins to roll off.
-         * A cosine-based interpolation smoothly reduces gain from 1.0 to 0.5
-         * between LIMITING_TEMPERATURE and CRITICAL_TEMPERATURE.
-         */
         private const val LIMITING_TEMPERATURE_CELSIUS = 80.0f
-
-        /**
-         * Temperature at which the output is fully muted (gain = 0.0).
-         * This provides absolute hardware protection against coil burn-out.
-         */
         private const val CRITICAL_TEMPERATURE_CELSIUS = 100.0f
+
+        const val SUB_BASS_LOW = 20f
+        const val SUB_BASS_HIGH = 80f
+        const val MID_BASS_LOW = 80f
+        const val MID_BASS_HIGH = 200f
+        const val TEXTURE_LOW = 200f
+        const val TEXTURE_HIGH = 800f
+
+        val WAVE_SUB_BASS_IMPACT = floatArrayOf(1.0f, 0.95f, 0.85f, 0.70f, 0.50f, 0.30f, 0.15f, 0.05f)
+        val WAVE_MID_TRANSIENT  = floatArrayOf(1.0f, 0.60f, 0.20f, 0.05f)
+        val WAVE_MICRO_TEXTURE  = floatArrayOf(0.4f, 0.80f, 0.40f, 0.10f, 0.60f, 0.20f)
     }
 
-    // -----------------------------------------------------------------------
-    // Haptic event generator — replaces the old JNI/RTP tunnel
-    // -----------------------------------------------------------------------
+    enum class HapticPreset(val id: Int, val description: String) {
+        BALANCED(0, "标准平衡模式"),
+        BASS_ENHANCED(1, "重低音增强 (Sub-Bass Emphasized)"),
+        TEXTURE_FOCUS(2, "高频微震纹理 (Micro-Texture Focus)"),
+        IMPACT_MAX(3, "极致冲击爆发 (Maximum Transient Attack)"),
+        CUSTOM(4, "自定义调校 (Custom Parameters)")
+    }
 
-    /** Maps DSP telemetry to Android VibrationEffect calls via system Vibrator HAL. */
+    private val nativeBridge = NativeBridge()
+
+    private val directPcmBuffer: ByteBuffer = ByteBuffer.allocateDirect(FRAME_BLOCK_SIZE * 4).apply {
+        order(ByteOrder.nativeOrder())
+    }
+    private val floatPcmView: FloatBuffer = directPcmBuffer.asFloatBuffer()
+
+    private val nativeTelemetryResult = FloatArray(6)
+
     val hapticEventGenerator = HapticEventGenerator(context, detectDeviceProfile())
 
-    /** Reference to the UI builder passed from [MainUiBuilder], for log display. */
-    var uiBuilder: MainUiBuilder? = null
+    val hapticComposer = HapticComposer(context, detectDeviceProfile(), prefs)
 
-    // -----------------------------------------------------------------------
-    // Audio configuration state
-    // -----------------------------------------------------------------------
+    private val hapticSynthesizer = HapticSynthesizer(detectDeviceProfile())
 
-    /** Current sample rate in Hz (default 48 kHz for typical Android AudioTrack). */
+    private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val engineJob = engineScope.coroutineContext[Job]!!
+
+    var logCallback: LogCallback? = null
+
     private var sampleRate = 48000
-
-    /** Current channel count (default 2 for stereo). */
     private var channels = 2
 
-    // -----------------------------------------------------------------------
-    // Ring buffer and processing frame allocations
-    // -----------------------------------------------------------------------
-
-    /** Multi-producer / single-consumer concurrent ring buffer for PCM float samples. */
-    private val audioRingBuffer = ConcurrentAudioRingBuffer(RING_BUFFER_CAPACITY)
-
-    /** Reusable frame buffer for reading blocks from the ring buffer. */
+    private val audioRingBuffer = AudioFifoBuffer(RING_BUFFER_CAPACITY)
     private val processingFrame = FloatArray(FRAME_BLOCK_SIZE)
 
-    // -----------------------------------------------------------------------
-    // Per-band signal buffers (reused every iteration to avoid GC pressure)
-    // -----------------------------------------------------------------------
-
-    private val subBassSignal = FloatArray(FRAME_BLOCK_SIZE)
-    private val midBassSignal = FloatArray(FRAME_BLOCK_SIZE)
-    private val presenceSignal = FloatArray(FRAME_BLOCK_SIZE)
-
-    // -----------------------------------------------------------------------
-    // DSP processing pipeline components
-    // -----------------------------------------------------------------------
-
-    /** Three-way Linkwitz-Riley (4th-order) crossover network. */
-    private val crossoverNetwork = ThreeWayCrossover()
-
-    /** Autocorrelation-based pitch estimator with parabolic interpolation. */
-    private val pitchTracker = AutocorrelationPitchEstimator()
-
-    /** Dual-knee soft-knee dynamic range compressor with envelope follower. */
-    private val dynamicCompressor = DualKneeCompressor()
-
-    /** Dual-node (coil-to-magnet) electro-thermal simulation model. */
-    private val thermalSimulator = DualNodeThermalSimulator()
-
-    // -----------------------------------------------------------------------
-    // Control & telemetry state
-    // -----------------------------------------------------------------------
-
-    /** Master engine enable flag, synchronized with the user-facing toggle in SharedPreferences. */
     private val isEngineEnabled = AtomicBoolean(true)
-
-    /** Monotonically incrementing frame counter used for periodic log sampling. */
     private val frameIndexCounter = AtomicLong(0)
-
-    /** Timestamp (SystemClock.elapsedRealtime) of the last parameter sync, used to throttle updates. */
     private var lastParameterUpdateTime = 0L
 
-    /** Telemetry monitor exposed to the UI for real-time DSP state visualization. */
+    // === Continuous Waveform State ===
+    @Volatile private var directDriveSmoothAmp = 0f  // Smoothed amplitude for telemetry display
+
     val telemetryData = TelemetryMonitor()
 
+    // Channels and DspFrameData removed — C++ 5-layer synthesizer handles all synthesis internally
+
     init {
-        // Synchronize DSP parameters from SharedPreferences.
-        // The HapticEventGenerator is ready immediately — no root or sysfs needed.
+
         synchronizeParameters()
-        Log.i(TAG, "DSP parameters initialized. HapticEventGenerator ready (hasVibrator=${hapticEventGenerator.hasVibrator}, profile=${hapticEventGenerator.profile.name}).")
-        uiBuilder?.appendLog("[System Ready] 设备: ${hapticEventGenerator.profile.name} · ${hapticEventGenerator.profile.description}")
+
+        engineScope.launch {
+            runContinuousHapticLoop()
+        }
+
+        val readyMsg = "[System Ready] Continuous Haptic Engine: ${if (nativeBridge.isLoaded) "ACTIVE" else "FALLBACK"} | Device: ${hapticEventGenerator.profile.name} | 5-Layer Composer: C++ Native | Mode: Continuous Waveform"
+        Log.i(TAG, readyMsg)
+        logCallback?.onLog(readyMsg)
+        LogBroadcaster.sendLog(context, readyMsg)
     }
 
     /**
-     * Synchronizes all runtime DSP parameters from SharedPreferences.
+     * Continuous Haptic Loop — pulls continuous amplitude frames from C++ 5-layer
+     * synthesizer and plays them via VibrationEffect.createWaveform.
      *
-     * Reads the master enable toggle, input gain, amplitude scale, and bass purity
-     * setting, then:
-     * - Maps the purity (0..100) to crossover cutoff frequencies.
-     * - Recomputes the Linkwitz-Riley crossover coefficients.
-     * - Reconfigures the dual-knee compressor with the current gain, block rate,
-     *   and fixed DRC parameters (threshold, ratio, knee, attack/release, makeup).
-     * - Updates the telemetry monitor with the computed cutoffs and user amplitude.
+     * This replaces the old discrete pulse generation with a pull-based
+     * continuous waveform playback model.
+     *
+     * Architecture:
+     * - C++ HapticEngine.hpp processes audio and fills a ring buffer with continuous
+     *   amplitude samples (0-255) from 5-layer synthesis (Beat/Bass/Texture/Melody/Emotion)
+     * - C++ produces samples at 100Hz (10ms each), matching Kotlin playback timing exactly
+     * - This loop pulls up to 4 samples per 40ms interval → 40ms of vibration per pull
+     * - Uses VibrationEffect.createWaveform with repeat=-1 (one-shot, no looping)
+     * - Thermal safety and user gain are applied in C++ layer
      */
-    private fun synchronizeParameters() {
+    private suspend fun runContinuousHapticLoop() {
+        val pullIntervalMs = 40L       // Frame pull interval — 40ms for low latency
+        val sampleDurationMs = 10L     // Each amplitude sample → 10ms of vibration (matches C++ 100Hz)
+        val maxSamplesPerPull = 4       // 4 samples × 10ms = 40ms playback per pull
+        val frameBuffer = FloatArray(maxSamplesPerPull)
+
+        // ── Multi-primitive fusion: HapticFeedbackEngine for discrete primitives ──
+        val feedbackEngine = HapticFeedbackEngine.create(context)
+        val isApi29Plus = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+
+        // ── Primitive trigger state ──
+        var lastKickTime = 0L           // Debounce: minimum 80ms between KICK triggers
+        var lastShortTickTime = 0L      // Debounce: minimum 40ms between short ticks
+        val kickRefractoryMs = 80L
+        val shortTickRefractoryMs = 40L
+
+        // ── Primitive classification thresholds (0-255 scale) ──
+        val kickThreshold = 200         // >200 → KICK (EFFECT_HEAVY_CLICK)
+        val longVibeThreshold = 100      // 100-200 → sustained vibration (createOneShot)
+        // <100 → short tick (EFFECT_TICK or rapid createOneShot)
+
+        var frameCounter = 0L
+        var lastAudioInputTime = 0L
+        val silenceTimeoutMs = 300L
+
+        while (true) {
+            val frameStartTime = SystemClock.elapsedRealtime()
+
+            try {
+                // Pull continuous amplitude frame from C++ 5-layer synthesizer
+                val sampleCount = if (nativeBridge.isLoaded) {
+                    nativeBridge.getHapticFrame(frameBuffer, maxSamplesPerPull)
+                } else {
+                    0
+                }
+
+                // Track audio activity for silence detection
+                if (sampleCount > 0) {
+                    val maxAmp = (0 until sampleCount).maxOfOrNull { frameBuffer[it] } ?: 0f
+                    if (maxAmp > 1f) {
+                        lastAudioInputTime = frameStartTime
+                    }
+                }
+
+                val timeSinceAudio = frameStartTime - lastAudioInputTime
+                val hasAudioActivity = timeSinceAudio < silenceTimeoutMs
+
+                if (hasAudioActivity && sampleCount > 0) {
+                    val maxAmp = (0 until sampleCount).maxOfOrNull { frameBuffer[it] } ?: 0f
+                    if (maxAmp > 2) {
+                        // ═══ Multi-Primitive Fusion ═══
+                        // Classify each sample into a primitive type and trigger accordingly.
+                        // Strategy: Mix discrete primitives (KICK, TICK) with continuous waveform body.
+                        //
+                        // 1. If any sample > kickThreshold → fire KICK (EFFECT_HEAVY_CLICK) via HapticFeedbackEngine
+                        // 2. For sustained mid-range (100-200) → createOneShot as "body" vibration
+                        // 3. For low-range (<100) fire short TICK primitives for texture
+                        // 4. Fall back to waveform for the remainder to maintain continuity
+
+                        val vib = hapticEventGenerator.getVibratorInstance()
+                        if (vib != null && hapticEventGenerator.hasVibrator) {
+                            var kickTriggered = false
+                            var longVibeAmp = 0
+                            var shortTickTriggered = false
+
+                            // Classify samples
+                            for (i in 0 until sampleCount) {
+                                val amp = frameBuffer[i].toInt().coerceIn(0, 255)
+                                when {
+                                    amp > kickThreshold && !kickTriggered -> {
+                                        // KICK: fire once per pull cycle (debounced)
+                                        val timeSinceKick = frameStartTime - lastKickTime
+                                        if (timeSinceKick >= kickRefractoryMs) {
+                                            kickTriggered = true
+                                            lastKickTime = frameStartTime
+                                            feedbackEngine.perform(HapticFeedbackEngine.HapticStyle.KICK)
+                                        }
+                                    }
+                                    amp >= longVibeThreshold -> {
+                                        // Long vibration: accumulate for body
+                                        longVibeAmp = maxOf(longVibeAmp, amp)
+                                        // Continue — waveform body will handle this
+                                    }
+                                    amp in 1..99 -> {
+                                        // Short tick: fire rapid TICK for texture
+                                        val timeSinceTick = frameStartTime - lastShortTickTime
+                                        if (timeSinceTick >= shortTickRefractoryMs && !shortTickTriggered) {
+                                            shortTickTriggered = true
+                                            lastShortTickTime = frameStartTime
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ── Waveform body: play a reduced-amplitude continuous waveform ──
+                            // For the "body" of the vibration, use waveform at 60% of the original amplitude
+                            // to avoid overwhelming the LRA when KICK is also firing.
+                            // This gives the "rumble" feel while KICK provides the "punch".
+                            if (!kickTriggered || longVibeAmp > 0) {
+                                val bodyAmpScale = if (kickTriggered) 0.5f else 1.0f
+                                val timings = LongArray(sampleCount) { sampleDurationMs }
+                                val amplitudes = IntArray(sampleCount) { idx ->
+                                    (frameBuffer[idx] * bodyAmpScale).toInt().coerceIn(0, 255)
+                                }
+
+                                // Only play waveform if there's meaningful amplitude in the body
+                                val bodyMax = amplitudes.maxOrNull() ?: 0
+                                if (bodyMax > 20) {
+                                    try {
+                                        val effect = VibrationEffect.createWaveform(timings, amplitudes, -1)
+                                        vib.vibrate(effect)
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "Waveform body playback failed: ${e.message}")
+                                    }
+                                }
+                            }
+
+                            // ── Fire short tick for texture ──
+                            if (shortTickTriggered && !kickTriggered) {
+                                try {
+                                    if (isApi29Plus) {
+                                        val tick = VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK)
+                                        vib.vibrate(tick)
+                                    } else {
+                                        vib.vibrate(VibrationEffect.createOneShot(8, 80))
+                                    }
+                                } catch (_: Exception) {}
+                            }
+
+                            LinkHealthMonitor.heartbeatVibrateCall()
+                            // Update smoothed amplitude for telemetry display (normalized to 0-1.0)
+                            val normalizedMaxAmp = maxAmp / 255.0f
+                            directDriveSmoothAmp = directDriveSmoothAmp * 0.5f + normalizedMaxAmp * 0.5f
+
+                            if (frameCounter % 30L == 0L) {
+                                val ampStr = (0 until sampleCount).joinToString(",") { frameBuffer[it].toInt().coerceIn(0, 255).toString() }
+                                val primitive = when {
+                                    kickTriggered -> "KICK"
+                                    shortTickTriggered -> "TICK"
+                                    longVibeAmp > 0 -> "LONG"
+                                    else -> "SILENCE"
+                                }
+                                Log.i(TAG, "▶ FUSION VIBRATE | samples=$sampleCount amps=[$ampStr] max=${frameBuffer.maxOrNull()?.toInt() ?: 0} smooth=$directDriveSmoothAmp primitive=$primitive")
+                            }
+                        }
+                    } else {
+                        // Near-silence from C++ (amplitude ≤ 2): cancel ongoing vibration
+                        hapticEventGenerator.cancel()
+                        directDriveSmoothAmp *= 0.3f  // Fast decay
+                    }
+                } else if (timeSinceAudio >= silenceTimeoutMs) {
+                    // Silence timeout — ensure vibrator stops
+                    if (frameCounter % 30L == 0L) {
+                        hapticEventGenerator.cancel()
+                    }
+                    directDriveSmoothAmp = 0f
+                }
+
+                LinkHealthMonitor.heartbeatTelemetry()
+
+                if (frameCounter % 60L == 0L) {
+                    synchronizeParameters()
+                }
+
+                // Periodic telemetry output (every ~600ms at 50ms intervals)
+                if (frameCounter % 12L == 0L) {
+                    val latency = SystemClock.elapsedRealtime() - frameStartTime
+                    telemetryData.frameLatencyMs = latency
+
+                    val subLevel = telemetryData.subBassOutputLevel
+                    val midLevel = telemetryData.midBassOutputLevel
+                    val texLevel = telemetryData.presenceOutputLevel
+                    val f0 = telemetryData.fundamentalFrequencyHz
+                    val temp = telemetryData.estimatedCoilTemperature
+                    val thermalGain = telemetryData.thermalAttenuationFactor
+
+                    val logMsg = String.format(
+                        "DSP [Fusion] | S:%.2f M:%.2f T:%.2f | F0:%.0fHz samples=%d smooth=%.2f Δ=%dms",
+                        subLevel, midLevel, texLevel, f0, sampleCount, directDriveSmoothAmp, latency
+                    )
+                    logCallback?.onLog(logMsg)
+                    LogBroadcaster.sendLog(context, logMsg)
+                    telemetryData.dispatchedSubBassImpacts++
+
+                    LogBroadcaster.sendTelemetry(
+                        context = context,
+                        sub = subLevel,
+                        mid = midLevel,
+                        pres = texLevel,
+                        f0 = f0,
+                        temp = temp,
+                        atten = thermalGain,
+                        latency = latency,
+                        loFreq = telemetryData.lowPassCutoffHz,
+                        hiFreq = telemetryData.highPassCutoffHz,
+                        ampScale = telemetryData.userAmplitudeScale,
+                        overruns = telemetryData.ringBufferOverruns,
+                        subCount = telemetryData.dispatchedSubBassImpacts,
+                        midCount = telemetryData.dispatchedMidBassTransients,
+                        texCount = telemetryData.dispatchedMicroTextures,
+                        keyStrikeActive = false,
+                        keyStrikeSemantic = "FUSION",
+                        semanticType = "MULTI-PRIMITIVE",
+                        lraDisp = directDriveSmoothAmp,
+                        lraVel = 0f,
+                        lraForce = directDriveSmoothAmp,
+                        lraPhase = f0,
+                        adsrEnv = directDriveSmoothAmp,
+                        thermalGain = thermalGain,
+                        personaName = "Fusion-MultiPrimitive",
+                        primitiveType = "",
+                        primitiveSemantic = "",
+                        primitiveIntensity = 0,
+                        primitiveDuration = 0,
+                        gammaValue = 1f
+                    )
+                }
+
+                frameCounter++
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Coroutine cancelled (e.g. release() called) — exit gracefully
+                Log.i(TAG, "Continuous haptic loop cancelled")
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Continuous haptic loop error: ${e.message}")
+            }
+
+            // Sleep until next pull interval
+            val elapsed = SystemClock.elapsedRealtime() - frameStartTime
+            val sleepMs = (pullIntervalMs - elapsed).coerceIn(1L, pullIntervalMs)
+            try {
+                kotlinx.coroutines.delay(sleepMs)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                Log.i(TAG, "Continuous haptic loop cancelled during sleep")
+                break
+            }
+        }
+    }
+
+// playWaveformSegment and generateDirectDriveSegment removed — replaced by runContinuousHapticLoop
+    // which pulls continuous amplitude frames from C++ 5-layer synthesizer and plays them
+    // directly via VibrationEffect.createWaveform, eliminating discrete on-off pulse generation.
+
+    // updateSynthesizerTelemetry removed — C++ 5-layer engine handles all synthesis internally.
+    // Telemetry is now updated directly in executeDspPipeline from nativeTelemetryResult.
+
+    fun synchronizeParameters() {
         val masterState = try { prefs.getBoolean("master_switch", true) } catch (e: Exception) { true }
         isEngineEnabled.set(masterState)
 
         val inputGain = try { prefs.getFloat("haptic_gain", 1.0f) } catch (e: Exception) { 1.0f }
-        val outputAmp = try { prefs.getFloat("haptic_amplitude", 1.0f) } catch (e: Exception) { 1.0f }
+        val outputAmp = try { prefs.getFloat("haptic_amplitude", 2.0f) } catch (e: Exception) { 2.0f }
         val purityParam = try { prefs.getInt("haptic_bass_purity", 50) } catch (e: Exception) { 50 }
+        val presetId = try { prefs.getInt("haptic_preset_id", HapticPreset.BALANCED.id) } catch (e: Exception) { HapticPreset.BALANCED.id }
 
-        // Map purity (0..100) to crossover frequencies: lower purity = higher cutoff
-        // Range: 55 Hz (purity=100) ... 320 Hz (purity=0)
         val lowCutoffFreq = 320.0f - (purityParam.coerceIn(0, 100).toFloat() * 2.65f)
         val highCutoffFreq = lowCutoffFreq * 2.2f
 
-        crossoverNetwork.calculateCoefficients(sampleRate.toFloat(), lowCutoffFreq, highCutoffFreq)
-
-        val blockRate = sampleRate.toFloat() / FRAME_BLOCK_SIZE.toFloat()
-        dynamicCompressor.setParameters(
-            thresholdDb = -32.0f,
-            ratio = 4.5f,
-            kneeWidthDb = 6.0f,
-            attackMs = 4.0f,
-            releaseMs = 75.0f,
-            makeupGainDb = 14.0f + (inputGain * 4.0f),
-            blockRate = blockRate
+        nativeBridge.configure(
+            sampleRate = sampleRate.toFloat(),
+            lowCut = lowCutoffFreq,
+            highCut = highCutoffFreq,
+            amplitude = outputAmp,
+            presetId = presetId
         )
 
         telemetryData.lowPassCutoffHz = lowCutoffFreq
         telemetryData.highPassCutoffHz = highCutoffFreq
         telemetryData.userAmplitudeScale = outputAmp
 
-        // 注入 boostLevel 到 HapticEventGenerator（来自预设档位）
         val boostLevel = try { prefs.getFloat("haptic_boost_level", 1.0f) } catch (e: Exception) { 1.0f }
         hapticEventGenerator.boostLevel = boostLevel
+        hapticEventGenerator.userAmplitudeScale = outputAmp.coerceIn(0.5f, 4.0f)
 
-        // 挂载 UI 日志管道
-        hapticEventGenerator.logListener = { msg -> uiBuilder?.appendLog(msg) }
+        val silenceTh = try { prefs.getFloat("silence_threshold", Float.NaN) } catch (e: Exception) { Float.NaN }
+        hapticEventGenerator.injectedSilenceThreshold = if (silenceTh.isNaN()) null else silenceTh
+
+        val energyTh = try { prefs.getFloat("energy_threshold", Float.NaN) } catch (e: Exception) { Float.NaN }
+        hapticEventGenerator.injectedEnergyThreshold = if (energyTh.isNaN()) null else energyTh
+
+        val minAmp = try { prefs.getInt("min_amplitude", -1) } catch (e: Exception) { -1 }
+        hapticEventGenerator.injectedMinGuaranteedAmplitude = if (minAmp < 0) null else minAmp
+
+        hapticEventGenerator.synchronizeProfile(prefs)
+        hapticEventGenerator.synchronizePreset(prefs)
+
+        hapticEventGenerator.logListener = { msg ->
+            logCallback?.onLog(msg)
+            LogBroadcaster.sendLog(context, msg)
+        }
+
+        val synthConfig = HapticSynthesizer.SynthConfig(
+            synthesisRateHz = try { prefs.getInt("synth_rate_hz", HapticSynthesizer.SYNTHESIS_RATE_HZ) } catch (e: Exception) { HapticSynthesizer.SYNTHESIS_RATE_HZ },
+            lraF0 = try { prefs.getFloat("synth_lra_f0", HapticSynthesizer.LRA_F0) } catch (e: Exception) { HapticSynthesizer.LRA_F0 },
+            lraQ = try { prefs.getFloat("synth_lra_q", HapticSynthesizer.LRA_Q) } catch (e: Exception) { HapticSynthesizer.LRA_Q },
+            attackTauImpact = try { prefs.getFloat("synth_attack_impact", HapticSynthesizer.ATTACK_TAU_IMPACT) } catch (e: Exception) { HapticSynthesizer.ATTACK_TAU_IMPACT },
+            decayTauImpact = try { prefs.getFloat("synth_decay_impact", HapticSynthesizer.DECAY_TAU_IMPACT) } catch (e: Exception) { HapticSynthesizer.DECAY_TAU_IMPACT },
+            attackTauContinuous = try { prefs.getFloat("synth_attack_continuous", HapticSynthesizer.ATTACK_TAU_CONTINUOUS) } catch (e: Exception) { HapticSynthesizer.ATTACK_TAU_CONTINUOUS },
+            decayTauContinuous = try { prefs.getFloat("synth_decay_continuous", HapticSynthesizer.DECAY_TAU_CONTINUOUS) } catch (e: Exception) { HapticSynthesizer.DECAY_TAU_CONTINUOUS },
+            releaseTau = try { prefs.getFloat("synth_release", HapticSynthesizer.RELEASE_TAU) } catch (e: Exception) { HapticSynthesizer.RELEASE_TAU },
+            sustainLevel = try { prefs.getFloat("synth_sustain", HapticSynthesizer.SUSTAIN_LEVEL) } catch (e: Exception) { HapticSynthesizer.SUSTAIN_LEVEL },
+            thermalWarn = try { prefs.getFloat("synth_thermal_warn", HapticSynthesizer.THERMAL_WARN) } catch (e: Exception) { HapticSynthesizer.THERMAL_WARN },
+            thermalCrit = try { prefs.getFloat("synth_thermal_crit", HapticSynthesizer.THERMAL_CRIT) } catch (e: Exception) { HapticSynthesizer.THERMAL_CRIT },
+            thermalRth = try { prefs.getFloat("synth_thermal_rth", HapticSynthesizer.THERMAL_RTH) } catch (e: Exception) { HapticSynthesizer.THERMAL_RTH },
+            thermalCth = try { prefs.getFloat("synth_thermal_cth", HapticSynthesizer.THERMAL_CTH) } catch (e: Exception) { HapticSynthesizer.THERMAL_CTH },
+            impactGain = try { prefs.getFloat("synth_impact_gain", 1.0f) } catch (e: Exception) { 1.0f },
+            continuousGain = try { prefs.getFloat("synth_continuous_gain", 1.0f) } catch (e: Exception) { 1.0f },
+            textureGain = try { prefs.getFloat("synth_texture_gain", 1.0f) } catch (e: Exception) { 1.0f },
+            masterGain = try { prefs.getFloat("synth_master_gain", 1.0f) } catch (e: Exception) { 1.0f },
+        )
+        hapticSynthesizer.updateParameters(synthConfig)
     }
 
-    /**
-     * Reconfigures the DSP engine for a new sample rate and/or channel count.
-     *
-     * Validates the parameters (positive integers, channel count capped by [MAXIMUM_CHANNELS]),
-     * then clears the ring buffer, resets all DSP components with the new rate, resynchronizes
-     * user preferences, and logs the change via both Logcat and the UI log panel.
-     *
-     * @param newSampleRate The new sample rate in Hz (e.g. 44100, 48000).
-     * @param newChannels   The new number of interleaved channels (1..[MAXIMUM_CHANNELS]).
-     */
     fun reconfigure(newSampleRate: Int, newChannels: Int) {
         if (newSampleRate <= 0 || newChannels <= 0 || newChannels > MAXIMUM_CHANNELS) {
-            Log.w(TAG, "Reconfiguration rejected. Invalid audio specification: ${newSampleRate}Hz | $newChannels Ch")
+            Log.w(TAG, "Reconfiguration rejected: ${newSampleRate}Hz | $newChannels Ch")
             return
         }
 
-        if (this.sampleRate == newSampleRate && this.channels == newChannels) {
-            return
-        }
+        if (this.sampleRate == newSampleRate && this.channels == newChannels) return
 
         this.sampleRate = newSampleRate
         this.channels = newChannels
 
-        // Flush the ring buffer and reset all DSP pipeline components
         audioRingBuffer.clear()
-        crossoverNetwork.reset()
-        pitchTracker.initialize(newSampleRate)
-        dynamicCompressor.reset()
-
-        // Reinitialize the thermal simulator with the updated frame duration
-        val stepTimeSec = FRAME_BLOCK_SIZE.toFloat() / sampleRate.toFloat()
-        thermalSimulator.reset(stepTimeSec)
-
-        // Re-sync all user-adjustable parameters from SharedPreferences
         synchronizeParameters()
 
-        val logMessage = "System reconfigured to: ${sampleRate}Hz | $channels Channels"
+        val logMessage = "System reconfigured to: ${sampleRate}Hz | $channels Channels (Native Engine Active)"
         Log.i(TAG, logMessage)
-        uiBuilder?.appendLog(logMessage)
+        logCallback?.onLog(logMessage)
+        LogBroadcaster.sendLog(context, logMessage)
     }
 
     /**
-     * Processes a raw PCM [ShortArray] frame intercepted from [AudioTrack.write].
-     *
-     * Steps:
-     * 1. Guards: ignores null, empty, or engine-disabled frames (flushes ring buffer on disable).
-     * 2. Down-mixes the interleaved multi-channel PCM to a mono float array
-     *    using channel-count-specific scaling (stereo: 1/65536, mono: 1/32768, multi: 1/(ch|*|32768)).
-     * 3. Writes the normalized samples into the concurrent ring buffer, then repeatedly
-     *    reads [FRAME_BLOCK_SIZE] blocks and feeds them to [executeDspPipeline].
-     * 4. A safety iteration limit (64) prevents an infinite loop if the ring buffer grows
-     *    faster than it is consumed; overruns are tracked via [TelemetryMonitor.ringBufferOverruns].
-     *
-     * @param pcmData A [ShortArray] of interleaved PCM samples from the intercepted AudioTrack.
+     * Called when AudioTrack.pause() or stop() is detected via Hook.
+     * Immediately forces all ADSR envelopes into release state and cancels
+     * any ongoing vibration, preventing the "still vibrating after pause" bug.
      */
+    fun onPlaybackPaused() {
+        Log.i(TAG, "[PLAYBACK PAUSED] Forcing immediate haptic decay")
+        LogBroadcaster.sendLog(context, "[PLAYBACK PAUSED] Forcing immediate haptic decay")
+        
+        nativeBridge.clearHapticBuffer()
+        directDriveSmoothAmp = 0f
+        hapticSynthesizer.forceDecay()
+        audioRingBuffer.clear()
+        hapticEventGenerator.cancel()
+        LinkHealthMonitor.setPlayingState(false)
+    }
+
     fun processAudioFrame(pcmData: ShortArray?) {
         if (pcmData == null || pcmData.isEmpty() || !isEngineEnabled.get()) {
             if (!isEngineEnabled.get()) {
                 audioRingBuffer.clear()
-                // Cancel any in-flight vibration when the engine is disabled
                 hapticEventGenerator.cancel()
             }
             return
+        }
+
+        LinkHealthMonitor.setPlayingState(true)
+
+        LinkHealthMonitor.heartbeatAudioInput()
+
+        if (frameIndexCounter.get() % 50L == 0L) {
+            Log.d("HapticLink", "【节点 1】音频已输入 | 采样点数: ${pcmData.size} | channels: $channels | engineEnabled: ${isEngineEnabled.get()}")
         }
 
         val sampleLength = pcmData.size
@@ -260,24 +506,21 @@ class HapticEngine(
         try {
             when (channels) {
                 1 -> {
-                    // Mono: direct PCM-to-float conversion, 1/32768 factor
                     val scaleFactor = 1.0f / 32768.0f
                     for (i in pcmData.indices) {
                         normalizedBuffer[writerOffset++] = pcmData[i].toFloat() * scaleFactor
                     }
                 }
                 2 -> {
-                    // Stereo: sum left+right, scale to ~±1.36 max (48k divisor, ~36% more gain vs /65536)
                     var i = 0
-                    val scaleFactor = 1.0f / 48000.0f
+
+                    val scaleFactor = 1.0f / 65536.0f
                     while (i < sampleLength - 1) {
-                        val monoSum = (pcmData[i].toFloat() + pcmData[i + 1].toFloat()) * scaleFactor
-                        normalizedBuffer[writerOffset++] = monoSum
+                        normalizedBuffer[writerOffset++] = (pcmData[i].toFloat() + pcmData[i + 1].toFloat()) * scaleFactor
                         i += 2
                     }
                 }
                 else -> {
-                    // Multi-channel (3+): average all channels with 1/32768 per-channel scaling
                     var i = 0
                     val channelNormalizationFactor = 1.0f / (channels.toFloat() * 32768.0f)
                     while (i < sampleLength - channels + 1) {
@@ -297,534 +540,85 @@ class HapticEngine(
 
         audioRingBuffer.write(normalizedBuffer, writerOffset)
 
-        // Drain the ring buffer in FRAME_BLOCK_SIZE chunks, with a 64-iteration safety cap
         var processingSafetyIterations = 0
         while (audioRingBuffer.read(processingFrame, FRAME_BLOCK_SIZE)) {
             if (processingSafetyIterations++ > 64) {
                 telemetryData.ringBufferOverruns++
                 break
             }
-            executeDspPipeline(processingFrame)
+            try {
+                executeDspPipeline(processingFrame)
+            } catch (t: Throwable) {
+                Log.e(TAG, "DSP pipeline crashed: ${t.message}")
+                audioRingBuffer.clear()
+                break
+            }
         }
     }
 
-    /**
-     * Executes the complete DSP pipeline on one processing block.
-     *
-     * The pipeline stages are:
-     * 1. Periodically synchronize user parameters (every 600 ms).
-     * 2. Pitch tracking via autocorrelation with parabolic interpolation.
-     * 3. Three-band decimation through the Linkwitz-Riley 4th-order crossover.
-     * 4. RMS computation for each band (sub, mid, presence).
-     * 5. Dual-knee soft-knee dynamic range compression on each band.
-     * 6. Electro-thermal linear-resonant-actuator (LRA) simulation
-     *    using a lumped dual-node (coil-to-magnet) model.
-     * 7. Closed-loop thermal safety: cosine-interpolated gain roll-off
-     *    from 1.0 at LIMITING_TEMPERATURE to 0.0 at CRITICAL_TEMPERATURE.
-     * 8. Final gain scaling (amplitude * thermal safety), then push
-     *    the three-band intensities and pitch to the native RTP tunnel.
-     *
-     * @param block A [FloatArray] of mono PCM samples ([FRAME_BLOCK_SIZE] elements).
-     */
     private fun executeDspPipeline(block: FloatArray) {
         val currentTimeMs = SystemClock.elapsedRealtime()
 
-        // Throttle parameter sync to every 600 ms to avoid unnecessary SharedPreferences I/O
-        if (currentTimeMs - lastParameterUpdateTime > 600) {
+        if (currentTimeMs - lastParameterUpdateTime > 300) {
             synchronizeParameters()
             lastParameterUpdateTime = currentTimeMs
         }
 
         val currentFrameId = frameIndexCounter.incrementAndGet()
 
-        // ---- Stage 1: Pitch Tracking ----
-        val detectedFundamentalFreq = pitchTracker.analyzeSignal(block)
-        telemetryData.fundamentalFrequencyHz = detectedFundamentalFreq
+        floatPcmView.position(0)
+        floatPcmView.put(block, 0, FRAME_BLOCK_SIZE)
 
-        // ---- Stage 2: Multi-band decimation via Linkwitz-Riley crossover ----
-        for (i in 0 until FRAME_BLOCK_SIZE) {
-            crossoverNetwork.processSample(block[i])
-            subBassSignal[i] = crossoverNetwork.subBassOutput
-            midBassSignal[i] = crossoverNetwork.midBassOutput
-            presenceSignal[i] = crossoverNetwork.presenceOutput
+        nativeBridge.processAudioDirect(directPcmBuffer, FRAME_BLOCK_SIZE * 4, nativeTelemetryResult)
+
+        val finalSubIntensity = nativeTelemetryResult[0]
+        val finalMidIntensity = nativeTelemetryResult[1]
+        val finalPresenceIntensity = nativeTelemetryResult[2]
+        val detectedFundamentalFreq = nativeTelemetryResult[3]
+        val estimatedCoilTemperature = nativeTelemetryResult[4]
+        val thermalSafetyGain = nativeTelemetryResult[5]
+
+        LinkHealthMonitor.heartbeatDspOutput()
+
+        if (currentFrameId % 20L == 0L) {
+            Log.d("HapticLink", "【节点 2】Native 输出 | Sub: $finalSubIntensity | Mid: $finalMidIntensity | Texture: $finalPresenceIntensity | F0: ${detectedFundamentalFreq}Hz | Temp: ${estimatedCoilTemperature}°C | ThermalGain: $thermalSafetyGain")
         }
 
-        // ---- Stage 3: RMS computation per band ----
-        val subBassRms = computeRms(subBassSignal)
-        val midBassRms = computeRms(midBassSignal)
-        val presenceRms = computeRms(presenceSignal)
-
-        // ---- Stage 4: Piecewise soft-knee dynamic range compression ----
-        val compressedSub = dynamicCompressor.applyCompression(subBassRms)
-        val compressedMid = dynamicCompressor.applyCompression(midBassRms)
-        val compressedPresence = dynamicCompressor.applyCompression(presenceRms)
-
-        // ---- Stage 5: Electro-thermal LRA simulation (coil-to-magnet dual-node) ----
-        // Weighted power sum: sub-bass contributes fully, mid-bass at 40 % (lower thermal coupling)
-        val electricalPowerPowerSum = (compressedSub * compressedSub) + (compressedMid * compressedMid * 0.4f)
-        val estimatedCoilTemperature = thermalSimulator.updateThermalDynamics(electricalPowerPowerSum)
-        telemetryData.estimatedCoilTemperature = estimatedCoilTemperature
-
-        // ---- Stage 6: Closed-loop thermal mitigation gain scaling ----
-        // Cosine-interpolated roll-off from 1.0 (at LIMITING_TEMPERATURE) to 0.0 (at CRITICAL_TEMPERATURE)
-        val thermalSafetyGain = when {
-            estimatedCoilTemperature >= CRITICAL_TEMPERATURE_CELSIUS -> 0.0f
-            estimatedCoilTemperature >= LIMITING_TEMPERATURE_CELSIUS -> {
-                val linearInterpolationRatio = (estimatedCoilTemperature - LIMITING_TEMPERATURE_CELSIUS) /
-                        (CRITICAL_TEMPERATURE_CELSIUS - LIMITING_TEMPERATURE_CELSIUS)
-                0.5f * (1.0f + cos(linearInterpolationRatio * Math.PI.toFloat()))
-            }
-            else -> 1.0f
+        if (currentFrameId % 12L == 0L) {
+            Log.d("HapticDebug", "Sub: $finalSubIntensity | Mid: $finalMidIntensity | Temp: ${estimatedCoilTemperature}°C | ThermalGain: $thermalSafetyGain | Pitch: ${detectedFundamentalFreq}Hz")
         }
-        telemetryData.thermalAttenuationFactor = thermalSafetyGain
-
-        // ---- Stage 7: Final gain scaling (user amplitude |*| thermal safety) ----
-        val amplitudeMultiplier = telemetryData.userAmplitudeScale
-        val finalSubIntensity = compressedSub * amplitudeMultiplier * thermalSafetyGain
-        val finalMidIntensity = compressedMid * amplitudeMultiplier * thermalSafetyGain
-        val finalPresenceIntensity = compressedPresence * amplitudeMultiplier * thermalSafetyGain
 
         telemetryData.subBassOutputLevel = finalSubIntensity
         telemetryData.midBassOutputLevel = finalMidIntensity
         telemetryData.presenceOutputLevel = finalPresenceIntensity
+        telemetryData.fundamentalFrequencyHz = detectedFundamentalFreq
+        telemetryData.estimatedCoilTemperature = estimatedCoilTemperature
+        telemetryData.thermalAttenuationFactor = thermalSafetyGain
 
-        // ---- Stage 8: Route intensities to HapticEventGenerator → Android Haptic API ----
         if (isEngineEnabled.get()) {
-            if (thermalSafetyGain > 0.05f) {
-                hapticEventGenerator.generateAndPlay(
-                    finalSubIntensity,
-                    finalMidIntensity,
-                    finalPresenceIntensity,
-                    detectedFundamentalFreq,
-                    currentTimeMs
-                )
-
-                // Log every 12th frame to avoid flooding the UI log panel
-                if (currentFrameId % 12L == 0L) {
-                    val estAmp = (finalSubIntensity.pow(0.5f) * 255).toInt().coerceIn(1, 255)
-                    val latency = hapticEventGenerator.currentFrameLatencyMs
-                    telemetryData.frameLatencyMs = latency
-                    uiBuilder?.appendLog(
-                        String.format(
-                            "DSP | S:%.2f M:%.2f P:%.2f | F0:%.0fHz amp~%d Δ=%dms",
-                            finalSubIntensity, finalMidIntensity, finalPresenceIntensity,
-                            detectedFundamentalFreq, estAmp.coerceIn(1, 255), latency
-                        )
-                    )
-                    telemetryData.dispatchedSubBassImpacts++
-                }
-            } else {
-                // Thermal protection active: cancel vibration output
+            if (thermalSafetyGain <= 0.01f) {
+                // Thermal protection engaged — clear C++ haptic buffer and stop vibration
+                nativeBridge.clearHapticBuffer()
                 hapticEventGenerator.cancel()
+                directDriveSmoothAmp = 0f
             }
+            // Note: Continuous waveform playback is handled entirely by
+            // runContinuousHapticLoop(), which pulls amplitude frames from
+            // the C++ 5-layer synthesizer at 50ms intervals.
+            // This pipeline only processes audio → updates telemetry data.
         }
     }
 
-    /**
-     * Computes the Root-Mean-Square (RMS) amplitude of a signal buffer.
-     *
-     * The RMS value provides a measure of the signal's average power,
-     * which is then fed into the dynamic range compressor.
-     * Handles NaN/Infinity gracefully by returning 0.0.
-     *
-     * @param signal The input [FloatArray] of samples.
-     * @return The RMS amplitude (>= 0.0), or 0.0 if the result is invalid.
-     */
-    private fun computeRms(signal: FloatArray): Float {
-        var sum = 0.0f
-        for (i in signal.indices) {
-            val sample = signal[i]
-            sum += sample * sample
-        }
-        val rms = sqrt(sum / signal.size)
-        return if (rms.isNaN() || rms.isInfinite()) 0.0f else rms
-    }
-
-    /**
-     * Gracefully shuts down the DSP engine.
-     *
-     * Releases the HapticEventGenerator and clears the ring buffer.
-     * Safe to call multiple times.
-     */
     fun release() {
+
+        LinkHealthMonitor.setPlayingState(false)
         hapticEventGenerator.release()
+        hapticComposer.release()
+        hapticSynthesizer.reset()
+        engineJob.cancel()
         audioRingBuffer.clear()
+        nativeBridge.release()
         Log.i(TAG, "DSP Engine successfully shutdown.")
-    }
-
-    // =========================================================================
-    // DSP INTERNAL CLASS IMPLEMENTATIONS
-    // =========================================================================
-
-    /**
-     * Direct Form-I Transposed Biquad (second-order IIR) filter.
-     *
-     * Used as the atomic filter unit in the Linkwitz-Riley crossover network.
-     * Supports both low-pass and high-pass configurations with configurable
-     * cutoff frequency and Q-factor (Butterworth Q = 1 / sqrt(2) by convention).
-     */
-    private class BiQuadFilter {
-        // Feed-forward coefficients
-        private var b0 = 1.0f; private var b1 = 0.0f; private var b2 = 0.0f
-        // Feedback coefficients
-        private var a1 = 0.0f; private var a2 = 0.0f
-        // Input history (one and two samples behind)
-        private var x1 = 0.0f; private var x2 = 0.0f
-        // Output history
-        private var y1 = 0.0f; private var y2 = 0.0f
-
-        /** Resets all internal state (delays) to zero. */
-        fun reset() { x1 = 0.0f; x2 = 0.0f; y1 = 0.0f; y2 = 0.0f }
-
-        /** Configures this filter as a low-pass with the given cutoff and Q. */
-        fun configureLowPass(sampleRate: Float, cutoff: Float, q: Float) {
-            val omega = (2.0 * Math.PI * cutoff / sampleRate).toFloat()
-            val cosW = cos(omega); val sinW = sin(omega); val alpha = sinW / (2.0f * q)
-            val b0Raw = (1.0f - cosW) / 2.0f; val b1Raw = 1.0f - cosW; val b2Raw = (1.0f - cosW) / 2.0f
-            val a0Raw = 1.0f + alpha; val a1Raw = -2.0f * cosW; val a2Raw = 1.0f - alpha
-            b0 = b0Raw / a0Raw; b1 = b1Raw / a0Raw; b2 = b2Raw / a0Raw; a1 = a1Raw / a0Raw; a2 = a2Raw / a0Raw
-        }
-
-        /** Configures this filter as a high-pass with the given cutoff and Q. */
-        fun configureHighPass(sampleRate: Float, cutoff: Float, q: Float) {
-            val omega = (2.0 * Math.PI * cutoff / sampleRate).toFloat()
-            val cosW = cos(omega); val sinW = sin(omega); val alpha = sinW / (2.0f * q)
-            val b0Raw = (1.0f + cosW) / 2.0f; val b1Raw = -(1.0f + cosW); val b2Raw = (1.0f + cosW) / 2.0f
-            val a0Raw = 1.0f + alpha; val a1Raw = -2.0f * cosW; val a2Raw = 1.0f - alpha
-            b0 = b0Raw / a0Raw; b1 = b1Raw / a0Raw; b2 = b2Raw / a0Raw; a1 = a1Raw / a0Raw; a2 = a2Raw / a0Raw
-        }
-
-        /**
-         * Processes a single sample through the biquad filter.
-         * @return The filtered output, clamped to 0.0 if NaN/Infinity.
-         */
-        fun process(input: Float): Float {
-            val output = b0 * input + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
-            x2 = x1; x1 = input; y2 = y1; y1 = output
-            return if (output.isNaN() || output.isInfinite()) 0.0f else output
-        }
-    }
-
-    /**
-     * Three-way (sub/mid/presence) Linkwitz-Riley 4th-order crossover network.
-     *
-     * Constructed from cascaded pairs of [BiQuadFilter]s (two per band = 4th-order).
-     * The topology is:
-     * - Sub-bass:  Low-Pass on LP_LOW  → cascaded twice
-     * - Presence:  High-Pass on HP_HIGH → cascaded twice
-     * - Mid-bass:  High-Pass on HP_LOW  → cascaded twice  (after Low-Pass on HP_HIGH)
-     *
-     * The two crossover frequencies are derived from the "bass purity" slider
-     * in the UI (low cutoff: 55–320 Hz, high cutoff = low * 2.2).
-     */
-    private class ThreeWayCrossover {
-        // Sub-bass band: two cascaded low-pass filters at the low cutoff frequency
-        private val lowPassSubStage1 = BiQuadFilter(); private val lowPassSubStage2 = BiQuadFilter()
-        // Presence band: two cascaded high-pass filters at the high cutoff frequency
-        private val highPassPresStage1 = BiQuadFilter(); private val highPassPresStage2 = BiQuadFilter()
-        // Mid-bass band: low-pass at high cutoff cascaded with high-pass at low cutoff (each 2nd-order)
-        private val lowPassMidStage1 = BiQuadFilter(); private val lowPassMidStage2 = BiQuadFilter()
-        private val highPassMidStage1 = BiQuadFilter(); private val highPassMidStage2 = BiQuadFilter()
-
-        /** Current sub-bass output sample. */
-        var subBassOutput = 0.0f
-        /** Current mid-bass output sample. */
-        var midBassOutput = 0.0f
-        /** Current presence (high) output sample. */
-        var presenceOutput = 0.0f
-
-        /** Resets all eight biquad filters and clears the band outputs. */
-        fun reset() {
-            lowPassSubStage1.reset(); lowPassSubStage2.reset()
-            highPassPresStage1.reset(); highPassPresStage2.reset()
-            lowPassMidStage1.reset(); lowPassMidStage2.reset()
-            highPassMidStage1.reset(); highPassMidStage2.reset()
-            subBassOutput = 0.0f; midBassOutput = 0.0f; presenceOutput = 0.0f
-        }
-
-        /**
-         * Recalculates all filter coefficients using the current sample rate and crossover frequencies.
-         * @param lowF  Low crossover frequency (sub → mid boundary).
-         * @param highF High crossover frequency (mid → presence boundary).
-         */
-        fun calculateCoefficients(sampleRate: Float, lowF: Float, highF: Float) {
-            val qButterworth = 0.70710678f  // 1 / sqrt(2) for maximally flat passband
-            lowPassSubStage1.configureLowPass(sampleRate, lowF, qButterworth)
-            lowPassSubStage2.configureLowPass(sampleRate, lowF, qButterworth)
-            highPassPresStage1.configureHighPass(sampleRate, highF, qButterworth)
-            highPassPresStage2.configureHighPass(sampleRate, highF, qButterworth)
-            lowPassMidStage1.configureLowPass(sampleRate, highF, qButterworth)
-            lowPassMidStage2.configureLowPass(sampleRate, highF, qButterworth)
-            highPassMidStage1.configureHighPass(sampleRate, lowF, qButterworth)
-            highPassMidStage2.configureHighPass(sampleRate, lowF, qButterworth)
-        }
-
-        /**
-         * Splits one input sample into three frequency bands.
-         * After calling this, read [subBassOutput], [midBassOutput], [presenceOutput].
-         */
-        fun processSample(input: Float) {
-            subBassOutput = lowPassSubStage2.process(lowPassSubStage1.process(input))
-            presenceOutput = highPassPresStage2.process(highPassPresStage1.process(input))
-            midBassOutput = highPassMidStage2.process(
-                highPassMidStage1.process(
-                    lowPassMidStage2.process(lowPassMidStage1.process(input))
-                )
-            )
-        }
-    }
-
-    /**
-     * Autocorrelation-based fundamental frequency (F0) pitch estimator.
-     *
-     * Maintains a ring history buffer of recent samples. For each processing
-     * block, the algorithm:
-     * - Shifts the history buffer and appends the new block.
-     * - Computes the autocorrelation function for lags corresponding to
-     *   the configured frequency range (35–300 Hz).
-     * - Finds the local peak with the highest correlation value.
-     * - Applies parabolic interpolation around the peak lag for sub-sample
-     *   precision, then converts lag to frequency (Hz).
-     *
-     * Falls back to 150 Hz (typical LRA resonant frequency) when the signal
-     * lacks a clear periodic structure.
-     */
-    private class AutocorrelationPitchEstimator {
-        /** Current sample rate, used to convert lags to frequencies. */
-        private var sampleRate = 48000
-
-        /** Upper bound of detectable fundamental frequency (Hz). */
-        private val f0UpperBoundaryHz = 300.0f
-
-        /** Lower bound of detectable fundamental frequency (Hz). */
-        private val f0LowerBoundaryHz = 35.0f
-
-        /** Minimum sample lag corresponding to F0 upper bound. */
-        private var minimumSampleLag = 0
-
-        /** Maximum sample lag corresponding to F0 lower bound. */
-        private var maximumSampleLag = 0
-
-        /**
-         * Ring history buffer; size is dynamically grown in [initialize]
-         * to accommodate [maximumSampleLag] + [FRAME_BLOCK_SIZE] + margin.
-         */
-        private var historyBuffer = FloatArray(2048)
-
-        /**
-         * Prepares the estimator for a new sample rate.
-         * Must be called at least once before [analyzeSignal].
-         */
-        fun initialize(rate: Int) {
-            this.sampleRate = rate
-            minimumSampleLag = (sampleRate / f0UpperBoundaryHz).toInt()
-            maximumSampleLag = (sampleRate / f0LowerBoundaryHz).toInt()
-            if (maximumSampleLag + FRAME_BLOCK_SIZE > historyBuffer.size) {
-                historyBuffer = FloatArray(maximumSampleLag + FRAME_BLOCK_SIZE + 256)
-            } else {
-                historyBuffer.fill(0.0f)
-            }
-        }
-
-        /**
-         * Analyzes one block of PCM samples and returns the estimated pitch.
-         * @param signal A [FloatArray] of mono PCM samples.
-         * @return Estimated fundamental frequency (Hz), or 150 Hz if uncertain.
-         */
-        fun analyzeSignal(signal: FloatArray): Float {
-            val signalLength = signal.size
-
-            // Shift history buffer: discard oldest [signalLength] samples, make room for new block
-            System.arraycopy(historyBuffer, signalLength, historyBuffer, 0, historyBuffer.size - signalLength)
-            System.arraycopy(signal, 0, historyBuffer, historyBuffer.size - signalLength, signalLength)
-
-            var primeSampleLag = -1
-            var peakAutocorrelationValue = -1e9f
-            val correlationArray = FloatArray(maximumSampleLag + 1)
-            val startIndex = historyBuffer.size - signalLength
-
-            // Compute autocorrelation for each lag in the search range
-            for (lag in minimumSampleLag..maximumSampleLag) {
-                var energySum = 0.0f
-                for (i in 0 until signalLength) {
-                    energySum += historyBuffer[startIndex + i] * historyBuffer[startIndex + i - lag]
-                }
-                correlationArray[lag] = energySum
-            }
-
-            // Find the lag with the highest local peak (greater than both neighbors)
-            for (lag in minimumSampleLag..maximumSampleLag) {
-                if (lag >= correlationArray.size - 1 || lag < 1) continue
-                if (correlationArray[lag] > correlationArray[lag - 1] && correlationArray[lag] > correlationArray[lag + 1]) {
-                    if (correlationArray[lag] > peakAutocorrelationValue) {
-                        peakAutocorrelationValue = correlationArray[lag]
-                        primeSampleLag = lag
-                    }
-                }
-            }
-
-            // No clear peak found → return default motor resonant frequency
-            if (primeSampleLag == -1 || peakAutocorrelationValue <= 0.001f) return 150.0f
-
-            // Parabolic interpolation for sub-sample lag precision
-            val leftNeighbor = correlationArray[primeSampleLag - 1]
-            val centerPeak = correlationArray[primeSampleLag]
-            val rightNeighbor = correlationArray[primeSampleLag + 1]
-            val denominator = leftNeighbor - 2.0f * centerPeak + rightNeighbor
-            if (abs(denominator) < 1e-5f) return sampleRate.toFloat() / primeSampleLag.toFloat()
-
-            val interpolatedLag = primeSampleLag.toFloat() - 0.5f * (rightNeighbor - leftNeighbor) / denominator
-            return sampleRate.toFloat() / interpolatedLag
-        }
-    }
-
-    /**
-     * Dual-knee soft-knee dynamic range compressor with envelope follower.
-     *
-     * Applies gain reduction to each band's RMS amplitude using a piecewise
-     * knee curve:
-     * - Below lower_knee: no compression (gain reduction = 0 dB).
-     * - Within the knee region: quadratic interpolation for a smooth transition.
-     * - Above upper_knee: linear compression at the configured ratio.
-     *
-     * The envelope follower uses separate attack and release time constants
-     * (modeled as one-pole IIR filters) to track the input level smoothly.
-     */
-    private class DualKneeCompressor {
-        // DRC parameters (set via [setParameters])
-        private var thresholdDb = -32.0f
-        private var ratio = 4.5f
-        private var kneeWidthDb = 6.0f
-        private var attackMs = 4.0f
-        private var releaseMs = 75.0f
-        private var makeupGainDb = 18.0f
-        private var blockRateHz = 93.75f
-
-        /** Envelope follower state in dB (initialized to effectively -infinity). */
-        private var envelopeStateDb = -96.0f
-
-        /** Resets the envelope follower to its default state (muted). */
-        fun reset() { envelopeStateDb = -96.0f }
-
-        /**
-         * Configures the compressor parameters.
-         * @param blockRate The block processing rate (sampleRate / FRAME_BLOCK_SIZE) in Hz.
-         */
-        fun setParameters(
-            thresholdDb: Float, ratio: Float, kneeWidthDb: Float,
-            attackMs: Float, releaseMs: Float, makeupGainDb: Float, blockRate: Float
-        ) {
-            this.thresholdDb = thresholdDb; this.ratio = ratio; this.kneeWidthDb = kneeWidthDb
-            this.attackMs = attackMs; this.releaseMs = releaseMs
-            this.makeupGainDb = makeupGainDb; this.blockRateHz = blockRate
-        }
-
-        /**
-         * Applies dynamic range compression to the input amplitude.
-         * @param inputAmplitude The RMS amplitude of one frequency band (>= 0).
-         * @return The compressed amplitude (clamped to [0, 2]).
-         */
-        fun applyCompression(inputAmplitude: Float): Float {
-            if (inputAmplitude < 1e-5f) return 0.0f
-
-            val inputDb = 20.0f * log10(inputAmplitude)
-
-            // One-pole filter coefficients for the envelope follower
-            val attackCoefficient = exp(-1.0f / (0.001f * attackMs * blockRateHz))
-            val releaseCoefficient = exp(-1.0f / (0.001f * releaseMs * blockRateHz))
-
-            // Envelope tracking: attack (rising level) vs. release (falling level)
-            if (inputDb > envelopeStateDb) {
-                envelopeStateDb = envelopeStateDb * attackCoefficient + inputDb * (1.0f - attackCoefficient)
-            } else {
-                envelopeStateDb = envelopeStateDb * releaseCoefficient + inputDb * (1.0f - releaseCoefficient)
-            }
-
-            // Piecewise soft-knee gain reduction
-            var gainReductionDb = 0.0f
-            val lowerKneeLimit = thresholdDb - kneeWidthDb / 2.0f
-            val upperKneeLimit = thresholdDb + kneeWidthDb / 2.0f
-
-            when {
-                envelopeStateDb < lowerKneeLimit -> gainReductionDb = 0.0f
-                envelopeStateDb <= upperKneeLimit -> {
-                    val difference = envelopeStateDb - lowerKneeLimit
-                    // Quadratic interpolation within the knee region
-                    gainReductionDb = (1.0f - 1.0f / ratio) * (difference * difference) / (2.0f * kneeWidthDb)
-                }
-                else -> gainReductionDb = (1.0f - 1.0f / ratio) * (envelopeStateDb - thresholdDb)
-            }
-
-            val totalGainDb = -gainReductionDb + makeupGainDb
-            val staticScalingFactor = 10.0f.pow(totalGainDb / 20.0f)
-            val output = inputAmplitude * staticScalingFactor
-            return if (output.isNaN() || output.isInfinite()) 0.0f else output.coerceIn(0.0f, 2.0f)
-        }
-    }
-
-    private class DualNodeThermalSimulator {
-        private val cCoil = 0.045f; private val cMagnet = 0.320f
-        private val rCoilToMagnet = 35.0f; private val rMagnetToAmbient = 12.0f
-        private var iterationStepTimeSec = 0.0106f
-        private var tempCoil = AMBIENT_TEMPERATURE_CELSIUS; private var tempMagnet = AMBIENT_TEMPERATURE_CELSIUS
-
-        fun reset(newStepTimeSec: Float = 0.0106f) {
-            tempCoil = AMBIENT_TEMPERATURE_CELSIUS; tempMagnet = AMBIENT_TEMPERATURE_CELSIUS
-            this.iterationStepTimeSec = newStepTimeSec
-        }
-
-        fun updateThermalDynamics(electricalPowerInput: Float): Float {
-            val nominalRe = 10.0f
-            val realElectricalPowerWatts = (electricalPowerInput * electricalPowerInput) / nominalRe
-            val rateCoilToMagnetFlow = (tempCoil - tempMagnet) / rCoilToMagnet
-            val rateMagnetToAmbientFlow = (tempMagnet - AMBIENT_TEMPERATURE_CELSIUS) / rMagnetToAmbient
-            val deltaTempCoil = (realElectricalPowerWatts - rateCoilToMagnetFlow) / cCoil
-            val deltaTempMagnet = (rateCoilToMagnetFlow - rateMagnetToAmbientFlow) / cMagnet
-
-            tempCoil += deltaTempCoil * iterationStepTimeSec
-            tempMagnet += deltaTempMagnet * iterationStepTimeSec
-            if (tempCoil < AMBIENT_TEMPERATURE_CELSIUS) tempCoil = AMBIENT_TEMPERATURE_CELSIUS
-            if (tempMagnet < AMBIENT_TEMPERATURE_CELSIUS) tempMagnet = AMBIENT_TEMPERATURE_CELSIUS
-
-            return if (tempCoil.isNaN() || tempCoil.isInfinite()) AMBIENT_TEMPERATURE_CELSIUS else tempCoil
-        }
-    }
-
-    private class ConcurrentAudioRingBuffer(private val capacity: Int) {
-        private val internalData = FloatArray(capacity)
-        private var readOffset = 0; private var writeOffset = 0; private var activeElementCount = 0
-
-        @Synchronized fun clear() { readOffset = 0; writeOffset = 0; activeElementCount = 0; internalData.fill(0.0f) }
-
-        @Synchronized fun write(input: FloatArray, length: Int) {
-            val freeBufferSlots = capacity - activeElementCount
-            if (length > freeBufferSlots) {
-                val displacedAmount = length - freeBufferSlots
-                readOffset = (readOffset + displacedAmount) % capacity
-                activeElementCount -= displacedAmount
-            }
-            var elementsWritten = 0
-            while (elementsWritten < length) {
-                val writeSegmentSize = min(length - elementsWritten, capacity - writeOffset)
-                System.arraycopy(input, elementsWritten, internalData, writeOffset, writeSegmentSize)
-                writeOffset = (writeOffset + writeSegmentSize) % capacity
-                elementsWritten += writeSegmentSize
-            }
-            activeElementCount += length
-        }
-
-        @Synchronized fun read(output: FloatArray, length: Int): Boolean {
-            if (activeElementCount < length) return false
-            var elementsRead = 0
-            while (elementsRead < length) {
-                val readSegmentSize = min(length - elementsRead, capacity - readOffset)
-                System.arraycopy(internalData, readOffset, output, elementsRead, readSegmentSize)
-                readOffset = (readOffset + readSegmentSize) % capacity
-                elementsRead += readSegmentSize
-            }
-            activeElementCount -= length
-            return true
-        }
     }
 
     class TelemetryMonitor {
@@ -841,6 +635,14 @@ class HapticEngine(
         @Volatile var dispatchedSubBassImpacts = 0L
         @Volatile var dispatchedMidBassTransients = 0L
         @Volatile var dispatchedMicroTextures = 0L
-        @Volatile var frameLatencyMs = 0L   // 最近一帧 DSP→振动延迟
+        @Volatile var frameLatencyMs = 0L
+
+        @Volatile var lraDisplacement = 0f
+        @Volatile var lraVelocity = 0f
+        @Volatile var lraForce = 0f
+        @Volatile var lraPhase = 0f
+        @Volatile var adsrEnvelope = 0f
+        @Volatile var coilTemperature = 25f
+        @Volatile var thermalGain = 1f
     }
 }

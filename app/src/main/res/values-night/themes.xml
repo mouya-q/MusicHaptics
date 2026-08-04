@@ -3,7 +3,7 @@
     
     <!-- 替换 parent 为系统自带的 DeviceDefault 无标题栏主题 -->
     <style name="Theme.MusicHapticsX" parent="@android:style/Theme.DeviceDefault.NoActionBar">
-        <!-- 核心修改：把之前的纯白替换为你的默认壁纸图片 -->
+        <!-- 把之前的纯白替换为默认壁纸图片 -->
         <item name="android:windowBackground">@drawable/default_bg</item>
 
         <!-- 状态栏和导航栏透明 -->

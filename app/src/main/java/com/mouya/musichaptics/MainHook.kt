@@ -14,6 +14,8 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+import com.mouya.musichaptics.LinkHealthMonitor
+
 class MainHook : IXposedHookLoadPackage {
 
     companion object {
@@ -23,7 +25,28 @@ class MainHook : IXposedHookLoadPackage {
         private const val MAX_SANE_CHANNELS = 12
         private const val ACTION_LOG = "com.mouya.musichaptics.ACTION_LOG"
 
-        /** 向 UI 事件监视器发送日志 */
+        private val SYSTEM_PACKAGE_BLOCKLIST = setOf(
+            "android",
+            "com.android.systemui",
+            "com.android.phone"
+        )
+
+        // ─── Multi-track management ───
+        private data class TrackInfo(
+            val sampleRate: Int,
+            val channelCount: Int,
+            val isOffloaded: Boolean,
+            val createdAt: Long
+        )
+        private val activeTracks = java.util.concurrent.ConcurrentHashMap<Int, TrackInfo>()
+
+        // ─── Reentrancy guard: prevents double-processing when native_write is called from write() ───
+        private val hookThreadLocal = ThreadLocal<Boolean>()
+
+        // ─── Log throttling ───
+        @Volatile private var lastWriteLogMs = 0L
+        private const val WRITE_LOG_INTERVAL_MS = 1000L
+
         private fun sendUiLog(context: Context, msg: String) {
             try {
                 val intent = Intent(ACTION_LOG).apply {
@@ -40,42 +63,114 @@ class MainHook : IXposedHookLoadPackage {
     private var platformHandler: Handler? = null
     private val initLock = Any()
 
+    @Volatile private var nativeLibLoaded = false
+
+    private fun ensureNativeLibraryLoaded(lpparam: LoadPackageParam) {
+
+        if (nativeLibLoaded) return
+        synchronized(this) {
+            if (nativeLibLoaded) return
+
+            try {
+
+                val moduleClassLoader = lpparam.classLoader
+
+                val libName = System.mapLibraryName("native-bridge")
+
+                val resourceUrl = moduleClassLoader.getResource(libName)
+                if (resourceUrl != null) {
+                    val libPath = resourceUrl.path
+                    if (libPath != null && java.io.File(libPath).exists()) {
+                        System.load(libPath)
+                        nativeLibLoaded = true
+                        Log.i(TAG, "Native library loaded from: $libPath")
+                        getContextFromActivityThread()?.let { sendUiLog(it, "Native library loaded from: $libPath") }
+                        return
+                    }
+                }
+
+                val pm = try {
+                    val activityThreadClass = XposedHelpers.findClass("android.app.ActivityThread", null)
+                    val currentThread = XposedHelpers.callStaticMethod(activityThreadClass, "currentActivityThread")
+                    val systemContext = XposedHelpers.callMethod(currentThread, "getSystemContext") as Context
+                    systemContext.packageManager
+                } catch (e: Exception) { null }
+
+                if (pm != null) {
+                    try {
+                        val moduleInfo = pm.getApplicationInfo("com.mouya.musichaptics", 0)
+                        val nativeLibDir = moduleInfo.nativeLibraryDir
+                        val libFile = java.io.File(nativeLibDir, libName)
+                        if (libFile.exists()) {
+                            System.load(libFile.absolutePath)
+                            nativeLibLoaded = true
+                            Log.i(TAG, "Native library loaded from module dir: ${libFile.absolutePath}")
+                            getContextFromActivityThread()?.let { sendUiLog(it, "Native library loaded from module dir: ${libFile.absolutePath}") }
+                            return
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to load from module nativeLibraryDir: ${e.message}")
+                        getContextFromActivityThread()?.let { sendUiLog(it, "Failed to load from module nativeLibraryDir: ${e.message}") }
+                    }
+                }
+
+                System.loadLibrary("native-bridge")
+                nativeLibLoaded = true
+                Log.i(TAG, "Native library loaded via default loadLibrary")
+                getContextFromActivityThread()?.let { sendUiLog(it, "Native library loaded via default loadLibrary") }
+
+            } catch (e: UnsatisfiedLinkError) {
+                Log.e(TAG, "Failed to load native library in hooked process: ${e.message}")
+                getContextFromActivityThread()?.let { sendUiLog(it, "Failed to load native library: ${e.message}") }
+                nativeLibLoaded = false
+            }
+        }
+    }
+
+    private fun getContextFromActivityThread(): Context? {
+        try {
+            val activityThreadClass = XposedHelpers.findClass("android.app.ActivityThread", null)
+            val currentThread = XposedHelpers.callStaticMethod(activityThreadClass, "currentActivityThread")
+            return XposedHelpers.callMethod(currentThread, "getSystemContext") as Context
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
     override fun handleLoadPackage(lpparam: LoadPackageParam?) {
-        // 判断1：检查核心参数是否为空，万一被某种奇葩框架空投进来呢？
+
         if (lpparam == null) {
-            Log.e(TAG, "雑魚ね！LoadPackageParam 直接就是空的，这还 Hook 个damn！")
+            Log.e(TAG, "LoadPackageParam is null; aborting hook.")
             return
         }
 
-        // 判断2：过滤系统关键核心隔离包，防止把 SystemUI 震成筛子
         val pkg = lpparam.packageName
-        if (pkg == "android" || pkg == "com.android.systemui" || pkg == "com.android.phone") {
+        if (pkg in SYSTEM_PACKAGE_BLOCKLIST) {
             return
         }
 
-        // 判断3：严防套娃，绝对不能 Hook 咱们自己的控制台 UI 进程
         if (pkg == "com.mouya.musichaptics") {
-            Log.d(TAG, "(ᗜ ˰ ᗜ) 扫描到自家do，自觉退避，优雅路过")
+            Log.d(TAG, "Skipping self-package [$pkg] — no self-hook allowed.")
             return
         }
 
-        // 判断4：多重检测当前进程的用户空间环境，非主线依赖进程直接劝退
         if (lpparam.classLoader == null) {
-            Log.w(TAG, "( ⩌⤚⩌) 发现没有 ClassLoader 的幽灵进程 [$pkg]，直接无视")
+            Log.w(TAG, "No ClassLoader found for process [$pkg]; skipping.")
             return
         }
 
-        // 判断5：检查当前包名是否包含空格或非法不可见字符，防止厂商利用特殊字符绕过
         if (pkg.isBlank() || pkg.contains(" ")) {
-            Log.e(TAG, "雑魚ね！这个进程名 [$pkg] 在玩特殊字符")
+            Log.e(TAG, "Invalid package name with special characters: [$pkg]")
             return
         }
 
         synchronized(initLock) {
-            // 判断6：调度线程状态机深度检验，死锁或失效则暴力重建
             if (platformThread == null || platformThread?.isAlive == false) {
-                Log.i(TAG, "(ᗜ ˰ ᗜ) 正在初始化专用的高能发电调度线程...")
-                platformThread = HandlerThread("MusicHaptics-Platform-Worker").apply {
+                Log.i(TAG, "Initializing dedicated platform worker thread...")
+                platformThread = HandlerThread(
+                    "MusicHaptics-Platform-Worker",
+                    android.os.Process.THREAD_PRIORITY_BACKGROUND
+                ).apply {
                     start()
                     platformHandler = Handler(looper)
                 }
@@ -83,56 +178,106 @@ class MainHook : IXposedHookLoadPackage {
         }
 
         try {
-            // 判断7：深度判定运行时环境中是否存在目标音频符号类
+
             val audioTrackClass = try {
                 XposedHelpers.findClass("android.media.AudioTrack", lpparam.classLoader)
             } catch (ex: ClassNotFoundException) {
-                Log.w(TAG, "雑魚ね！进程 [$pkg] 里面根本没有 AudioTrack 类都是你的雑魚指挥( ⩌⤚⩌)")
+                Log.w(TAG, "AudioTrack class not found in process [$pkg]; skipping.")
                 return
             } catch (t: Throwable) {
-                Log.e(TAG, "( ⩌⤚⩌)寻找 AudioTrack 时遭遇不可名状的恐怖：${t.message}")
+                Log.e(TAG, "Unexpected error locating AudioTrack: ${t.message}")
                 return
             }
 
-            // ==========================================
-            // 防线 A：全量构造函数立体截击，提前窥探每一个音轨的底细
-            // ==========================================
+            ensureNativeLibraryLoaded(lpparam!!)
+
+            try {
+                val activityThreadClass = XposedHelpers.findClass("android.app.ActivityThread", null)
+                val currentThread = XposedHelpers.callStaticMethod(activityThreadClass, "currentActivityThread")
+                val systemContext = XposedHelpers.callMethod(currentThread, "getSystemContext") as Context
+                NativeBridge.preloadLibrary(systemContext)
+            } catch (e: Exception) {
+                Log.w(TAG, "NativeBridge.preloadLibrary failed: ${e.message}")
+            }
+
+            Log.i(TAG, "[HOOK ACTIVE] Package=$pkg AudioTrack found=${audioTrackClass.simpleName ?: "unknown"}")
+            getContextFromActivityThread()?.let { sendUiLog(it, "[HOOK ACTIVE] Package=$pkg AudioTrack found=${audioTrackClass.simpleName ?: "unknown"}") }
+
+            val audioMethods = try {
+                val methods = audioTrackClass.declaredMethods ?: audioTrackClass.methods
+                methods.map { it.name }.distinct()
+            } catch (_: Exception) { emptyList<String>() }
+            Log.d(TAG, "AudioTrack methods visible: $audioMethods")
+
+            // ════════════════════════════════════════════════════════════════
+            // 1. Hook AudioTrack constructors — detect ALL track creation paths
+            // ════════════════════════════════════════════════════════════════
             XposedBridge.hookAllConstructors(audioTrackClass, object : XC_MethodHook() {
                 @Throws(Throwable::class)
                 override fun afterHookedMethod(param: MethodHookParam?) {
-                    // 判断8：基准空指针拦截
+
                     if (param == null || param.thisObject == null) return
                     val track = param.thisObject
+                    val trackIdentity = System.identityHashCode(track)
 
-                    // 判断9：动态调用系统 getSampleRate 方法，顺便抓取异常
                     val sr = try {
                         XposedHelpers.callMethod(track, "getSampleRate") as Int
-                    } catch (e: Exception) {
-                        44100
-                    }
+                    } catch (e: Exception) { 44100 }
 
-                    // 判断10：动态调用系统 getChannelCount 方法
                     val ch = try {
                         XposedHelpers.callMethod(track, "getChannelCount") as Int
-                    } catch (e: Exception) {
-                        2
-                    }
+                    } catch (e: Exception) { 2 }
 
-                    // 判断11：验证采样率参数是不是在胡扯，防止虚拟音频轨恶意爆破
                     if (sr !in MIN_SANE_SAMPLE_RATE..MAX_SANE_SAMPLE_RATE) {
-                        Log.w(TAG, "( ⩌⤚⩌) 抓到奇葩采样率: ${sr}Hz，这什么阴乐？拒绝招待")
+                        Log.w(TAG, "Unreasonable sample rate: ${sr}Hz — rejected.")
                         return
                     }
 
-                    // 判断12：通道数量合理性判定
                     if (ch <= 0 || ch > MAX_SANE_CHANNELS) {
-                        Log.w(TAG, "雑魚ね！通道数居然是 $ch ？你是千手观音吗？")
+                        Log.w(TAG, "Unreasonable channel count: $ch — rejected.")
                         return
                     }
 
-                    Log.i(TAG, "(ᗜ ˰ ᗜ) 天网捕捉成功！目标应用 [$pkg] 创建了 AudioTrack，准备给他疯狂输电！")
-                    
-                    // 安全分流投递
+                    // Detect offloaded playback (hardware-decoded audio, no PCM write())
+                    val isOffloaded = try {
+                        val getOffloaded = audioTrackClass.getMethod("isOffloadedPlayback")
+                        getOffloaded.invoke(track) as Boolean
+                    } catch (_: Exception) { false }
+
+                    // Detect direct (low-latency) tracks
+                    val isDirect = try {
+                        val getDirect = audioTrackClass.getMethod("isDirect")
+                        getDirect.invoke(track) as Boolean
+                    } catch (_: Exception) { false }
+
+                    // Detect streaming mode
+                    val mode = try {
+                        XposedHelpers.callMethod(track, "getStreamType") as Int
+                    } catch (_: Exception) { -1 }
+
+                    activeTracks[trackIdentity] = TrackInfo(sr, ch, isOffloaded, System.currentTimeMillis())
+
+                    Log.i(TAG, "AudioTrack created in [$pkg] — sr=${sr}Hz ch=$ch offloaded=$isOffloaded direct=$isDirect streamType=$mode tracks=${activeTracks.size}")
+                    getContextFromActivityThread()?.let { sendUiLog(it, "AudioTrack[$trackIdentity] sr=${sr}Hz ch=$ch off=$isOffloaded direct=$isDirect tracks=${activeTracks.size}") }
+
+                    if (isOffloaded) {
+                        Log.w(TAG, "⚠ OFFLOADED AudioTrack detected — PCM write() may NOT be called. Haptics limited for this track.")
+                        getContextFromActivityThread()?.let { sendUiLog(it, "⚠ Offloaded track (hardware-decoded) — limited haptic support") }
+                    }
+
+                    // Hook play() per-track (not globally — avoids duplicate hooks across constructors)
+                    try {
+                        XposedBridge.hookMethod(
+                            XposedHelpers.findMethodBestMatch(audioTrackClass, "play", null),
+                            object : XC_MethodHook() {
+                                override fun afterHookedMethod(param: MethodHookParam?) {
+                                    if (param?.thisObject == null) return
+                                    Log.d(TAG, "AudioTrack.play() called in [$pkg] — streaming audio path active")
+                                }
+                            }
+                        )
+                    } catch (_: Exception) { }
+
                     platformHandler?.post {
                         ensureEngineInitialized()
                         hapticEngine?.reconfigure(sr, ch)
@@ -140,217 +285,441 @@ class MainHook : IXposedHookLoadPackage {
                 }
             })
 
-            // ==========================================
-            // 防线 B：全功能广谱 Method 扫描拦截，无论哪个 write 被调用都逃不掉
-            // ==========================================
+                        // ════════════════════════════════════════════════════════════════
+            // 2. Hook AudioTrack.write() — ALL overloads (ShortArray, ByteArray, ByteBuffer, FloatArray)
+            //    with reentrancy guard and log throttling
+            // ════════════════════════════════════════════════════════════════
             XposedBridge.hookAllMethods(audioTrackClass, "write", object : XC_MethodHook() {
                 @Throws(Throwable::class)
                 override fun beforeHookedMethod(param: MethodHookParam?) {
-                    // 判断13：终极核心空指针防御，连一丝崩溃的机会都不给
+
                     if (param == null || param.thisObject == null || param.args.isEmpty()) {
                         return
                     }
 
+                    // ── Reentrancy guard ──
+                    if (hookThreadLocal.get() == true) return
+                    hookThreadLocal.set(true)
+                    try {
                     val rawBuffer = param.args[0] ?: return
                     val argCount = param.args.size
-
-                    // 判断14：运行时音频流实时监控，防止切歌或者变调导致引擎来不及拉闸
                     val sampleRate = try {
                         XposedHelpers.callMethod(param.thisObject, "getSampleRate") as Int
                     } catch (e: Exception) { 44100 }
-
                     val channelCount = try {
                         XposedHelpers.callMethod(param.thisObject, "getChannelCount") as Int
                     } catch (e: Exception) { 2 }
 
-                    // 判断15：二次边界检查，任何畸形规格直接斩断
-                    if (sampleRate < MIN_SANE_SAMPLE_RATE || sampleRate > MAX_SANE_SAMPLE_RATE || channelCount <= 0) {
-                        return
-                    }
+                    if (sampleRate < MIN_SANE_SAMPLE_RATE || sampleRate > MAX_SANE_SAMPLE_RATE ||
+                        channelCount <= 0) return
 
-                    // 判断16：基于入参类型的庞大条件分支判定矩阵（核心数据解析防线）
                     val pcmResult: ShortArray? = when (rawBuffer) {
-                        // ₍ᐢ⸝⸝› ̫‹⸝⸝ᐢ₎分支一：处理短整型音频流数组
                         is ShortArray -> {
                             val arrayLen = rawBuffer.size
-                            // 判断17：空数组校验
                             if (arrayLen == 0) null else {
-                                // 判断18：提取并校验偏移量参数
                                 val offset = if (argCount > 1 && param.args[1] is Int) param.args[1] as Int else 0
-                                // 判断19：偏移量边界安全性检查
                                 if (offset < 0 || offset >= arrayLen) null else {
-                                    // 判断20：提取长度参数
                                     val size = if (argCount > 2 && param.args[2] is Int) param.args[2] as Int else arrayLen - offset
-                                    // 判断21：长度合法性与越界综合断言
-                                    if (size <= 0 || offset + size > arrayLen) null else {
-                                        rawBuffer.sliceArray(offset until (offset + size))
-                                    }
+                                    if (size <= 0 || offset + size > arrayLen) null else rawBuffer.sliceArray(offset until (offset + size))
                                 }
                             }
                         }
-
-                        // ᔦ ° ꒳ ° ᔨ ̖́- 分支二：处理标准字节音频流数组（最容易发生奇偶错位对齐崩溃的地方）
                         is ByteArray -> {
                             val arrayLen = rawBuffer.size
-                            // 判断22：基础长度校验
                             if (arrayLen < 2) null else {
-                                // 判断23：字节偏移量解析
                                 val offset = if (argCount > 1 && param.args[1] is Int) param.args[1] as Int else 0
-                                // 判断24：字节偏移合法性判定
                                 if (offset < 0 || offset >= arrayLen) null else {
-                                    // 判断25：解析预期读取长度
                                     val size = if (argCount > 2 && param.args[2] is Int) param.args[2] as Int else arrayLen - offset
-                                    // 判断26：对齐检查与越界综合大红线判定
                                     if (size < 2 || offset + size > arrayLen) null else {
-                                        val validSize = size - (size % 2) // 强行斩断多余的奇数残渣字节，确保16bit对齐
+                                        val validSize = size - (size % 2)
                                         if (validSize <= 0) null else {
                                             try {
                                                 ShortArray(validSize / 2).also {
                                                     ByteBuffer.wrap(rawBuffer, offset, validSize)
                                                         .order(ByteOrder.nativeOrder())
-                                                        .asShortBuffer()
-                                                        .get(it)
+                                                        .asShortBuffer().get(it)
                                                 }
-                                            } catch (e: Exception) {
-                                                null // 判断27：抓取潜在的 BufferOverflow 异常
-                                            }
+                                            } catch (e: Exception) { null }
                                         }
                                     }
                                 }
                             }
                         }
-
-                        // (ᗜ ˰ ᗜ) ​ 分支三：高级直接内存缓冲区（大厂播放器、Hi-Fi 解码最爱用的底层变体）
                         is ByteBuffer -> {
-                            // 判断28：判断缓冲区是否被污染或掏空
                             val remaining = rawBuffer.remaining()
                             if (remaining < 2) null else {
-                                // 判断29：读取指定大小
                                 val size = if (argCount > 1 && param.args[1] is Int) param.args[1] as Int else remaining
-                                // 判断30：高危越界全面大盘查
                                 if (size < 2 || size > remaining) null else {
                                     val validSize = size - (size % 2)
                                     if (validSize <= 0) null else {
                                         try {
-                                            // 判断31：克隆独立指针，严禁破坏原 App 内部的 position 游标导致歌词卡死
                                             val dup = rawBuffer.duplicate()
-                                            dup.order(ByteOrder.nativeOrder())
-                                            ShortArray(validSize / 2).also {
-                                                dup.asShortBuffer().get(it)
-                                            }
-                                        } catch (e: Exception) {
-                                            null
-                                        }
+                                            dup.order(ByteOrder.LITTLE_ENDIAN)
+                                            ShortArray(validSize / 2).also { dup.asShortBuffer().get(it) }
+                                        } catch (e: Exception) { null }
                                     }
                                 }
                             }
                         }
-
-                        // ᜊ•͈⌔•͈ᜊ分支四：发烧友级单精度浮点流（Android高版本原生无损引擎常用）
                         is FloatArray -> {
                             val arrayLen = rawBuffer.size
-                            // 判断32：基础判空
                             if (arrayLen == 0) null else {
                                 val offset = if (argCount > 1 && param.args[1] is Int) param.args[1] as Int else 0
-                                // 判断33：浮点偏移安全性复核
                                 if (offset < 0 || offset >= arrayLen) null else {
                                     val size = if (argCount > 2 && param.args[2] is Int) param.args[2] as Int else arrayLen - offset
-                                    // 判断34：浮点块边界验证
                                     if (size <= 0 || offset + size > arrayLen) null else {
                                         val outShort = ShortArray(size)
-                                        // 判断35：把浮点线性映射回16位PCM，顺便用条件断言洗掉肮脏的 NaN 杂质
                                         for (i in 0 until size) {
                                             val idx = offset + i
                                             var fSample = rawBuffer[idx]
-                                            // 判断36：排除非数与无穷值，防止滤波器瞬间被炸飞
-                                            if (fSample.isNaN() || fSample.isInfinite()) {
-                                                fSample = 0f
-                                            }
-                                            outShort[i] = (fSample * 32367f).coerceIn(-32768f, 32767f).toInt().toShort()
+                                            if (fSample.isNaN() || fSample.isInfinite()) fSample = 0f
+                                            outShort[i] = (fSample * 32767f).coerceIn(-32768f, 32767f).toInt().toShort()
                                         }
                                         outShort
                                     }
                                 }
                             }
                         }
-                        else -> null // 判断37：完全不认识的未知外星人数据类型，直接扬了
+                        else -> null
                     }
-
-                    // 判断38：最终出库检测，数据没漏就赶紧丢到隔壁发电厂去！
                     if (pcmResult != null && pcmResult.isNotEmpty()) {
+                        // Throttled logging — avoid logcat flooding
+                        val now = System.currentTimeMillis()
+                        if (now - lastWriteLogMs > WRITE_LOG_INTERVAL_MS) {
+                            lastWriteLogMs = now
+                            getContextFromActivityThread()?.let { sendUiLog(it, "write() hook: ${pcmResult.size} samples, sr=$sampleRate ch=$channelCount") }
+                        }
                         platformHandler?.post {
                             ensureEngineInitialized()
                             hapticEngine?.reconfigure(sampleRate, channelCount)
                             hapticEngine?.processAudioFrame(pcmResult)
                         }
                     }
+                    } finally {
+                        hookThreadLocal.set(false)
+                    }
                 }
             })
 
-            Log.i(TAG, "( ⩌⤚⩌) 绝对防御网部署完毕。")
+            // ════════════════════════════════════════════════════════════════
+            // 3. Hook AudioTrack.pause() & stop() — immediate haptic shutdown
+            // ════════════════════════════════════════════════════════════════
+            for (methodName in listOf("pause", "stop")) {
+                try {
+                    XposedBridge.hookAllMethods(audioTrackClass, methodName, object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam?) {
+                            if (param?.thisObject == null) return
+                            val trackIdentity = System.identityHashCode(param.thisObject)
+                            Log.i(TAG, "[PLAYBACK CONTROL] AudioTrack.$methodName() on [$pkg] — forcing haptic decay")
+                            getContextFromActivityThread()?.let {
+                                sendUiLog(it, "[CONTROL] AudioTrack.$methodName() — haptic decay")
+                            }
+                            platformHandler?.post {
+                                ensureEngineInitialized()
+                                hapticEngine?.onPlaybackPaused()
+                            }
+                        }
+                    })
+                    Log.i(TAG, "Hooked AudioTrack.$methodName() in [$pkg]")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to hook AudioTrack.$methodName(): ${e.message}")
+                }
+            }
+
+            // ════════════════════════════════════════════════════════════════
+            // 4. Hook AudioTrack.release() & flush() — track cleanup
+            // ════════════════════════════════════════════════════════════════
+            for (methodName in listOf("release", "flush")) {
+                try {
+                    XposedBridge.hookAllMethods(audioTrackClass, methodName, object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam?) {
+                            if (param?.thisObject == null) return
+                            val trackIdentity = System.identityHashCode(param.thisObject)
+                            if (methodName == "release") {
+                                activeTracks.remove(trackIdentity)
+                                Log.d(TAG, "AudioTrack.release() [$pkg] — track removed, remaining=${activeTracks.size}")
+                                platformHandler?.post {
+                                    ensureEngineInitialized()
+                                    hapticEngine?.onPlaybackPaused()
+                                }
+                            } else {
+                                // flush() — cancel pending haptics but don't kill engine
+                                platformHandler?.post {
+                                    ensureEngineInitialized()
+                                    hapticEngine?.onPlaybackPaused()
+                                }
+                            }
+                        }
+                    })
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to hook AudioTrack.$methodName(): ${e.message}")
+                }
+            }
+
+            // ════════════════════════════════════════════════════════════════
+            // 5. Hook AudioTrack.setVolume() & setStereoVolume() — volume tracking
+            // ════════════════════════════════════════════════════════════════
+            for (volMethod in listOf("setVolume", "setStereoVolume")) {
+                try {
+                    XposedBridge.hookAllMethods(audioTrackClass, volMethod, object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam?) {
+                            if (param?.args == null || param.args.isEmpty()) return
+                            val vol = try { (param.args[0] as Float).coerceIn(0f, 1f) } catch (_: Exception) { 1f }
+                            Log.d(TAG, "AudioTrack.$volMethod() → $vol in [$pkg]")
+                        }
+                    })
+                } catch (_: Exception) { }
+            }
+
+            // ════════════════════════════════════════════════════════════════
+            // 6. Hook AudioTrack.attachAuxEffect() & setAuxEffectSendLevel() — effect chain
+            // ════════════════════════════════════════════════════════════════
+            for (effMethod in listOf("attachAuxEffect", "setAuxEffectSendLevel")) {
+                try {
+                    XposedBridge.hookAllMethods(audioTrackClass, effMethod, object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam?) {
+                            Log.d(TAG, "AudioTrack.$effMethod() called in [$pkg] — effect chain detected")
+                        }
+                    })
+                } catch (_: Exception) { }
+            }
+
+            // ════════════════════════════════════════════════════════════════
+            // 7. Hook AudioTrack.setPerformanceMode() — low-latency detection
+            // ════════════════════════════════════════════════════════════════
+            try {
+                XposedBridge.hookAllMethods(audioTrackClass, "setPerformanceMode", object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam?) {
+                        val mode = param?.args?.firstOrNull()
+                        Log.i(TAG, "AudioTrack.setPerformanceMode($mode) in [$pkg]")
+                        getContextFromActivityThread()?.let { sendUiLog(it, "PerformanceMode=$mode — low-latency track") }
+                    }
+                })
+            } catch (_: Exception) { }
+
+            // ════════════════════════════════════════════════════════════════
+            // 8. SoundPool hook — catch games & apps using SoundPool for audio
+            // ════════════════════════════════════════════════════════════════
+            try {
+                val soundPoolClass = XposedHelpers.findClass("android.media.SoundPool", lpparam.classLoader)
+                XposedBridge.hookAllMethods(soundPoolClass, "play", object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam?) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastWriteLogMs > WRITE_LOG_INTERVAL_MS) {
+                            lastWriteLogMs = now
+                            Log.d(TAG, "[SoundPool] play() detected in [$pkg] — SoundPool audio path (limited haptic support)")
+                            getContextFromActivityThread()?.let { sendUiLog(it, "SoundPool.play() detected — short audio clips") }
+                        }
+                    }
+                })
+                Log.i(TAG, "SoundPool hook deployed in [$pkg]")
+            } catch (_: Exception) {
+                Log.d(TAG, "SoundPool class not available in [$pkg]")
+            }
+
+            // ════════════════════════════════════════════════════════════════
+            // 9. MediaPlayer hook — detect playback state for apps using MediaPlayer
+            //    Hook pause/stop to trigger haptic shutdown (fixes "still vibrating
+            //    after pause" for apps that use MediaPlayer instead of AudioTrack)
+            // ════════════════════════════════════════════════════════════════
+            try {
+                val mediaPlayerClass = XposedHelpers.findClass("android.media.MediaPlayer", lpparam.classLoader)
+                XposedBridge.hookAllMethods(mediaPlayerClass, "start", object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam?) {
+                        Log.i(TAG, "[MediaPlayer] start() in [$pkg] — native audio path activated")
+                        getContextFromActivityThread()?.let { sendUiLog(it, "MediaPlayer.start() — native audio, haptics via AudioTrack path only") }
+                    }
+                })
+                // Hook pause/stop for MediaPlayer — trigger haptic shutdown
+                for (mpMethod in listOf("pause", "stop")) {
+                    try {
+                        XposedBridge.hookAllMethods(mediaPlayerClass, mpMethod, object : XC_MethodHook() {
+                            override fun afterHookedMethod(param: MethodHookParam?) {
+                                Log.i(TAG, "[MediaPlayer] $mpMethod() in [$pkg] — forcing haptic decay")
+                                getContextFromActivityThread()?.let {
+                                    sendUiLog(it, "[MediaPlayer] $mpMethod() — haptic decay")
+                                }
+                                platformHandler?.post {
+                                    ensureEngineInitialized()
+                                    hapticEngine?.onPlaybackPaused()
+                                }
+                            }
+                        })
+                        Log.i(TAG, "Hooked MediaPlayer.$mpMethod() in [$pkg]")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to hook MediaPlayer.$mpMethod(): ${e.message}")
+                    }
+                }
+                // Hook release for MediaPlayer cleanup
+                try {
+                    XposedBridge.hookAllMethods(mediaPlayerClass, "release", object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam?) {
+                            Log.d(TAG, "[MediaPlayer] release() in [$pkg] — haptic cleanup")
+                            platformHandler?.post {
+                                ensureEngineInitialized()
+                                hapticEngine?.onPlaybackPaused()
+                            }
+                        }
+                    })
+                } catch (_: Exception) {}
+                Log.i(TAG, "MediaPlayer hook (start/pause/stop/release) deployed in [$pkg]")
+            } catch (_: Exception) {
+                Log.d(TAG, "MediaPlayer class not available in [$pkg]")
+            }
+
+            // ════════════════════════════════════════════════════════════════
+            // 9b. ExoPlayer hook — B站, YouTube, etc. use ExoPlayer for playback
+            //     ExoPlayer wraps AudioTrack internally, so PCM data flows through
+            //     our AudioTrack hooks. But pause/stop on ExoPlayer doesn't always
+            //     propagate to AudioTrack.pause() immediately, causing stale
+            //     vibrations. Hook these methods to force haptic shutdown.
+            //
+            //     We attempt both the Google ExoPlayer interface and the
+            //     androidx Media3 ExoPlayer interface for maximum coverage.
+            // ════════════════════════════════════════════════════════════════
+            val exoPlayerClassNames = listOf(
+                "com.google.android.exoplayer2.ExoPlayer",
+                "androidx.media3.exoplayer.ExoPlayer",
+                "com.google.android.exoplayer2.SimpleExoPlayer",
+                "androidx.media3.exoplayer.SimpleExoPlayer"
+            )
+            for (exoClassName in exoPlayerClassNames) {
+                try {
+                    val exoClass = XposedHelpers.findClass(exoClassName, lpparam.classLoader)
+                    for (exoMethod in listOf("pause", "stop", "release")) {
+                        try {
+                            XposedBridge.hookAllMethods(exoClass, exoMethod, object : XC_MethodHook() {
+                                override fun afterHookedMethod(param: MethodHookParam?) {
+                                    Log.i(TAG, "[ExoPlayer:$exoClassName] $exoMethod() in [$pkg] — forcing haptic decay")
+                                    getContextFromActivityThread()?.let {
+                                        sendUiLog(it, "[ExoPlayer] $exoMethod() — haptic decay")
+                                    }
+                                    platformHandler?.post {
+                                        ensureEngineInitialized()
+                                        hapticEngine?.onPlaybackPaused()
+                                    }
+                                }
+                            })
+                            Log.i(TAG, "Hooked $exoClassName.$exoMethod() in [$pkg]")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to hook $exoClassName.$exoMethod(): ${e.message}")
+                        }
+                    }
+                } catch (_: ClassNotFoundException) {
+                    // This ExoPlayer variant not present in this app — try next
+                } catch (_: Exception) {
+                    // NOP — continue trying other variants
+                }
+            }
+
+            // ════════════════════════════════════════════════════════════════
+            // 10. AAudio hook (API 26+) — modern low-latency audio API
+            //     AAudio streams through AudioTrack internally on most devices,
+            //     so AudioTrack hooks should still catch the data. This is diagnostic.
+            // ════════════════════════════════════════════════════════════════
+            try {
+                val aaudioClass = XposedHelpers.findClass("android.media.AudioStream", lpparam.classLoader)
+                Log.i(TAG, "[AAudio] android.media.AudioStream class found in [$pkg] — AAudio API present")
+                getContextFromActivityThread()?.let { sendUiLog(it, "AAudio (AudioStream) class detected") }
+            } catch (_: Exception) {
+                // AAudio not available — normal on older Android
+            }
+
+            Log.i(TAG, "✅ All hook defense lines deployed for process [$pkg]. Active methods: write, constructors, pause, stop, release, flush, volume, effects, performanceMode, SoundPool, MediaPlayer(start/pause/stop/release), ExoPlayer(pause/stop/release)")
         } catch (t: Throwable) {
-            Log.e(TAG, "(´ཫ`) 饱和Hook防线被未知虚空力量重创: ${t.message}")
+            Log.e(TAG, "Hook installation failed with unexpected error: ${t.message}")
         }
     }
 
-    /**
-     * 判断39-50：跨进程多模态上下文穿透探测机
-     * 绝非普通获取 Context，而是用了整整十层兜底判断，就算把 App 的沙盒关了也能强行榨出 SharedPreferences！
-     */
     private fun ensureEngineInitialized() {
-        if (hapticEngine != null) return // 判断39：单例已建立，直接放行
+        if (hapticEngine != null) return
 
         try {
-            val activityThreadClass = XposedHelpers.findClass("android.app.ActivityThread", null)
-            val currentThread = XposedHelpers.callStaticMethod(activityThreadClass, "currentActivityThread")
-            
-            // 判断40：主线程骨架是否健在
+            val activityThreadClass = XposedHelpers.findClass(
+                "android.app.ActivityThread", null
+            )
+            val currentThread = XposedHelpers.callStaticMethod(
+                activityThreadClass, "currentActivityThread"
+            )
+
             if (currentThread == null) {
-                Log.w(TAG, "雑魚ね！ActivityThread.currentThread 竟然是空的？")
+                Log.w(TAG, "ActivityThread.currentThread returned null.")
+                sendUiLog(getContextFromActivityThread()!!, "ActivityThread.currentThread returned null.")
                 return
             }
 
-            // 判断41：第一层策略 - 深度挖掘当前运行中的 Application 实体
-            var context = XposedHelpers.callStaticMethod(activityThreadClass, "currentApplication") as? Context
+            var context = XposedHelpers.callStaticMethod(
+                activityThreadClass, "currentApplication"
+            ) as? Context
 
-            // 判断42：第二层策略 - 如果App内部有多进程隔离导致获取为null，以降级姿态穿透系统底层骨架
             if (context == null) {
                 context = try {
                     XposedHelpers.callMethod(currentThread, "getSystemContext") as? Context
                 } catch (e: Exception) { null }
             }
 
-            // 判断43：第三层策略 - 如果系统底层骨架也拒绝访问，用反射强行挖取系统包上下文作为最后的绝对死线兜底
             if (context == null) {
                 context = try {
-                    val amClass = XposedHelpers.findClass("android.app.ActivityManager", null)
+                    val amClass = XposedHelpers.findClass(
+                        "android.app.ActivityManager", null
+                    )
                     val am = XposedHelpers.callStaticMethod(amClass, "getService")
                     XposedHelpers.callMethod(am, "getContext") as? Context
                 } catch (e: Exception) { null }
             }
 
-            // 判断44：绝望审判，如果所有维度的 Context 都死绝了，引擎宣告自闭
             if (context == null) {
-                Log.e(TAG, "( ⩌⤚⩌)[致命错误] 三轨穿透全部阵亡！无法建立绝对连接！")
+                Log.e(TAG, "[FATAL] All three context resolution strategies failed.")
+                getContextFromActivityThread()?.let { sendUiLog(it, "[FATAL] All three context resolution strategies failed.") }
                 return
             }
 
-            // 判断45：对目标存储配置读写状态实施安全加锁检测
-            val prefs = try {
-                context.getSharedPreferences("haptic_settings", Context.MODE_PRIVATE)
+            getContextFromActivityThread()?.let { sendUiLog(it, "Context resolved: ${context.packageName}") }
+
+            val ourPrefs = try {
+                val ourContext = context.createPackageContext(
+                    "com.mouya.musichaptics",
+                    Context.CONTEXT_IGNORE_SECURITY
+                )
+                ourContext.getSharedPreferences("haptics_config", Context.MODE_PRIVATE)
             } catch (e: Exception) {
-                Log.w(TAG, "( ⩌⤚⩌) 读取 SharedPreferences 遭遇抵抗，启动无内存文件沙盒临时挂载方案")
-                null
+                Log.w(TAG, "Cross-process prefs read failed, falling back to target process prefs: ${e.message}")
+                getContextFromActivityThread()?.let { sendUiLog(it, "Cross-process prefs read failed: ${e.message}") }
+                try {
+                    context.getSharedPreferences("haptic_settings", Context.MODE_PRIVATE)
+                } catch (e2: Exception) {
+                    Log.e(TAG, "Fallback prefs also failed: ${e2.message}")
+                    getContextFromActivityThread()?.let { sendUiLog(it, "Fallback prefs also failed: ${e2.message}") }
+                    null
+                }
             }
 
-            if (prefs != null) {
-                hapticEngine = HapticEngine(context, prefs)
-                Log.i(TAG, "(ᗜ ˰ ᗜ) 跨进程高能输电引擎彻底部署成功！(via Android Haptic API)")
-                sendUiLog(context, "引擎部署成功 → ${hapticEngine?.hapticEventGenerator?.hasVibrator} vibrator")
+            if (ourPrefs != null) {
+                getContextFromActivityThread()?.let { sendUiLog(it, "Creating HapticEngine...") }
+                hapticEngine = HapticEngine(context, ourPrefs)
+                val hasVibrator = hapticEngine?.hapticEventGenerator?.hasVibrator ?: false
+                val profileName = hapticEngine?.hapticEventGenerator?.profile?.name ?: "unknown"
+                Log.i(TAG, "Haptic engine deployed successfully via Android Haptic API. hasVibrator=$hasVibrator profile=$profileName")
+                sendUiLog(
+                    context,
+                    "Engine ready → vibrator: $hasVibrator profile: $profileName"
+                )
+
+                val master = ourPrefs.getBoolean("master_switch", true)
+                val gain = ourPrefs.getFloat("haptic_gain", 1.0f)
+                val amp = ourPrefs.getFloat("haptic_amplitude", 1.0f)
+                val boost = ourPrefs.getFloat("haptic_boost_level", 1.0f)
+                val purity = ourPrefs.getInt("haptic_bass_purity", 50)
+                Log.i(TAG, "Effective prefs: master=$master gain=$gain amp=$amp boost=$boost purity=$purity")
+                getContextFromActivityThread()?.let { sendUiLog(it, "Effective prefs: master=$master gain=$gain amp=$amp boost=$boost purity=$purity") }
+
+                LinkHealthMonitor.heartbeatHookReady()
+            } else {
+                getContextFromActivityThread()?.let { sendUiLog(it, "Failed to get SharedPreferences") }
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "˶>ᗜ<˶穿透机制被系统彻底扼杀: ${t.message}")
+            Log.e(TAG, "Context resolution cascade failed: ${t.message}")
+            getContextFromActivityThread()?.let { sendUiLog(it, "Context resolution cascade failed: ${t.message}") }
         }
     }
 }
-//gugugaga     zakozakozakozqkozakozakozakozakozakozakozakozakozakozako

@@ -1,0 +1,58 @@
+cmake_minimum_required(VERSION 3.22.1)
+
+project("musichaptics_native")
+
+# 启用 compile_commands.json 生成（Gradle 要求）
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# 启用现代 C++20 标准
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# 极致性能编译参数 Flag - 统一 LTO，移除冲突的 -fno-lto
+# 注意：-ffast-math 仅对 DSP 核心文件有益，全库开启需谨慎
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -fvisibility=hidden -flto")
+
+# ARM64 默认已支持 NEON，无需额外参数；armeabi-v7a 已废弃，仅保留 ARM64 架构支持
+
+# 头文件目录 - 现代化写法，避免污染全局
+# include_directories(${CMAKE_CURRENT_SOURCE_DIR})  # 旧写法，改用 target_include_directories
+
+# 链接参数 - 移除重复的 -lc++_shared (已通过 find_library + target_link_libraries 处理)
+# -Wl,--no-undefined 防止符号泄漏，适合核心库
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
+
+add_library(
+    native-bridge
+    SHARED
+    jni/NativeBridge.cpp
+    haptic/FFT.cpp
+    haptic/BeatDetector.cpp
+    haptic/PatternGenerator.cpp
+)
+
+# 现代化：target 级别包含目录
+target_include_directories(
+    native-bridge
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+# 仅对 DSP 核心文件开启 -ffast-math，避免影响其他逻辑
+target_compile_options(
+    native-bridge
+    PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-ffast-math>
+)
+
+find_library(log-lib log)
+find_library(cxx-shared-lib c++_shared)
+
+target_link_libraries(
+    native-bridge
+    ${log-lib}
+    ${cxx-shared-lib}
+    m
+    atomic
+)

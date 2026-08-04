@@ -4,14 +4,6 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.math.sqrt
 
-/**
- * Ring-buffer FIFO for audio / haptic sample storage.
- *
- * Capacity is rounded up to the next power of two, enabling fast bitwise
- * modulo via `index & (capacity - 1)`. Writes that overflow the buffer
- * silently overwrite the oldest samples (lossy FIFO). A lock-free RMS
- * snapshot is maintained for lightweight UI telemetry queries.
- */
 class AudioFifoBuffer(requestedCapacity: Int = 4096) {
     private val capacity = calculatePowerOfTwo(requestedCapacity)
     private val mask = (capacity - 1).toLong()
@@ -21,21 +13,14 @@ class AudioFifoBuffer(requestedCapacity: Int = 4096) {
     private var tail = 0L
     private val lock = ReentrantLock()
 
-    /** RMS amplitude of the most recently written batch (volatile for lock-free reads). */
     @Volatile private var latestRmsSnapshot: Float = 0f
 
-    /**
-     * Writes [length] samples from [data] into the ring buffer.
-     * If the buffer is full, the oldest samples are discarded (overwrite tail).
-     * Also updates [latestRmsSnapshot] with the RMS of the incoming batch.
-     */
     fun write(data: FloatArray, length: Int) {
         if (length <= 0) return
 
         val writeLen = minOf(length, capacity)
         val startSrcOffset = length - writeLen
 
-        // Compute RMS of the batch being written for real-time UI telemetry
         var sumOfSquares = 0f
         for (i in startSrcOffset until length) {
             sumOfSquares += data[i] * data[i]
@@ -49,7 +34,6 @@ class AudioFifoBuffer(requestedCapacity: Int = 4096) {
                 head += overflow
             }
 
-            // Bitwise wrap: (tail & mask) is equivalent to tail % capacity for power-of-two sizes
             val tailIdx = (tail and mask).toInt()
             val firstCopyLen = minOf(writeLen, capacity - tailIdx)
 
@@ -61,11 +45,6 @@ class AudioFifoBuffer(requestedCapacity: Int = 4096) {
         }
     }
 
-    /**
-     * Reads up to [length] samples from the ring buffer into [output].
-     * @return `true` if at least [length] samples were available and the read succeeded;
-     *         `false` if insufficient data is present (caller should retry later).
-     */
     fun read(output: FloatArray, length: Int): Boolean {
         if (length <= 0) return true
 
@@ -73,7 +52,6 @@ class AudioFifoBuffer(requestedCapacity: Int = 4096) {
             val currentSize = (tail - head).toInt()
             if (currentSize < length) return false
 
-            // Bitwise wrap: (head & mask) is equivalent to head % capacity for power-of-two sizes
             val headIdx = (head and mask).toInt()
             val firstCopyLen = minOf(length, capacity - headIdx)
 
@@ -86,34 +64,20 @@ class AudioFifoBuffer(requestedCapacity: Int = 4096) {
         }
     }
 
-    /** Returns the number of samples currently buffered and available for reading. */
     fun available(): Int = lock.withLock { (tail - head).toInt() }
 
-    /**
-     * Returns the buffer load factor as a fraction of total capacity (0.0 .. 1.0).
-     * This is a lightweight call that does not block the audio pipeline.
-     */
     fun getLoadFactor(): Float = lock.withLock {
         return (tail - head).toFloat() / capacity
     }
 
-    /**
-     * Returns the RMS amplitude of the most recently written batch (lock-free).
-     * Used by the UI dashboard for real-time signal energy visualization.
-     */
     fun getLatestRms(): Float = latestRmsSnapshot
 
-    /** Clears the buffer: resets head/tail and zeros the RMS snapshot. */
     fun clear() = lock.withLock {
         head = 0L
         tail = 0L
         latestRmsSnapshot = 0f
     }
 
-    /**
-     * Rounds [value] up to the nearest power of two (minimum 1).
-     * Enables efficient modulo via bitwise AND with [mask].
-     */
     private fun calculatePowerOfTwo(value: Int): Int {
         if (value <= 1) return 1
         return Integer.highestOneBit(value - 1) shl 1

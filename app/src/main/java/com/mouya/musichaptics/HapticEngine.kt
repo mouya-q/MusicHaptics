@@ -99,6 +99,7 @@ class HapticEngine(
     // v2.1: Native scheduler state — must be declared before init block
     @Volatile private var nativeSchedulerActive = false
     @Volatile private var nativeLastAudioTime = 0L  // Tracked from native callback for silence detection
+    @Volatile private var hapticPaused = false  // v2.1.1: Immediate mute flag for pause/stop
 
     // ══════════════════════════════════════════════════════════════════
     // v1.8 Haptic Fusion: Semantic primitive bridge
@@ -192,6 +193,11 @@ class HapticEngine(
             val frameStartTime = SystemClock.elapsedRealtime()
 
             try {
+                // v2.1.1: Skip all processing when paused
+                if (hapticPaused) {
+                    kotlinx.coroutines.delay(pullIntervalMs)
+                    continue
+                }
                 // Pull continuous amplitude frame from C++ 5-layer synthesizer
                 val sampleCount = if (nativeBridge.isLoaded) {
                     nativeBridge.getHapticFrame(frameBuffer, maxSamplesPerPull)
@@ -483,6 +489,8 @@ class HapticEngine(
 
     private fun onNativeHapticFrame(samples: FloatArray, count: Int) {
         if (count <= 0) return
+        // v2.1.1: Immediate mute when paused — discard all pending samples
+        if (hapticPaused) return
 
         val now = SystemClock.elapsedRealtime()
         nativeFrameCounter++
@@ -744,6 +752,7 @@ class HapticEngine(
         Log.i(TAG, "[PLAYBACK PAUSED] Forcing immediate haptic decay")
         LogBroadcaster.sendLog(context, "[PLAYBACK PAUSED] Forcing immediate haptic decay")
         
+        hapticPaused = true  // v2.1.1: Immediately block native callbacks from driving vibrator
         nativeBridge.clearHapticBuffer()
         directDriveSmoothAmp = 0f
         pendingPrimitive = null  // v1.8: Clear semantic bridge
@@ -761,6 +770,13 @@ class HapticEngine(
                 hapticEventGenerator.cancel()
             }
             return
+        }
+
+        // v2.1.1: Clear pause flag — new audio means playback resumed
+        if (hapticPaused) {
+            hapticPaused = false
+            nativeBridge.clearHapticBuffer()  // Flush any stale samples from C++ ring buffer
+            Log.i(TAG, "[PLAYBACK RESUMED] hapticPaused cleared, native callbacks re-enabled")
         }
 
         LinkHealthMonitor.setPlayingState(true)

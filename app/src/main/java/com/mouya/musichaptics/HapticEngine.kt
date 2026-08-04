@@ -98,6 +98,7 @@ class HapticEngine(
 
     // === Continuous Waveform State ===
     @Volatile private var directDriveSmoothAmp = 0f  // Smoothed amplitude for telemetry display
+    @Volatile private var bodyAmpScale = 1.0f  // v2.1.2: Smooth body scale state (persists across frames)
 
     // v2.1: Native scheduler state — must be declared before init block
     @Volatile private var nativeSchedulerActive = false
@@ -194,7 +195,7 @@ class HapticEngine(
 
         var frameCounter = 0L
         var lastAudioInputTime = 0L
-        val silenceTimeoutMs = 300L
+        val silenceTimeoutMs = 1500L  // v2.1.2: raised from 300ms to 1500ms — music has natural dips
 
         while (true) {
             val frameStartTime = SystemClock.elapsedRealtime()
@@ -322,15 +323,16 @@ class HapticEngine(
                                 }
                             }
 
-                            // ── Waveform body: continuous layer with semantic-aware scaling ──
-                            // When a semantic Impact/KICK fired, reduce body to 40% to let the
-                            // discrete punch breathe. When Texture fired, keep at 80%.
-                            // Otherwise full amplitude.
-                            val bodyAmpScale = when {
-                                kickTriggered -> 0.4f    // Heavy impact: reduce body significantly
-                                shortTickTriggered -> 0.8f  // Texture: slight reduction
+                            // ── Waveform body: continuous layer with smooth semantic scaling ──
+                            // v2.1.2: Smooth body scale transition — avoids sudden amplitude drops
+                            // that cause perceived "stutters" when KICK/Impact fires.
+                            val targetBodyScale = when {
+                                kickTriggered -> 0.55f  // Gentle reduction instead of harsh 0.4f
+                                shortTickTriggered -> 0.85f
                                 else -> 1.0f
                             }
+                            // Smooth interpolation: move 30% toward target per frame
+                            bodyAmpScale = bodyAmpScale + (targetBodyScale - bodyAmpScale) * 0.3f
                             if (longVibeAmp > 0 || !kickTriggered) {
                                 val timings = LongArray(sampleCount) { sampleDurationMs }
                                 val amplitudes = IntArray(sampleCount) { idx ->
@@ -338,7 +340,8 @@ class HapticEngine(
                                 }
 
                                 val bodyMax = amplitudes.maxOrNull() ?: 0
-                                if (bodyMax > 20) {
+                                // v2.1.2: Lower threshold from 20 to 5 — play even quiet frames for continuity
+                                if (bodyMax > 5) {
                                     // v2.1.2: Use VibrateProxy (direct or IPC)
                                     vibrateProxy.performWaveform(timings, amplitudes)
                                 }
@@ -355,7 +358,7 @@ class HapticEngine(
 
                             LinkHealthMonitor.heartbeatVibrateCall()
                             val normalizedMaxAmp = maxAmp / 255.0f
-                            directDriveSmoothAmp = directDriveSmoothAmp * 0.5f + normalizedMaxAmp * 0.5f
+                            directDriveSmoothAmp = directDriveSmoothAmp * 0.7f + normalizedMaxAmp * 0.3f  // v2.1.2: Smoother decay curve
 
                             if (frameCounter % 30L == 0L) {
                                 val ampStr = (0 until sampleCount).joinToString(",") { frameBuffer[it].toInt().coerceIn(0, 255).toString() }
@@ -370,13 +373,16 @@ class HapticEngine(
                             }
                         }
                     } else {
-                        // Near-silence from C++ (amplitude ≤ 2): cancel ongoing vibration
-                        vibrateProxy.cancel()
-                        directDriveSmoothAmp *= 0.3f  // Fast decay
+                        // Near-silence from C++ (amplitude ≤ 2): smooth decay, don't hard-cancel
+                        // v2.1.2: Play a low-amplitude waveform instead of cancel() to maintain continuity
+                        val decayTimings = longArrayOf(sampleDurationMs)
+                        val decayAmps = intArrayOf(8)  // Very low amplitude — gentle fade
+                        vibrateProxy.performWaveform(decayTimings, decayAmps)
+                        directDriveSmoothAmp = directDriveSmoothAmp * 0.7f  // v2.1.2: Smoother decay, matches main path
                     }
                 } else if (timeSinceAudio >= silenceTimeoutMs) {
-                    // Silence timeout — ensure vibrator stops
-                    if (frameCounter % 30L == 0L) {
+                    // True silence (1500ms no audio) — stop vibration
+                    if (frameCounter % 60L == 0L) {
                         vibrateProxy.cancel()
                     }
                     directDriveSmoothAmp = 0f
@@ -492,16 +498,19 @@ class HapticEngine(
         nativeFrameCounter++
         nativeLastAudioTime = now  // Track for silence detection
 
-        val maxAmp = (0 until count).maxOfOrNull { samples[it] } ?: 0f
-        if (maxAmp <= 2f) {
-            // Near-silence: stop vibration
-            if (nativeFrameCounter % 50L == 0L) vibrateProxy.cancel()
-            directDriveSmoothAmp *= 0.3f  // Fast decay on silence
-            return
-        }
+val maxAmp = (0 until count).maxOfOrNull { samples[it] } ?: 0f
+          if (maxAmp <= 2f) {
+              // v2.1.2: Near-silence — smooth decay instead of hard cancel to maintain continuity
+              // v2.1.2: Play low-amplitude waveform for continuity, don't just return
+              val decayTimings = longArrayOf(10L)
+              val decayAmps = intArrayOf(8)
+              vibrateProxy.performWaveform(decayTimings, decayAmps)
+              directDriveSmoothAmp = directDriveSmoothAmp * 0.7f  // v2.1.2: Smoother decay, matches main path
+              // Don't return — continue to waveform body for smooth transition
+          }
 
-        // v2.1.2: Use VibrateProxy for all vibration output
-        if (!vibrateProxy.hasVibrator) return
+          // v2.1.2: Use VibrateProxy for all vibration output
+          if (!vibrateProxy.hasVibrator) return
 
         // ── Semantic primitive check (same logic as runContinuousHapticLoop) ──
         val semanticPrim = pendingPrimitive
@@ -569,18 +578,23 @@ class HapticEngine(
             }
         }
 
-        // ── Waveform body with semantic-aware scaling ──
-        val bodyScale = when {
-            kickTriggered -> 0.4f
-            shortTickTriggered -> 0.8f
+// ── Waveform body with smooth semantic scaling ──
+        // v2.1.2: Smooth body scale transition — avoids sudden amplitude drops
+        // that cause perceived "stutters" when KICK/Impact fires.
+        val targetBodyScale = when {
+            kickTriggered -> 0.55f  // Gentle reduction instead of harsh 0.4f
+            shortTickTriggered -> 0.85f
             else -> 1.0f
         }
+        // Smooth interpolation: move 30% toward target per frame
+        bodyAmpScale = bodyAmpScale + (targetBodyScale - bodyAmpScale) * 0.3f
         val timings = LongArray(count) { 10L }
         val amplitudes = IntArray(count) { idx ->
-            (samples[idx] * bodyScale).toInt().coerceIn(0, 255)
+            (samples[idx] * bodyAmpScale).toInt().coerceIn(0, 255)
         }
         val bodyMax = amplitudes.maxOrNull() ?: 0
-        if (bodyMax > 20) {
+        // v2.1.2: Lower threshold from 20 to 5 for continuity
+        if (bodyMax > 5) {
             // v2.1.2: Use VibrateProxy (direct or IPC) instead of raw Vibrator
             vibrateProxy.performWaveform(timings, amplitudes)
         }
@@ -598,7 +612,7 @@ class HapticEngine(
 
         // Smooth amplitude for telemetry display
         val normalizedMaxAmp = maxAmp / 255.0f
-        directDriveSmoothAmp = directDriveSmoothAmp * 0.5f + normalizedMaxAmp * 0.5f
+        directDriveSmoothAmp = directDriveSmoothAmp * 0.7f + normalizedMaxAmp * 0.3f  // v2.1.2: Smoother decay curve
 
         // Periodic parameter sync (every ~2s at 20ms intervals ≈ 100 frames)
         if (nativeFrameCounter % 100L == 0L) {
@@ -613,7 +627,7 @@ class HapticEngine(
                 shortTickTriggered -> "TICK"
                 else -> "BODY"
             }
-            Log.i(TAG, "▶ NATIVE v3.7 | mode=$mode prim=$prim cnt=$count max=${maxAmp.toInt()} scale=$bodyScale smooth=${"%.2f".format(directDriveSmoothAmp)}")
+            Log.i(TAG, "▶ NATIVE v3.7 | mode=$mode prim=$prim cnt=$count max=${maxAmp.toInt()} scale=$bodyAmpScale smooth=${"%.2f".format(directDriveSmoothAmp)}")
 
             // Send telemetry broadcast
             LogBroadcaster.sendTelemetry(

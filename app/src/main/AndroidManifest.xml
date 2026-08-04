@@ -37,7 +37,7 @@
         
         
         
-        <!-- 并入：“控制台”-->
+        <!-- 并入："控制台"-->
         <activity
             android:name=".HapticDashboardActivity"
             android:exported="false"
@@ -45,6 +45,13 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         </activity>
+
+        <!-- v2.1.2: Cross-process vibration proxy for apps that lack VIBRATE permission -->
+        <!-- No permission restriction: the whole point is that callers LACK VIBRATE.
+             Security: only useful for vibration, no sensitive data exposed. -->
+        <service
+            android:name=".VibrateProxyService"
+            android:exported="true" />
 
     </application>
 </manifest>

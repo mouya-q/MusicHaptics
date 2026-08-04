@@ -65,6 +65,9 @@ class HapticEngine(
 
     private val nativeBridge = NativeBridge()
 
+    // v2.1.2: Cross-process vibration proxy — auto-detects direct vs IPC path
+    private val vibrateProxy = VibrateProxy(context)
+
     private val directPcmBuffer: ByteBuffer = ByteBuffer.allocateDirect(FRAME_BLOCK_SIZE * 4).apply {
         order(ByteOrder.nativeOrder())
     }
@@ -120,6 +123,10 @@ class HapticEngine(
 
         synchronizeParameters()
 
+        // v2.1.2: Initialize vibration proxy (auto-detects direct vs IPC path)
+        val proxyReady = vibrateProxy.init()
+        Log.i(TAG, "VibrateProxy initialized: ready=$proxyReady path=${if (vibrateProxy.isProxyActive) "IPC_PROXY" else "DIRECT"}")
+
         // v2.1: Wire native scheduler callback — C++ thread becomes SOLE ring buffer consumer
         if (nativeBridge.isLoaded) {
             nativeBridge.onFrameCallback = { samples, count ->
@@ -166,8 +173,6 @@ class HapticEngine(
         val maxSamplesPerPull = 4       // 4 samples × 10ms = 40ms playback per pull
         val frameBuffer = FloatArray(maxSamplesPerPull)
 
-        // ── Multi-primitive fusion: HapticFeedbackEngine for discrete primitives ──
-        val feedbackEngine = HapticFeedbackEngine.create(context)
         val isApi29Plus = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
 
         // ── Primitive trigger state ──
@@ -233,8 +238,8 @@ class HapticEngine(
                         // - If no semantic primitive pending, fall back to amplitude-threshold
                         //   classification (legacy v1.7 behavior).
 
-                        val vib = hapticEventGenerator.getVibratorInstance()
-                        if (vib != null && hapticEventGenerator.hasVibrator) {
+                        // v2.1.2: Use VibrateProxy for all vibration output (direct or IPC)
+                        if (vibrateProxy.hasVibrator) {
 
                             // ── Check for semantic primitive from Composer ──
                             val semanticPrim = pendingPrimitive
@@ -254,21 +259,19 @@ class HapticEngine(
                                     when (prim) {
                                         is HapticPrimitive.Impact -> {
                                             // Semantic impact: fire predefined KICK or IMPACT based on sharpness
-                                            val style = if (prim.sharpness > 0.7f && prim.intensity > 150) {
+                                            if (prim.sharpness > 0.7f && prim.intensity > 150) {
                                                 kickTriggered = true
                                                 lastKickTime = frameStartTime
-                                                HapticFeedbackEngine.HapticStyle.KICK
+                                                vibrateProxy.performPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
                                             } else {
-                                                HapticFeedbackEngine.HapticStyle.IMPACT
+                                                vibrateProxy.performPredefined(VibrationEffect.EFFECT_CLICK)
                                             }
-                                            feedbackEngine.perform(style)
                                             semanticFired = true
                                             lastSemanticImpactTime = frameStartTime
                                         }
                                         is HapticPrimitive.Pulse -> {
                                             // Rhythmic pulse: fire as KICK (predefined heavy click)
-                                            // The repeat count is handled by natural beat recurrence
-                                            feedbackEngine.perform(HapticFeedbackEngine.HapticStyle.KICK)
+                                            vibrateProxy.performPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
                                             kickTriggered = true
                                             lastKickTime = frameStartTime
                                             semanticFired = true
@@ -300,7 +303,7 @@ class HapticEngine(
                                             if (timeSinceKick >= kickRefractoryMs) {
                                                 kickTriggered = true
                                                 lastKickTime = frameStartTime
-                                                feedbackEngine.perform(HapticFeedbackEngine.HapticStyle.KICK)
+                                                vibrateProxy.performPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
                                             }
                                         }
                                         amp >= longVibeThreshold -> {
@@ -334,25 +337,18 @@ class HapticEngine(
 
                                 val bodyMax = amplitudes.maxOrNull() ?: 0
                                 if (bodyMax > 20) {
-                                    try {
-                                        val effect = VibrationEffect.createWaveform(timings, amplitudes, -1)
-                                        vib.vibrate(effect)
-                                    } catch (e: Exception) {
-                                        Log.w(TAG, "Waveform body playback failed: ${e.message}")
-                                    }
+                                    // v2.1.2: Use VibrateProxy (direct or IPC)
+                                    vibrateProxy.performWaveform(timings, amplitudes)
                                 }
                             }
 
                             // ── Fire short tick for texture ──
                             if (shortTickTriggered && !kickTriggered) {
-                                try {
-                                    if (isApi29Plus) {
-                                        val tick = VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK)
-                                        vib.vibrate(tick)
-                                    } else {
-                                        vib.vibrate(VibrationEffect.createOneShot(8, 80))
-                                    }
-                                } catch (_: Exception) {}
+                                if (isApi29Plus) {
+                                    vibrateProxy.performPredefined(VibrationEffect.EFFECT_TICK)
+                                } else {
+                                    vibrateProxy.performOneShot(8, 80)
+                                }
                             }
 
                             LinkHealthMonitor.heartbeatVibrateCall()
@@ -373,13 +369,13 @@ class HapticEngine(
                         }
                     } else {
                         // Near-silence from C++ (amplitude ≤ 2): cancel ongoing vibration
-                        hapticEventGenerator.cancel()
+                        vibrateProxy.cancel()
                         directDriveSmoothAmp *= 0.3f  // Fast decay
                     }
                 } else if (timeSinceAudio >= silenceTimeoutMs) {
                     // Silence timeout — ensure vibrator stops
                     if (frameCounter % 30L == 0L) {
-                        hapticEventGenerator.cancel()
+                        vibrateProxy.cancel()
                     }
                     directDriveSmoothAmp = 0f
                 }
@@ -479,8 +475,6 @@ class HapticEngine(
     //  This bypasses coroutine delay entirely — the native thread uses
     //  clock_nanosleep(CLOCK_MONOTONIC) for precise 10ms timing.
     // ════════════════════════════════════════════════════════════════
-    private val nativeFrameFeedbackEngine = lazy { HapticFeedbackEngine.create(context) }
-    private val nativeFrameVib by lazy { hapticEventGenerator.getVibratorInstance() }
     private val nativeFrameIsApi29Plus = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
     private var nativeFrameLastKick = 0L
     private var nativeFrameLastTick = 0L
@@ -499,13 +493,13 @@ class HapticEngine(
         val maxAmp = (0 until count).maxOfOrNull { samples[it] } ?: 0f
         if (maxAmp <= 2f) {
             // Near-silence: stop vibration
-            if (nativeFrameCounter % 50L == 0L) hapticEventGenerator.cancel()
+            if (nativeFrameCounter % 50L == 0L) vibrateProxy.cancel()
             directDriveSmoothAmp *= 0.3f  // Fast decay on silence
             return
         }
 
-        val vib = nativeFrameVib
-        if (vib == null || !hapticEventGenerator.hasVibrator) return
+        // v2.1.2: Use VibrateProxy for all vibration output
+        if (!vibrateProxy.hasVibrator) return
 
         // ── Semantic primitive check (same logic as runContinuousHapticLoop) ──
         val semanticPrim = pendingPrimitive
@@ -525,15 +519,18 @@ class HapticEngine(
                         if (prim.sharpness > 0.7f && prim.intensity > 150) {
                             kickTriggered = true
                             nativeFrameLastKick = now
-                            nativeFrameFeedbackEngine.value.perform(HapticFeedbackEngine.HapticStyle.KICK)
+                            // v2.1.2: KICK via proxy
+                            vibrateProxy.performPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
                         } else {
-                            nativeFrameFeedbackEngine.value.perform(HapticFeedbackEngine.HapticStyle.IMPACT)
+                            // IMPACT via proxy
+                            vibrateProxy.performPredefined(VibrationEffect.EFFECT_CLICK)
                         }
                         semanticFired = true
                         nativeFrameLastSemantic = now
                     }
                     is HapticPrimitive.Pulse -> {
-                        nativeFrameFeedbackEngine.value.perform(HapticFeedbackEngine.HapticStyle.KICK)
+                        // KICK via proxy
+                        vibrateProxy.performPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
                         kickTriggered = true
                         nativeFrameLastKick = now
                         semanticFired = true
@@ -559,7 +556,8 @@ class HapticEngine(
                     amp > 200 && (now - nativeFrameLastKick) >= 80L -> {
                         kickTriggered = true
                         nativeFrameLastKick = now
-                        nativeFrameFeedbackEngine.value.perform(HapticFeedbackEngine.HapticStyle.KICK)
+                        // v2.1.2: KICK via proxy
+                        vibrateProxy.performPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
                     }
                     amp in 1..99 && (now - nativeFrameLastTick) >= 40L && !shortTickTriggered -> {
                         shortTickTriggered = true
@@ -581,22 +579,17 @@ class HapticEngine(
         }
         val bodyMax = amplitudes.maxOrNull() ?: 0
         if (bodyMax > 20) {
-            try {
-                vib.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
-            } catch (e: Exception) {
-                Log.w(TAG, "Native frame playback failed: ${e.message}")
-            }
+            // v2.1.2: Use VibrateProxy (direct or IPC) instead of raw Vibrator
+            vibrateProxy.performWaveform(timings, amplitudes)
         }
 
         // ── Short tick for texture ──
         if (shortTickTriggered && !kickTriggered) {
-            try {
-                if (nativeFrameIsApi29Plus) {
-                    vib.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK))
-                } else {
-                    vib.vibrate(VibrationEffect.createOneShot(8, 80))
-                }
-            } catch (_: Exception) {}
+            if (nativeFrameIsApi29Plus) {
+                vibrateProxy.performPredefined(VibrationEffect.EFFECT_TICK)
+            } else {
+                vibrateProxy.performOneShot(8, 80)
+            }
         }
 
         LinkHealthMonitor.heartbeatVibrateCall()
@@ -753,13 +746,13 @@ class HapticEngine(
         LogBroadcaster.sendLog(context, "[PLAYBACK PAUSED] Forcing immediate haptic decay")
         
         hapticPaused = true  // v2.1.1: Immediately block native callbacks from driving vibrator
+        vibrateProxy.cancel()  // v2.1.2: Cancel via proxy
         nativeBridge.clearHapticBuffer()
         directDriveSmoothAmp = 0f
         pendingPrimitive = null  // v1.8: Clear semantic bridge
         pendingSemanticLabel = "NONE"
         hapticSynthesizer.forceDecay()
         audioRingBuffer.clear()
-        hapticEventGenerator.cancel()
         LinkHealthMonitor.setPlayingState(false)
     }
 
@@ -767,7 +760,7 @@ class HapticEngine(
         if (pcmData == null || pcmData.isEmpty() || !isEngineEnabled.get()) {
             if (!isEngineEnabled.get()) {
                 audioRingBuffer.clear()
-                hapticEventGenerator.cancel()
+                vibrateProxy.cancel()
             }
             return
         }
@@ -900,7 +893,7 @@ class HapticEngine(
         if (isEngineEnabled.get()) {
             if (thermalSafetyGain <= 0.01f) {
                 nativeBridge.clearHapticBuffer()
-                hapticEventGenerator.cancel()
+                vibrateProxy.cancel()
                 directDriveSmoothAmp = 0f
             }
 
@@ -965,6 +958,7 @@ class HapticEngine(
         engineJob.cancel()
         audioRingBuffer.clear()
         nativeBridge.release()
+        vibrateProxy.unbind()  // v2.1.2: Unbind IPC proxy service
         Log.i(TAG, "DSP Engine successfully shutdown.")
     }
 

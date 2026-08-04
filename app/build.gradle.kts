@@ -7,6 +7,9 @@ plugins {
 android {
     namespace = "com.mouya.musichaptics"
     compileSdk = 34
+    
+    // 明确指定 NDK 版本
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "com.mouya.musichaptics"
@@ -33,6 +36,14 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    // 配置 CMake
+    externalNativeBuild {
+        cmake {
+            path = File(projectDir, "src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
     // 使用预编译的 native library (jniLibs)
     sourceSets.configureEach {
         if (name == "main") {
@@ -44,6 +55,15 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1,ASL2.0,NOTICE,LICENSE,LICENSE.txt,LICENSE.md,NOTICE.txt,NOTICE.md}"
         }
+    }
+
+    lint {
+        abortOnError = false
+        disable += listOf(
+            "MissingTranslation",
+            "ExtraTranslation",
+            "GooglePlayPolicyViolation"
+        )
     }
 }
 

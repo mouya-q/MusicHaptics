@@ -248,7 +248,7 @@ public:
     }
 
     // ══════════════════════════════════════════════
-    //  Pitch estimation via autocorrelation
+    //  Pitch estimation via autocorrelation (NEON-optimized)
     // ══════════════════════════════════════════════
     float estimatePitch(const float* signal, int size) {
         std::memmove(historyBuffer_, historyBuffer_ + size, (2048 - size) * sizeof(float));
@@ -262,10 +262,25 @@ public:
         float maxCorr = -1e9f;
         int startIndex = 2048 - size;
 
+        // v2.0: NEON-optimized autocorrelation inner loop
+        // Process 4 lags at a time? No — process 4 samples per lag iteration.
+        // Each lag computes: sum(historyBuffer[startIndex+i] * historyBuffer[startIndex+i-lag])
         for (int lag = minLag; lag <= maxLag; ++lag) {
             float corr = 0.0f;
-            for (int i = 0; i < size; ++i) {
-                corr += historyBuffer_[startIndex + i] * historyBuffer_[startIndex + i - lag];
+            int i = 0;
+            // NEON: 4x unrolled multiply-accumulate
+            float32x4_t vSum = vdupq_n_f32(0.0f);
+            const float* base = historyBuffer_ + startIndex;
+            const float* lagged = base - lag;
+            for (; i <= size - 4; i += 4) {
+                float32x4_t vA = vld1q_f32(base + i);
+                float32x4_t vB = vld1q_f32(lagged + i);
+                vSum = vmlaq_f32(vSum, vA, vB);
+            }
+            corr = vaddvq_f32(vSum);
+            // Tail
+            for (; i < size; ++i) {
+                corr += base[i] * lagged[i];
             }
             if (corr > maxCorr) {
                 maxCorr = corr;
@@ -367,9 +382,19 @@ public:
         energyHistory_[energyHistoryIdx_] = subRms;
         energyHistoryIdx_ = (energyHistoryIdx_ + 1) % BEAT_HISTORY_SIZE;
 
+        // v2.0: NEON-accelerated energy history average
         float avgEnergy = 0.0f;
-        for (int i = 0; i < BEAT_HISTORY_SIZE; ++i) {
-            avgEnergy += energyHistory_[i];
+        {
+            int i = 0;
+            float32x4_t vSum = vdupq_n_f32(0.0f);
+            for (; i <= BEAT_HISTORY_SIZE - 4; i += 4) {
+                float32x4_t vIn = vld1q_f32(energyHistory_ + i);
+                vSum = vaddq_f32(vSum, vIn);
+            }
+            avgEnergy = vaddvq_f32(vSum);
+            for (; i < BEAT_HISTORY_SIZE; ++i) {
+                avgEnergy += energyHistory_[i];
+            }
         }
         avgEnergy /= static_cast<float>(BEAT_HISTORY_SIZE);
 

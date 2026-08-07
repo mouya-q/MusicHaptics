@@ -1,0 +1,35 @@
+# CMakeLists.txt — MusicHapticsX Native Haptic Engine
+cmake_minimum_required(VERSION 3.22.1)
+project("musichaptics_native")
+
+# ─── 心库：HapticEngine（C++ 触觉引擎）─────────────────────────────
+add_library(
+    haptic-engine
+    SHARED
+    haptic/HapticEngine.cpp
+    haptic/FFT.cpp
+    haptic/BeatDetector.cpp
+    haptic/PatternGenerator.cpp
+)
+
+# ─── 链接标准库 ───────────────────────────────────────────────
+find_library(log-lib log)
+target_link_libraries(
+    haptic-engine
+    ${log-lib}
+)
+
+# ─── JNI 桥接 ─────────────────────────────────────────────────
+add_library(
+    native-bridge
+    SHARED
+    jni/NativeBridge.cpp
+)
+
+find_library(jnilibs jni)
+target_link_libraries(native-bridge ${jnilibs})
+
+# ─── 头文件暴露给 Kotlin/Java JNI 调用 ─────────────────────────────
+include_directories(
+    ${CMAKE_SOURCE_DIR}/../java/com/mouya/musichaptics
+)

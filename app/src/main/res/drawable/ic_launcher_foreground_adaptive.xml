@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Preserve the original raster artwork. A 13dp adaptive-foreground inset makes
+  the visible mark roughly 24% smaller than the previous full-canvas version:
+  enough clearance for file-manager masks without returning to the old 21dp size.
+-->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/icon_foreground"
+    android:insetLeft="13dp"
+    android:insetTop="13dp"
+    android:insetRight="13dp"
+    android:insetBottom="13dp" />

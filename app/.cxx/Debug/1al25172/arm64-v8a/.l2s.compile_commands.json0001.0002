@@ -1,0 +1,32 @@
+[
+{
+  "directory": "/sdcard/AndroidIDEProjects/MusicHapticsX/app/.cxx/Debug/1al25172/arm64-v8a",
+  "command": "/usr/lib/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android28 --sysroot=/usr/lib/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dhaptic_engine_EXPORTS -I/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -fvisibility=hidden -flto -fno-limit-debug-info  -std=c++20 -fPIC -ffast-math -o CMakeFiles/haptic-engine.dir/haptic/HapticEngine.cpp.o -c /sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic/HapticEngine.cpp",
+  "file": "/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic/HapticEngine.cpp",
+  "output": "CMakeFiles/haptic-engine.dir/haptic/HapticEngine.cpp.o"
+},
+{
+  "directory": "/sdcard/AndroidIDEProjects/MusicHapticsX/app/.cxx/Debug/1al25172/arm64-v8a",
+  "command": "/usr/lib/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android28 --sysroot=/usr/lib/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dhaptic_engine_EXPORTS -I/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -fvisibility=hidden -flto -fno-limit-debug-info  -std=c++20 -fPIC -ffast-math -o CMakeFiles/haptic-engine.dir/haptic/FFT.cpp.o -c /sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic/FFT.cpp",
+  "file": "/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic/FFT.cpp",
+  "output": "CMakeFiles/haptic-engine.dir/haptic/FFT.cpp.o"
+},
+{
+  "directory": "/sdcard/AndroidIDEProjects/MusicHapticsX/app/.cxx/Debug/1al25172/arm64-v8a",
+  "command": "/usr/lib/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android28 --sysroot=/usr/lib/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dhaptic_engine_EXPORTS -I/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -fvisibility=hidden -flto -fno-limit-debug-info  -std=c++20 -fPIC -ffast-math -o CMakeFiles/haptic-engine.dir/haptic/BeatDetector.cpp.o -c /sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic/BeatDetector.cpp",
+  "file": "/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic/BeatDetector.cpp",
+  "output": "CMakeFiles/haptic-engine.dir/haptic/BeatDetector.cpp.o"
+},
+{
+  "directory": "/sdcard/AndroidIDEProjects/MusicHapticsX/app/.cxx/Debug/1al25172/arm64-v8a",
+  "command": "/usr/lib/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android28 --sysroot=/usr/lib/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dhaptic_engine_EXPORTS -I/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -fvisibility=hidden -flto -fno-limit-debug-info  -std=c++20 -fPIC -ffast-math -o CMakeFiles/haptic-engine.dir/haptic/PatternGenerator.cpp.o -c /sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic/PatternGenerator.cpp",
+  "file": "/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic/PatternGenerator.cpp",
+  "output": "CMakeFiles/haptic-engine.dir/haptic/PatternGenerator.cpp.o"
+},
+{
+  "directory": "/sdcard/AndroidIDEProjects/MusicHapticsX/app/.cxx/Debug/1al25172/arm64-v8a",
+  "command": "/usr/lib/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android28 --sysroot=/usr/lib/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dnative_bridge_EXPORTS -I/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp -I/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/jni -I/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/haptic -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security   -O3 -fvisibility=hidden -flto -fno-limit-debug-info  -std=c++20 -fPIC -o CMakeFiles/native-bridge.dir/jni/NativeBridge.cpp.o -c /sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/jni/NativeBridge.cpp",
+  "file": "/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/jni/NativeBridge.cpp",
+  "output": "CMakeFiles/native-bridge.dir/jni/NativeBridge.cpp.o"
+}
+]

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 适配图标边缘的薄荷绿底色，图标跟系统桌面融合 -->
+    <color name="ic_launcher_background">#E2F5E2</color>
+</resources>

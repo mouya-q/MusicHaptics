@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.VIBRATE"/>
+    <uses-permission android:name="com.mouya.musichaptics.permission.CONFIG_SYNC"/>
+
+    <!-- Visible-package declaration for the scoped-app list; no broad package query. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <!-- Only this module (same signing identity) may ask injected target
+         processes to refresh their local preference snapshot. -->
+    <permission
+        android:name="com.mouya.musichaptics.permission.CONFIG_SYNC"
+        android:protectionLevel="signature" />
+    
+    <!-- Preserve the project's custom MusicHaptics icon. -->
+    <application 
+        android:allowBackup="false"
+        android:name=".MusicHapticsApplication"
+        android:icon="@mipmap/ic_launcher"
+        android:label="MusicHaptics" 
+        android:supportsRtl="true"
+        android:theme="@style/Theme.MusicHaptics">
+
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription" android:value="音乐音频拦截与振动协同模块" />
+        <meta-data android:name="xposedminversion" android:value="82" />
+        <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
+
+        <provider android:name="com.itsaky.androidide.logsender.utils.LogSenderInstaller" tools:node="remove" />
+        <service android:name="com.itsaky.androidide.logsender.LogSenderService" tools:node="remove" />
+        
+        <!--  注册跨进程共享 Provider，解决所有的 notifyChange 崩溃与警告 -->
+        <provider
+            android:name=".ConfigProvider"
+            android:authorities="com.mouya.musichaptics.provider"
+            android:exported="true" />
+            
+        <!-- Root permission / board-level hardware activation -->
+        <activity
+            android:name=".RootActivationActivity"
+            android:exported="false"
+            android:theme="@style/Theme.MusicHaptics" />
+
+        <!-- 主启动页面 -->
+        <activity 
+            android:name=".MainActivity" 
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        
+        
+        
+        <!-- 并入："控制台"-->
+        <activity
+            android:name=".HapticDashboardActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|density|uiMode"
+            android:theme="@style/Theme.MusicHaptics"
+            android:enableOnBackInvokedCallback="true">
+            <!-- Android 16: opt out of forced resizability on large screens so
+                 our portrait-only Dashboard doesn't get stretched/recreated. -->
+            <property
+                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+                android:value="true" />
+        </activity>
+
+        <!-- v2.1.2: Cross-process vibration proxy for apps that lack VIBRATE permission -->
+        <!-- No permission restriction: the whole point is that callers LACK VIBRATE.
+             Security: only useful for vibration, no sensitive data exposed. -->
+        <service
+            android:name=".VibrateProxyService"
+            android:exported="true" />
+
+    </application>
+</manifest>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Same style name as values/themes.xml. Avoid transparent bars and wallpaper
+         previews, which are a common source of OEM black strips around the dashboard. -->
+    <style name="Theme.MusicHaptics" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <!-- The app deliberately uses one white visual language in light and dark system modes. -->
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorBackgroundCacheHint">#FFFFFF</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:statusBarColor">#FFFFFF</item>
+        <item name="android:navigationBarColor">#FFFFFF</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowDisablePreview">true</item>
+    </style>
+</resources>

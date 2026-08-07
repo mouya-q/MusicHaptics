@@ -1,0 +1,182 @@
+// HapticEngine.hpp - C++ 极致性能触觉引擎
+#pragma once
+
+#include <arm_neon.h>
+#include <cmath>
+#include <cstring>
+#include <algorithm>
+#include <vector>
+
+namespace haptic {
+
+// 64字节对齐，防止 Cache Line 伪共享与未对齐访问
+struct alignas(64) BiquadCoeffs {
+    float b0, b1, b2, a1, a2;
+};
+
+struct alignas(64) BiquadState {
+    float x1 = 0.0f, x2 = 0.0f;
+    float y1 = 0.0f, y2 = 0.0f;
+    void reset() { x1 = x2 = y1 = y2 = 0.0f; }
+};
+
+// SIMD 运算法则与双阶 Biquad 级联 (Linkwitz-Riley 4th Order)
+class LinkwitzRiley4th {
+private:
+    BiquadCoeffs coeffs1_, coeffs2_;
+    BiquadState state1_, state2_;
+
+public:
+    void reset() { state1_.reset(); state2_.reset(); }
+
+    void setLowPass(float sampleRate, float cutoff) {
+        float omega = 2.0f * M_PI * cutoff / sampleRate;
+        float cosW = cosf(omega);
+        float alpha = sinf(omega) / (2.0f * 0.70710678f);
+        float a0 = 1.0f + alpha;
+        
+        coeffs1_.b0 = ((1.0f - cosW) / 2.0f) / a0;
+        coeffs1_.b1 = (1.0f - cosW) / a0;
+        coeffs1_.b2 = coeffs1_.b0;
+        coeffs1_.a1 = (-2.0f * cosW) / a0;
+        coeffs1_.a2 = (1.0f - alpha) / a0;
+        coeffs2_ = coeffs1_;
+    }
+
+    void setHighPass(float sampleRate, float cutoff) {
+        float omega = 2.0f * M_PI * cutoff / sampleRate;
+        float cosW = cosf(omega);
+        float alpha = sinf(omega) / (2.0f * 0.70710678f);
+        float a0 = 1.0f + alpha;
+
+        coeffs1_.b0 = ((1.0f + cosW) / 2.0f) / a0;
+        coeffs1_.b1 = (-(1.0f + cosW)) / a0;
+        coeffs1_.b2 = coeffs1_.b0;
+        coeffs1_.a1 = (-2.0f * cosW) / a0;
+        coeffs1_.a2 = (1.0f - alpha) / a0;
+        coeffs2_ = coeffs1_;
+    }
+
+    // 标量快速处理单点 (也可扩展为 NEON 4点展开)
+    inline float process(float in) {
+        // Stage 1
+        float out1 = coeffs1_.b0 * in + coeffs1_.b1 * state1_.x1 + coeffs1_.b2 * state1_.x2 
+                     - coeffs1_.a1 * state1_.y1 - coeffs1_.a2 * state1_.y2;
+        state1_.x2 = state1_.x1; state1_.x1 = in;
+        state1_.y2 = state1_.y1; state1_.y1 = out1;
+
+        // Stage 2
+        float out2 = coeffs2_.b0 * out1 + coeffs2_.b1 * state2_.x1 + coeffs2_.b2 * state2_.x2 
+                     - coeffs2_.a1 * state2_.y1 - coeffs2_.a2 * state2_.y2;
+        state2_.x2 = state2_.x1; state2_.x1 = out1;
+        state2_.y2 = state2_.y1; state2_.y1 = out2;
+
+        return std::isnan(out2) ? 0.0f : out2;
+    }
+};
+
+// 极致优化 C++ HapticEngine
+class HapticEngine {
+private:
+    float sampleRate_ = 48000.0f;
+    float userAmplitude_ = 2.0f;
+    
+    // 滤波网络
+    LinkwitzRiley4th subLowPass_;
+    LinkwitzRiley4th midHighPass_, midLowPass_;
+    LinkwitzRiley4th textureHighPass_;
+
+    // 热力学状态
+    float coilTemp_ = 25.0f;
+    float magnetTemp_ = 25.0f;
+
+    // 输出数据句柄
+    alignas(64) float subOutput_[256];
+    alignas(64) float midOutput_[256];
+    alignas(64) float textureOutput_[256];
+
+    // 动态压缩包络
+    float envelope_ = 0.0f;
+
+public:
+    HapticEngine() {
+        configure(48000.0f, 60.0f, 200.0f);
+    }
+
+    void configure(float sampleRate, float lowCutoff, float highCutoff) {
+        sampleRate_ = sampleRate;
+        subLowPass_.setLowPass(sampleRate, lowCutoff);
+        midHighPass_.setHighPass(sampleRate, lowCutoff);
+        midLowPass_.setLowPass(sampleRate, highCutoff);
+        textureHighPass_.setHighPass(sampleRate, highCutoff);
+    }
+
+    void setUserAmplitude(float amp) { userAmplitude_ = amp; }
+
+    // ARM NEON 加速 RMS 计算
+    static float computeRmsNeon(const float* buffer, int size) {
+        if (size <= 0) return 0.0f;
+        int i = 0;
+        float32x4_t vSum = vdupq_n_f32(0.0f);
+
+        // 每次处理 4 个 float 样本
+        for (; i <= size - 4; i += 4) {
+            float32x4_t vIn = vld1q_f32(buffer + i);
+            vSum = vmlaq_f32(vSum, vIn, vIn); // vSum += vIn * vIn
+        }
+
+        float sum = vaddvq_f32(vSum);
+
+        // 尾部未对齐部分处理
+        for (; i < size; ++i) {
+            sum += buffer[i] * buffer[i];
+        }
+
+        float rms = std::sqrt(sum / static_cast<float>(size));
+        return std::isnan(rms) ? 0.0f : rms;
+    }
+
+    // 核心音频帧处理函数 (零 GC，高吞吐)
+    void processAudioBlock(const float* input, int size, float* outTelemetry) {
+        if (size > 256) size = 256;
+
+        // 1. 三频段 Linkwitz-Riley Crossover 过滤
+        for (int i = 0; i < size; ++i) {
+            float sample = input[i];
+            subOutput_[i] = subLowPass_.process(sample);
+            float midTemp = midHighPass_.process(sample);
+            midOutput_[i] = midLowPass_.process(midTemp);
+            textureOutput_[i] = textureHighPass_.process(sample);
+        }
+
+        // 2. 使用 ARM NEON 快速计算各频段 RMS 能量
+        float subRms = computeRmsNeon(subOutput_, size);
+        float midRms = computeRmsNeon(midOutput_, size);
+        float textureRms = computeRmsNeon(textureOutput_, size);
+
+        // 3. 极速物理热力学模型迭代
+        float powerSum = (subRms * subRms) + (midRms * midRms * 0.4f);
+        float dt = static_cast<float>(size) / sampleRate_;
+        float heatCoilToMagnet = (coilTemp_ - magnetTemp_) / 25.0f;
+        coilTemp_ += (powerSum - heatCoilToMagnet) * dt / 0.8f;
+        magnetTemp_ += (heatCoilToMagnet - (magnetTemp_ - 25.0f) / 15.0f) * dt / 4.0f;
+
+        // 4. 温控过热保护衰减因子
+        float thermalGain = 1.0f;
+        if (coilTemp_ >= 100.0f) {
+            thermalGain = 0.0f;
+        } else if (coilTemp_ >= 80.0f) {
+            float ratio = (coilTemp_ - 80.0f) / 20.0f;
+            thermalGain = 0.5f * (1.0f + cosf(ratio * M_PI));
+        }
+
+        // 5. 组装输出遥测数据 (避免创建对象，直接写入指针数组)
+        outTelemetry[0] = subRms * userAmplitude_ * thermalGain;     // Final Sub
+        outTelemetry[1] = midRms * userAmplitude_ * thermalGain;     // Final Mid
+        outTelemetry[2] = textureRms * userAmplitude_ * thermalGain; // Final Texture
+        outTelemetry[3] = coilTemp_;                                 // Coil Temperature
+        outTelemetry[4] = thermalGain;                               // Thermal Gain
+    }
+};
+
+} // namespace haptic

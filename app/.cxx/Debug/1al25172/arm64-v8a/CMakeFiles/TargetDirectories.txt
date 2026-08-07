@@ -1,0 +1,4 @@
+/sdcard/AndroidIDEProjects/MusicHapticsX/app/.cxx/Debug/1al25172/arm64-v8a/CMakeFiles/haptic-engine.dir
+/sdcard/AndroidIDEProjects/MusicHapticsX/app/.cxx/Debug/1al25172/arm64-v8a/CMakeFiles/native-bridge.dir
+/sdcard/AndroidIDEProjects/MusicHapticsX/app/.cxx/Debug/1al25172/arm64-v8a/CMakeFiles/edit_cache.dir
+/sdcard/AndroidIDEProjects/MusicHapticsX/app/.cxx/Debug/1al25172/arm64-v8a/CMakeFiles/rebuild_cache.dir

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- LSPosed 推荐作用域：各大音视频平台 -->
+    <string-array name="xposed_scope">
+        <!-- B站 -->
+        <item>tv.danmaku.bili</item>
+        <!-- 酷狗音乐 -->
+        <item>com.kugou.android</item>
+        <!-- 酷狗概念版 -->
+        <item>com.kugou.android.lite</item>
+        <!-- md3music (酷狗概念版第三方) -->
+        <item>com.md3music.md3music</item>
+        <!-- 酷我音乐 -->
+        <item>cn.kuwo.player</item>
+        <!-- 网易云音乐 -->
+        <item>com.netease.cloudmusic</item>
+        <!-- QQ音乐 -->
+        <item>com.tencent.qqmusic</item>
+        <!-- 抖音 -->
+        <item>com.ss.android.ugc.aweme</item>
+        <!-- 快手 -->
+        <item>com.smile.gifmaker</item>
+        <!-- 虾米音乐 -->
+        <item>fm.xiami.main</item>
+        <!-- 咪咕音乐 -->
+        <item>cmccwm.mobilemusic</item>
+        <!-- 汽水音乐 -->
+        <item>com.luna.music</item>
+        <!-- Spotify -->
+        <item>com.spotify.music</item>
+        <!-- YouTube Music -->
+        <item>com.google.android.apps.youtube.music</item>
+        <!-- 系统媒体框架（兜底，确保所有走 AudioTrack 的应用都能被 Hook） -->
+        <item>android</item>
+    </string-array>
+</resources>

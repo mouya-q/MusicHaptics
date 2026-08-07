@@ -1,0 +1,35 @@
+{
+  "buildFiles": [
+    "/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/usr/lib/android-sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/sdcard/AndroidIDEProjects/MusicHapticsX/app/.cxx/Debug/1al25172/arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/usr/lib/android-sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/sdcard/AndroidIDEProjects/MusicHapticsX/app/.cxx/Debug/1al25172/arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "haptic-engine::@6890427a1f51a3e7e1df": {
+      "artifactName": "haptic-engine",
+      "abi": "arm64-v8a",
+      "output": "/sdcard/AndroidIDEProjects/MusicHapticsX/app/build/intermediates/cxx/Debug/1al25172/obj/arm64-v8a/libhaptic-engine.so",
+      "runtimeFiles": []
+    },
+    "native-bridge::@6890427a1f51a3e7e1df": {
+      "artifactName": "native-bridge",
+      "abi": "arm64-v8a",
+      "output": "/sdcard/AndroidIDEProjects/MusicHapticsX/app/build/intermediates/cxx/Debug/1al25172/obj/arm64-v8a/libnative-bridge.so",
+      "runtimeFiles": [
+        "/sdcard/AndroidIDEProjects/MusicHapticsX/app/build/intermediates/cxx/Debug/1al25172/obj/arm64-v8a/libhaptic-engine.so"
+      ]
+    }
+  }
+}

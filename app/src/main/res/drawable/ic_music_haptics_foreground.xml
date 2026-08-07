@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!--  核心实心震源 -->
+    <path
+        android:fillColor="#0B1D33"
+        android:pathData="M54,54m-7.5,0a7.5,7.5 0 1,1 15,0a7.5,7.5 0 1,1 -15,0" />
+
+    <!--  【第一层·最内环】单条连续弧线：从 12点钟 逆时针一路绕到 2点钟，在右上方留下天然断口 -->
+    <path
+        android:strokeColor="#0B1D33"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:pathData="M 54,37 A 17,17 0 1,0 66,41.5" />
+
+    <!--  【第二层·中层环】绝对分离的两段弧，绝不闭合 -->
+    <!-- 下方大U型架 -->
+    <path
+        android:strokeColor="#0B1D33"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:pathData="M 76,44 A 25.5,25.5 0 1,1 32,44" />
+    <!-- 头顶悬浮小夹心天线 -->
+    <path
+        android:strokeColor="#0B1D33"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:pathData="M 44,32 A 25.5,25.5 0 0,1 64,32" />
+
+    <!-- 【第三层·最外环】同样绝对分离的两段弧，多余的线条全部蒸发 -->
+    <!-- 下方最大U型架 -->
+    <path
+        android:strokeColor="#0B1D33"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:pathData="M 83.5,39 A 34,34 0 1,1 24.5,39" />
+    <!-- 头顶最外层天线帽 -->
+    <path
+        android:strokeColor="#0B1D33"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:pathData="M 39,24 A 34,34 0 0,1 69,24" />
+
+</vector>
+<!-- 极丑的备用图标  ( ⩌⤚⩌) -->

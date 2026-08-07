@@ -1,0 +1,69 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-Debug-f5ebdc15457944623624.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "musichaptics_native",
+					"targetIndexes" : 
+					[
+						0,
+						1
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "haptic-engine::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-haptic-engine-Debug-49bf2e56f32d6ec14b52.json",
+					"name" : "haptic-engine",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "native-bridge::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-native-bridge-Debug-dce8b5a9f9e20a8e37c7.json",
+					"name" : "native-bridge",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/sdcard/AndroidIDEProjects/MusicHapticsX/app/.cxx/Debug/1al25172/arm64-v8a",
+		"source" : "/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 6
+	}
+}

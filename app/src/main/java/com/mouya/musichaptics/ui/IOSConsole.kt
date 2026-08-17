@@ -1,6 +1,7 @@
 package com.mouya.musichaptics.ui
 
 import com.mouya.musichaptics.AppFontFamily
+import com.mouya.musichaptics.PhysicsSpring
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -64,7 +65,7 @@ fun IOSConsole(
 ) {
     val chevronRotation by animateFloatAsState(
         targetValue = if (isExpanded) 90f else 0f,
-        animationSpec = spring(dampingRatio = 0.7f, stiffness = 500f),
+        animationSpec = PhysicsSpring.uiFast(),  // v3.14: critically-damped, ~150ms
         label = "ChevronRotation"
     )
 
@@ -81,8 +82,7 @@ fun IOSConsole(
         border = BorderStroke(0.5.dp, if (isDark()) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f)),
         shadowElevation = 0.dp
     ) {
-        Column(modifier = Modifier.fillMaxWidth().animateContentSize(tween(250, easing = FastOutSlowInEasing))) {
-            // Header row
+        Column(modifier = Modifier.fillMaxWidth().animateContentSize(tween(250, easing = LinearOutSlowInEasing))) {  // v3.14: ease-out for enter
             Row(
                 modifier = Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 16.dp).clickable(
                     interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onToggle
@@ -100,13 +100,12 @@ fun IOSConsole(
 
             AnimatedVisibility(
                 visible = isExpanded,
-                enter = expandVertically(tween(250, easing = FastOutSlowInEasing), Alignment.Top) + fadeIn(tween(200)),
-                exit = shrinkVertically(tween(250, easing = FastOutSlowInEasing), Alignment.Top) + fadeOut(tween(180))
+                enter = expandVertically(tween(250, easing = LinearOutSlowInEasing), Alignment.Top) + fadeIn(tween(200)),  // v3.14: ease-out
+                exit = shrinkVertically(tween(250, easing = FastOutLinearInEasing), Alignment.Top) + fadeOut(tween(180))  // v3.14: ease-in for exit
             ) {
                 Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
                     HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
 
-                    // Toolbar
                     Row(
                         modifier = Modifier.fillMaxWidth().height(32.dp).padding(horizontal = 12.dp),
                         horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically
@@ -129,7 +128,6 @@ fun IOSConsole(
                         }
                     }
 
-                    // Log content
                     Column(
                         modifier = Modifier.fillMaxWidth().height(140.dp).padding(horizontal = 12.dp, vertical = 6.dp).verticalScroll(rememberScrollState())
                     ) {

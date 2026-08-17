@@ -1,76 +1,71 @@
-name: Build Android APK
+name: Build APK
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, master]
+    tags: ['v*']
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, master]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
-      - name: Set up JDK 17
+
+      - name: Set up JDK 26 (matches local build env)
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: gradle
-      
-      - name: Set up Android SDK
+          distribution: temurin
+          java-version: '26'
+
+      - name: Set up Android SDK (PATH config, skip built-in license accept)
         uses: android-actions/setup-android@v3
-      
-      - name: Install NDK
+        with:
+          accept-android-sdk-licenses: false
+
+      - name: Accept SDK licenses + install 37
         run: |
-          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "ndk;26.1.10909125"
-      
-      - name: Grant execute permission for gradlew
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-37" "build-tools;37.0.0" > /dev/null 2>&1 || true
+          echo "SDK ready: $(ls $ANDROID_HOME/platforms 2>/dev/null | tr '\n' ' ')"
+
+      - name: Grant gradlew permission
         run: chmod +x gradlew
-      
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
-        env:
-          GRADLE_OPTS: "-Xmx4096m"
-      
-      - name: Build Release APK
-        run: ./gradlew assembleRelease --stacktrace
-        env:
-          GRADLE_OPTS: "-Xmx4096m"
-      
-      - name: Upload Debug APK
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Build release APK
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: musichaptics-debug
-          path: app/build/outputs/apk/debug/
-          retention-days: 30
-      
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
+          name: MusicHapticsX-release
+          path: app/build/outputs/apk/release/*.apk
+
+      - name: Publish APK to GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: musichaptics-release
-          path: app/build/outputs/apk/release/
-          retention-days: 30
-      
-      - name: Upload Build Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: build/
-          retention-days: 7
-      
-      - name: Print Build Info
-        if: success()
-        run: |
-          echo "✅ Build Successful!"
-          echo "Debug APK: app/build/outputs/apk/debug/"
-          echo "Release APK: app/build/outputs/apk/release/"
-          ls -lah app/build/outputs/apk/debug/
-          ls -lah app/build/outputs/apk/release/
+          files: app/build/outputs/apk/release/*.apk
+          tag_name: build-${{ github.sha }}
+          name: MusicHapticsX v4.2 (${{ github.sha }}
+          body: |
+            MusicHapticsX v4.2 — 纯 libxposed API 102 重写
+
+            推荐参数：震动模式「鼓点」+ 震动阈值 0.7
+          draft: false
+          prerelease: false

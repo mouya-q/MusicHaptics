@@ -11,15 +11,6 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
 
-/**
- * VibrateProxy — Client-side raw Binder proxy for vibration.
- *
- * When the hooked target app lacks android.permission.VIBRATE, all
- * vibration calls are forwarded via IPC to VibrateProxyService (which
- * runs in the module's own process with VIBRATE permission).
- *
- * Uses raw Parcel transact — no AIDL dependency.
- */
 class VibrateProxy(private val context: Context) {
 
     companion object {
@@ -32,9 +23,6 @@ class VibrateProxy(private val context: Context) {
     private var directVibrator: Vibrator? = null
     private var hasDirectVibrator = false
 
-    // v2.1.2: Hard pause gate — blocks ALL vibration output at the proxy level
-    // This is the final defense against race conditions where HapticEngine's
-    // hapticPaused flag is checked but vibration call still executes before pause takes effect
     @Volatile var paused = false
         private set
 
@@ -49,7 +37,6 @@ class VibrateProxy(private val context: Context) {
         }
     }
 
-    // v3.10.20: ColorOS/HyperOS deep adaptation — extended primitive support flags
     @Volatile var primitiveLowTickSupported = false
         private set
     @Volatile var primitiveSpinSupported = false
@@ -64,7 +51,6 @@ class VibrateProxy(private val context: Context) {
     @Volatile var hyperOSHapticAvailable = false
         private set
 
-    // v2.1.2: Cached primitive support flags — checked once at init
     @Volatile var primitiveClickSupported = false
         private set
     @Volatile var primitiveTickSupported = false
@@ -76,12 +62,6 @@ class VibrateProxy(private val context: Context) {
 
     fun init(): Boolean {
         val pkgName = try { context.packageName } catch (e: Exception) { "unknown" }
-        // Do NOT ask PackageManager about context.packageName here. In an Xposed
-        // process we commonly receive ActivityThread's system Context whose
-        // package is "android". That package has VIBRATE, while the actual
-        // hooked app UID may not. The old check therefore selected DIRECT and
-        // every direct vibrate() was rejected by the system. Permission must
-        // be evaluated for this process UID.
         val hasPermission = try {
             context.checkSelfPermission("android.permission.VIBRATE") ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -109,7 +89,6 @@ class VibrateProxy(private val context: Context) {
                 try { directVibrator!!.hasAmplitudeControl() } catch (_: Exception) { false }
             } else false
 
-            // v2.1.2: Check primitive support — critical for OnePlus/Samsung devices
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && directVibrator != null) {
                 try {
                     val vib = directVibrator!!
@@ -123,10 +102,6 @@ class VibrateProxy(private val context: Context) {
                         vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_THUD)
                     } catch (_: Exception) { false }
 
-                    // v3.10.20: ColorOS/HyperOS deep adaptation — probe extended primitives
-                    // PRIMITIVE_LOW_TICK (API 30): subtle texture, critical for "细腻" feel
-                    // PRIMITIVE_SPIN (API 30): smooth ramp, good for sustained notes
-                    // PRIMITIVE_QUICK_RISE / SLOW_RISE (API 30): attack envelope primitives
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         primitiveLowTickSupported = try {
                             vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_LOW_TICK)
@@ -148,7 +123,6 @@ class VibrateProxy(private val context: Context) {
             val mfr = Build.MANUFACTURER.lowercase()
             colorOSHapticAvailable = mfr == "oneplus" || mfr == "oppo"
             hyperOSHapticAvailable = mfr == "xiaomi"
-            // Lenovo ZUI also has haptic extensions
             val isLenovoHaptic = mfr == "lenovo"
 
             Log.i(TAG, "Direct path: hasVibrator=$hasDirectVibrator hasAmpCtrl=$hasAmplitudeControl")
@@ -156,8 +130,6 @@ class VibrateProxy(private val context: Context) {
             Log.i(TAG, "Extended primitives: LOW_TICK=$primitiveLowTickSupported SPIN=$primitiveSpinSupported QUICK_RISE=$primitiveQuickRiseSupported SLOW_RISE=$primitiveSlowRiseSupported")
             Log.i(TAG, "Vendor haptic: ColorOS=$colorOSHapticAvailable HyperOS=$hyperOSHapticAvailable Lenovo=$isLenovoHaptic")
 
-            // Do not vibrate during hook initialization: target apps can construct audio
-            // objects before playback and an unsolicited test pulse is undesirable.
             if (!hasDirectVibrator) Log.e(TAG, "No direct vibrator available")
 
             Log.i(TAG, "═══ END VIBRATE PROXY INIT ═══")
@@ -187,18 +159,11 @@ class VibrateProxy(private val context: Context) {
 
     val hasVibrator: Boolean
         get() = if (useProxy) {
-            // Optimistic: the IPC binding is asynchronous — remoteBinder may
-            // still be null when the engine first checks.  Returning false here
-            // would cause the engine to skip ALL vibration permanently, even
-            // though the binder connects a few milliseconds later.
             true
         } else hasDirectVibrator
 
-    // v2.1.2: Hard pause control — called by HapticEngine.onPlaybackPaused()
-    // Immediately blocks all vibration output and cancels ongoing vibration
     fun setPaused() {
         paused = true
-        // Cancel immediately at the Vibrator level
         if (useProxy) {
             val b = remoteBinder
             if (b != null) {
@@ -219,7 +184,6 @@ class VibrateProxy(private val context: Context) {
         }
     }
 
-    // v2.1.2: Resume vibration output — called when new audio arrives
     fun setResumed() {
         paused = false
     }
@@ -245,12 +209,9 @@ class VibrateProxy(private val context: Context) {
             if (vib != null && hasDirectVibrator) {
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        // v2.1.2: Try createPredefined first — system-optimized for LRA hardware
-                        // If it throws (some OEMs), fallback to createOneShot
                         try {
                             vib.vibrate(VibrationEffect.createPredefined(effectId))
                         } catch (e: Exception) {
-                            // Predefined not supported on this device — fallback
                             val (dur, amp) = when (effectId) {
                                 VibrationEffect.EFFECT_TICK -> 8L to 80
                                 VibrationEffect.EFFECT_CLICK -> 20L to 128
@@ -275,10 +236,20 @@ class VibrateProxy(private val context: Context) {
     }
 
     fun performWaveform(timings: LongArray, amplitudes: IntArray) {
-        if (paused) return
-        if (timings.isEmpty() || amplitudes.isEmpty()) return
+        if (paused) {
+            android.util.Log.w(TAG, "performWaveform SKIPPED: paused=true")
+            return
+        }
+        if (timings.isEmpty() || amplitudes.isEmpty()) {
+            android.util.Log.w(TAG, "performWaveform SKIPPED: empty arrays")
+            return
+        }
         if (useProxy) {
-            val b = remoteBinder ?: return
+            val b = remoteBinder
+            if (b == null) {
+                android.util.Log.w(TAG, "performWaveform SKIPPED: remoteBinder is null (IPC not connected)")
+                return
+            }
             try {
                 val data = Parcel.obtain()
                 val reply = Parcel.obtain()
@@ -298,6 +269,8 @@ class VibrateProxy(private val context: Context) {
                 try {
                     vib.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
                 } catch (e: Exception) { Log.w(TAG, "Direct performWaveform: ${e.message}") }
+            } else {
+                android.util.Log.w(TAG, "performWaveform SKIPPED: no direct vibrator available")
             }
         }
     }
@@ -347,19 +320,12 @@ class VibrateProxy(private val context: Context) {
         }
     }
 
-    // v3.10.20: ColorOS/HyperOS Composition API — perform a composition of primitives
-    // This allows fine-grained haptic texture by combining multiple primitives with
-    // individual scale and delay, leveraging OEM-tuned system haptic effects.
-    //
-    // @param primitives: list of (primitiveId, scale, delayMs) tuples
-    // On devices without Composition support, falls back to waveform.
     fun performComposition(
         primitives: List<Triple<Int, Float, Int>>
     ) {
         if (paused) return
         if (primitives.isEmpty()) return
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            // Pre-R fallback: convert to one-shot sequence
             primitives.forEach { (_, scale, _) ->
                 performOneShot(15L, (scale * 255).toInt().coerceIn(1, 255))
             }
@@ -372,7 +338,6 @@ class VibrateProxy(private val context: Context) {
                 val data = Parcel.obtain()
                 val reply = Parcel.obtain()
                 try {
-                    // Serialize: count, then (primitiveId, scale, delayMs) per entry
                     data.writeInt(primitives.size)
                     primitives.forEach { (pid, scale, delay) ->
                         data.writeInt(pid)
@@ -399,7 +364,6 @@ class VibrateProxy(private val context: Context) {
                     vib.vibrate(composition.compose())
                 } catch (e: Exception) {
                     Log.w(TAG, "Composition failed, fallback to one-shot: ${e.message}")
-                    // Fallback: fire a single one-shot with average intensity
                     val avgScale = primitives.map { it.second }.avg()
                     performOneShot(20L, (avgScale * 255).toInt().coerceIn(1, 255))
                 }
@@ -407,8 +371,6 @@ class VibrateProxy(private val context: Context) {
         }
     }
 
-    // v3.10.20: ColorOS optimized haptic — uses LOW_TICK for subtle texture
-    // when the device supports it, providing the "细腻爽感" experience.
     fun performTextureTick(intensity: Float) {
         if (paused) return
         val scale = intensity.coerceIn(0f, 1f)
@@ -421,7 +383,6 @@ class VibrateProxy(private val context: Context) {
         }
     }
 
-    // v3.10.20: ColorOS impact haptic — uses THUD/CLICK for strong transients
     fun performImpact(intensity: Float) {
         if (paused) return
         val scale = intensity.coerceIn(0f, 1f)
@@ -434,7 +395,6 @@ class VibrateProxy(private val context: Context) {
         }
     }
 
-    // v3.10.20: Rise effect — for note onset with natural attack envelope
     fun performRise(intensity: Float, fast: Boolean = true) {
         if (paused) return
         val scale = intensity.coerceIn(0f, 1f)

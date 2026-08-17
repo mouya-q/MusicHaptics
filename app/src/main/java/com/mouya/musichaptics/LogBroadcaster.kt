@@ -59,8 +59,6 @@ object LogBroadcaster {
         gammaValue: Float = 0.5f
     ) {
         try {
-            // v3.13: Pack all float values into a single float array to reduce
-            // Binder IPC overhead from 30+ putExtra calls to ~10 packed calls.
             val floats = floatArrayOf(
                 sub, mid, pres, f0, temp, atten,
                 loFreq, hiFreq, ampScale,

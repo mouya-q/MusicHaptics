@@ -3,13 +3,6 @@ package com.mouya.musichaptics
 import kotlin.math.abs
 import kotlin.math.max
 
-/**
- * v3.8 phase 2: low-cost musical structure tracker.
- *
- * It deliberately works on the live feature stream rather than guessing a genre
- * from one audio frame. The result is stable enough to guide future haptic
- * density/contrast decisions while preserving a graceful real-time fallback.
- */
 class MusicStructureAnalyzer {
     enum class Section { INTRO, VERSE, BUILD, CHORUS, BREAKDOWN, OUTRO }
 
@@ -37,8 +30,8 @@ class MusicStructureAnalyzer {
         isBeat: Boolean,
         instruments: InstrumentFeatures
     ): Snapshot {
-        val rawEnergy = (sub * 1.25f + mid * 0.85f + texture * 0.45f).coerceIn(0f, 2f)
-        energyEma += 0.12f * (rawEnergy - energyEma)
+        val rawEnergy = (sub * 2.2f + mid * 1.1f + texture * 0.55f).coerceIn(0f, 2f)
+        energyEma += 0.18f * (rawEnergy - energyEma)
         longEnergyEma += 0.018f * (rawEnergy - longEnergyEma)
         val dt = if (lastFrameMs == 0L) 20L else (timestampMs - lastFrameMs).coerceIn(1L, 200L)
         lastFrameMs = timestampMs
@@ -61,7 +54,6 @@ class MusicStructureAnalyzer {
             else -> current.section
         }
 
-        // A 4-second hysteresis avoids section labels bouncing on every fill.
         if (candidate != current.section && timestampMs - lastSectionChangeMs >= 4_000L) {
             current = current.copy(section = candidate)
             lastSectionChangeMs = timestampMs
@@ -69,7 +61,7 @@ class MusicStructureAnalyzer {
         val confidence = (abs(energyEma - longEnergyEma) * 2.2f + percussion * 0.25f + vocalOrHarmony * 0.15f)
             .coerceIn(0f, 1f)
         current = current.copy(
-            energy = energyEma,
+            energy = (energyEma * 2.5f).coerceAtMost(1f),
             beatDensity = densityEma,
             dynamicRise = rise,
             confidence = confidence

@@ -153,12 +153,12 @@ class HapticEventGenerator(
             if (vib != null) {
                 val effect = VibrationEffect.createOneShot(300, 255)
                 vib.vibrate(effect)
-                Log.e(TAG, "✅ TEST VIBRATION SENT (300ms, amp=255)")
+                Log.e(TAG, " TEST VIBRATION SENT (300ms, amp=255)")
             } else {
-                Log.e(TAG, "❌ TEST FAILED: vibrator is null!")
+                Log.e(TAG, " TEST FAILED: vibrator is null!")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ TEST FAILED: ${e.message}")
+            Log.e(TAG, " TEST FAILED: ${e.message}")
         }
         Log.e(TAG, "═══ END DIAGNOSTIC ═══")
     }
@@ -239,7 +239,7 @@ class HapticEventGenerator(
         val finalBlendedIntensity = blendedIntensity * presetAmplitudeMultiplier
 
         if (frameIndex % 32L == 0L) {
-            Log.e(TAG, "📊 BLEND=%.6f final=%.6f silenceTh=%.6f accumEnergy=%.4f energyTh=%.3f minInterval=%dms"
+            Log.e(TAG, " BLEND=%.6f final=%.6f silenceTh=%.6f accumEnergy=%.4f energyTh=%.3f minInterval=%dms"
                 .format(blendedIntensity, finalBlendedIntensity, profile.silenceThreshold,
                     accumulatedEnergy, profile.energyThreshold, profile.minIntervalMs))
         }
@@ -390,7 +390,7 @@ class HapticEventGenerator(
                 }
             }
             if (effect != null) {
-                Log.e(TAG, "⚡ VIBRATE! amp=$targetAmplitude mode=%s effectClass=%s".format(
+                Log.e(TAG, "VIBRATE! amp=$targetAmplitude mode=%s effectClass=%s".format(
                     when {
                         isSubDominant -> "SUB"
                         isPresenceDominant -> "PRES"
@@ -750,7 +750,7 @@ class HapticEventGenerator(
         }
 
         if (vib == null) {
-            Log.e(TAG, "❌ VIBRATOR IS NULL - cannot vibrate!")
+            Log.e(TAG, "VIBRATOR IS NULL - cannot vibrate!")
             return
         }
 
@@ -847,7 +847,7 @@ class HapticEventGenerator(
         }
 
         effect?.let {
-            Log.e(TAG, "⚡ VIBRATE! amp=$envelopedAmplitude mode=${when {
+            Log.e(TAG, "VIBRATE! amp=$envelopedAmplitude mode=${when {
                 command.isKeyStrike -> "KEY-STRIKE[${command.keyStrikeSemantic.name}]"
                 command.isBeat -> "BEAT-Pulse"
                 command.isTransient -> "TRANSIENT-Impact"

@@ -32,8 +32,6 @@ class ConfigProvider : ContentProvider() {
             }
 
             "get_prefs" -> {
-                // Start with the module-wide defaults, then overlay only the keys
-                // explicitly customized for the requesting hooked package.
                 val global = ctx.getSharedPreferences("haptics_config", Context.MODE_PRIVATE).all
                 val targetPackage = extras?.getString("target_package").orEmpty()
                 val scoped = if (targetPackage.isNotBlank()) {

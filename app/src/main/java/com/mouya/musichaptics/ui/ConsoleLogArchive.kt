@@ -10,7 +10,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Small persistent archive for the dashboard console, independent of process lifetime. */
 object ConsoleLogArchive {
     private const val DIRECTORY = "logs"
     private const val FILE_NAME = "console.log"
@@ -43,7 +42,6 @@ object ConsoleLogArchive {
         } catch (_: Exception) { }
     }
 
-    /** Exports a UTF-8 snapshot to the user-visible Download/MusicHapticsX folder. */
     @Synchronized
     fun exportToDownloads(context: Context, lines: List<String>): Result<String> = runCatching {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())

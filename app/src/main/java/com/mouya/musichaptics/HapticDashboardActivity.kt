@@ -5,8 +5,14 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberTimePickerState
+import androidx.compose.material3.ExperimentalMaterial3Api
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Bundle
@@ -92,9 +98,6 @@ import kotlin.math.sin
 import kotlin.math.max
 import kotlin.math.abs
 
-// ════════════════════════════════════════════════════════════════
-//  iOS Liquid Glass Design System
-// ════════════════════════════════════════════════════════════════
 
 private object IOSColors {
     val blue = Color(0xFF007AFF)
@@ -122,19 +125,17 @@ private object IOSColors {
     val darkTextTertiary = Color(0xFFEBEBF5).copy(alpha = 0.3f)
 }
 
-// MusicHapticsX uses a fixed white canvas regardless of the system appearance.
-@Composable private fun isDark() = false
+@Composable private fun isDark() = androidx.compose.foundation.isSystemInDarkTheme()
 
-@Composable private fun bgPrimary() = Color.White
-@Composable private fun cardColor() = Color.White
-@Composable private fun cardAltColor() = Color(0xFFF2F2F7)
-@Composable private fun glassColor() = Color.White.copy(alpha = 0.86f)
-@Composable private fun textPrimary() = Color(0xFF000000)
-@Composable private fun textSecondary() = Color(0xFF3C3C43).copy(alpha = 0.6f)
-@Composable private fun textTertiary() = Color(0xFF3C3C43).copy(alpha = 0.3f)
-@Composable private fun separatorColor() = Color(0xFFC6C6C8)
+@Composable private fun bgPrimary() = if (isDark()) IOSColors.darkBg else IOSColors.lightBg
+@Composable private fun cardColor() = if (isDark()) IOSColors.darkCard else IOSColors.lightCard
+@Composable private fun cardAltColor() = if (isDark()) IOSColors.darkCardAlt else IOSColors.lightCardAlt
+@Composable private fun glassColor() = if (isDark()) IOSColors.glassDark else IOSColors.glassLight
+@Composable private fun textPrimary() = if (isDark()) IOSColors.darkTextPrimary else IOSColors.lightTextPrimary
+@Composable private fun textSecondary() = if (isDark()) IOSColors.darkTextSecondary else IOSColors.lightTextSecondary
+@Composable private fun textTertiary() = if (isDark()) IOSColors.darkTextTertiary else IOSColors.lightTextTertiary
+@Composable private fun separatorColor() = if (isDark()) Color(0xFF38383A) else Color(0xFFC6C6C8)
 
-/** iOS Liquid Glass card modifier */
 @Composable
 fun Modifier.liquidGlass(corner: Dp = 22.dp): Modifier = this.then(
     Modifier
@@ -143,7 +144,6 @@ fun Modifier.liquidGlass(corner: Dp = 22.dp): Modifier = this.then(
         .border(0.5.dp, if (isDark()) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f), RoundedCornerShape(corner))
 )
 
-/** iOS-style toggle switch */
 @Composable
 fun IOSToggle(
     checked: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier,
@@ -171,12 +171,11 @@ fun IOSToggle(
     ) {
         Box(
             modifier = Modifier.offset(x = thumbOffset, y = 2.dp).size(28.dp)
-                .clip(CircleShape).background(Color.White)
+                .clip(CircleShape).background(if (isDark()) IOSColors.darkCardAlt else Color.White)
         )
     }
 }
 
-/** iOS-style segmented control */
 @Composable
 fun <T> IOSSegmentedControl(
     items: List<T>, selected: T, onSelect: (T) -> Unit,
@@ -192,7 +191,7 @@ fun <T> IOSSegmentedControl(
         modifier = modifier.fillMaxWidth().height(36.dp)
             .shadow(4.dp, RoundedCornerShape(10.dp), ambientColor = Color.Black.copy(alpha = 0.05f), spotColor = Color.Black.copy(alpha = 0.08f))
             .clip(RoundedCornerShape(10.dp))
-            .background(if (isDark()) Color(0xFF2C2C2E) else Color(0xFFEFEFF2)) // flat light gray bar
+            .background(if (isDark()) Color(0xFF2C2C2E) else Color(0xFFEFEFF2))  // flat light gray bar
             .padding(2.dp)
     ) {
         val itemWidth = maxWidth / items.size
@@ -200,24 +199,11 @@ fun <T> IOSSegmentedControl(
         
         val isInteracting = pressedItem != null || dragOffset != 0f
         
-        // Squeeze/Expand morphing scale
-        val lensScale by animateFloatAsState(
-            targetValue = if (isInteracting) 1.15f else 1f,
-            animationSpec = spring(dampingRatio = 0.45f, stiffness = 400f),
-            label = "LensScale"
-        )
-        
         val baseOffset = itemWidthPx * items.indexOf(selected)
         val lensOffsetPx by animateFloatAsState(
             targetValue = baseOffset + dragOffset,
-            animationSpec = spring(dampingRatio = 0.45f, stiffness = 300f),
+            animationSpec = PhysicsSpring.elasticSelect(),  // v3.14: near-critical damping
             label = "LensOffset"
-        )
-        
-        val glassAlpha by animateFloatAsState(
-            targetValue = if (isInteracting) 1f else 0.35f,
-            animationSpec = spring(dampingRatio = 0.8f, stiffness = 400f),
-            label = "GlassAlpha"
         )
 
         Box(
@@ -225,14 +211,10 @@ fun <T> IOSSegmentedControl(
                 .offset { androidx.compose.ui.unit.IntOffset(lensOffsetPx.toInt(), 0) }
                 .width(itemWidth)
                 .fillMaxHeight()
-                .graphicsLayer { 
-                    scaleX = lensScale
-                    scaleY = lensScale 
-                }
+                // v3.14: no scale spring — flat, clean indicator
                 .shadow(if (isInteracting) 6.dp else 0.dp, RoundedCornerShape(8.dp), ambientColor = IOSColors.blue.copy(alpha=0.4f), spotColor = IOSColors.blue.copy(alpha=0.3f))
                 .clip(RoundedCornerShape(8.dp))
                 .background(if (isDark()) Color(0xFF48484A) else Color.White)
-                .background(Color.White.copy(alpha = glassAlpha))
         )
         
         Row(Modifier.fillMaxSize()) {
@@ -247,7 +229,7 @@ fun <T> IOSSegmentedControl(
                                     val targetIndex = (totalOffset / itemWidthPx).roundToInt().coerceIn(0, items.size - 1)
                                     val targetItem = items[targetIndex]
                                     if (targetItem != selected) {
-                                        hapticEngine.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
+                                        hapticEngine.perform(HapticFeedbackEngine.HapticStyle.SELECTION)  // v3.14: commit haptic only
                                         onSelect(targetItem)
                                     }
                                     pressedItem = null
@@ -260,14 +242,6 @@ fun <T> IOSSegmentedControl(
                             ) { change, dragAmount ->
                                 change.consume()
                                 dragOffset += dragAmount.x
-                                
-                                val totalOffset = baseOffset + dragOffset
-                                val targetIndex = (totalOffset / itemWidthPx).roundToInt().coerceIn(0, items.size - 1)
-                                val targetItem = items[targetIndex]
-                                if (targetItem != selected) {
-                                    hapticEngine.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
-                                    onSelect(targetItem)
-                                }
                             }
                         }
                         .pointerInput(item, "tap") {
@@ -299,7 +273,34 @@ fun <T> IOSSegmentedControl(
     }
 }
 
-/** iOS-style settings slider row */
+@Composable
+private fun LiquidGlassSliderTrack(
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    modifier: Modifier = Modifier
+) {
+    val progress = ((value - range.start) / (range.endInclusive - range.start)).coerceIn(0f, 1f)
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(6.dp)
+            .clip(RoundedCornerShape(3.dp))
+            .background(if (isDark()) Color(0xFF39393B) else Color(0xFFE8E8ED))
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth(progress)
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(3.dp))
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(IOSColors.blue.copy(alpha = 0.85f), IOSColors.blue)
+                    )
+                )
+        )
+    }
+}
+
 @Composable
 fun IOSSettingSliderRow(
     label: String, value: Float, range: ClosedFloatingPointRange<Float>,
@@ -307,31 +308,80 @@ fun IOSSettingSliderRow(
 ) {
     val context = LocalContext.current
     val hapticEngine = remember { HapticFeedbackEngine.create(context) }
-    var lastHapticValue by remember { mutableStateOf(value) }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    val thumbScale = remember { Animatable(1f) }
+    val coroutineScope = rememberCoroutineScope()
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(label, fontSize = 15.sp, color = textPrimary(), fontFamily = AppFontFamily)
             Text("${String.format(Locale.ROOT, "%.1f", value)} $unit", fontSize = 15.sp, color = IOSColors.blue, fontWeight = FontWeight.Medium, fontFamily = AppFontFamily)
         }
-        Slider(
-            value = value, onValueChange = {
-                onValueChange(it)
-                // Throttle haptic: only fire when value changes by ~5% of range
-                val rangeSize = range.endInclusive - range.start
-                if (rangeSize > 0f && kotlin.math.abs(it - lastHapticValue) >= rangeSize * 0.05f) {
-                    hapticEngine.perform(HapticFeedbackEngine.HapticStyle.LIGHT_TICK)
-                    lastHapticValue = it
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(36.dp)
+                .pointerInput(range) {
+                    val widthPx = size.width.toFloat()
+                    fun xToValue(x: Float): Float {
+                        val progress = (x / widthPx).coerceIn(0f, 1f)
+                        return range.start + progress * (range.endInclusive - range.start)
+                    }
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            coroutineScope.launch { thumbScale.animateTo(1.25f, PhysicsSpring.uiFast()) }  // v3.14
+                            val v = xToValue(offset.x)
+                            onValueChange(v)
+                            hapticEngine.perform(HapticFeedbackEngine.HapticStyle.CONTINUOUS_HUM)  // v3.14: start continuous
+                        },
+                        onDragEnd = {
+                            coroutineScope.launch { thumbScale.animateTo(1f, PhysicsSpring.uiStandard()) }  // v3.14
+                            hapticEngine.perform(HapticFeedbackEngine.HapticStyle.KICK)  // v3.14: commit tick
+                        },
+                        onDragCancel = {
+                            coroutineScope.launch { thumbScale.animateTo(1f, PhysicsSpring.uiStandard()) }  // v3.14
+                        }
+                    ) { change, _ ->
+                        change.consume()
+                        val v = xToValue(change.position.x)
+                        onValueChange(v)
+                    }
                 }
-            }, valueRange = range, modifier = Modifier.fillMaxWidth(),
-            colors = SliderDefaults.colors(
-                thumbColor = Color.White, activeTrackColor = IOSColors.blue,
-                inactiveTrackColor = if (isDark()) Color(0xFF39393B) else Color(0xFFE0E0E5)
+                .pointerInput(range) {
+                    detectTapGestures(
+                        onTap = { offset ->
+                            val widthPx = size.width.toFloat()
+                            val progress = (offset.x / widthPx).coerceIn(0f, 1f)
+                            val v = range.start + progress * (range.endInclusive - range.start)
+                            onValueChange(v)
+                            hapticEngine.perform(HapticFeedbackEngine.HapticStyle.LIGHT_TICK)
+                        }
+                    )
+                },
+            contentAlignment = Alignment.CenterStart
+        ) {
+            val trackWidth = maxWidth
+            val progress = ((value - range.start) / (range.endInclusive - range.start)).coerceIn(0f, 1f)
+            val thumbSize = 24.dp
+            val thumbOffset = trackWidth * progress - thumbSize / 2
+
+            LiquidGlassSliderTrack(value, range, Modifier.fillMaxWidth())
+            Box(
+                Modifier
+                    .offset(x = thumbOffset)
+                    .size(thumbSize)
+                    .graphicsLayer {
+                        scaleX = thumbScale.value
+                        scaleY = thumbScale.value
+                    }
+                    .shadow(4.dp, CircleShape, ambientColor = Color.Black.copy(alpha = 0.08f), spotColor = IOSColors.blue.copy(alpha = 0.15f))
+                    .clip(CircleShape)
+                    .background(if (isDark()) IOSColors.darkCardAlt else Color.White)
+                    .border(0.5.dp, IOSColors.blue.copy(alpha = 0.2f), CircleShape)
             )
-        )
+        }
     }
 }
 
-/** iOS-style action button */
 @Composable
 fun IOSButton(
     label: String, isActive: Boolean, modifier: Modifier = Modifier,
@@ -371,9 +421,6 @@ fun IOSButton(
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Activity
-// ════════════════════════════════════════════════════════════════
 
 class HapticDashboardActivity : ComponentActivity() {
 
@@ -434,14 +481,13 @@ class HapticDashboardActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Android 15+ enforces edge-to-edge; setDecorFitsSystemWindows(true) is
-        // deprecated and ignored on API 35+. We handle insets in Compose instead.
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         window.navigationBarColor = android.graphics.Color.TRANSPARENT
         WindowInsetsControllerCompat(window, window.decorView).apply {
-            isAppearanceLightStatusBars = true
-            isAppearanceLightNavigationBars = true
+            val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+            isAppearanceLightStatusBars = night
+            isAppearanceLightNavigationBars = night
         }
 
         val telemetryFilter = IntentFilter(LogBroadcaster.ACTION_TELEMETRY)
@@ -456,7 +502,7 @@ class HapticDashboardActivity : ComponentActivity() {
         else
             registerReceiver(logReceiver, logFilter)
 
-        setContent { MaterialTheme { HapticDashboard() } }
+        setContent { MaterialTheme { ReducedMotionProvider { HapticDashboard() } } }
     }
 
     override fun onDestroy() {
@@ -466,9 +512,6 @@ class HapticDashboardActivity : ComponentActivity() {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Main Dashboard
-// ════════════════════════════════════════════════════════════════
 
 @Composable
 fun HapticDashboard() {
@@ -500,7 +543,6 @@ fun HapticDashboard() {
                 thermalAttenuation = TelemetryHub.thermalAttenuation,
             )
 
-            // Hold primitive display for 800ms after last event
             val now = System.currentTimeMillis()
             val currentType = TelemetryHub.primitiveType
             if (currentType.isNotEmpty()) {
@@ -518,9 +560,6 @@ fun HapticDashboard() {
         }
     }
 
-    // v2.1.2: Read initial values from prefs to prevent
-    // "settings reset on restart" bug — previously these were hardcoded
-    // defaults that immediately overwrote saved prefs via LaunchedEffect.
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("haptics_config", Context.MODE_PRIVATE) }
 
@@ -534,6 +573,7 @@ fun HapticDashboard() {
     var showAdvancedSettings by remember { mutableStateOf(false) }
     var customAmplitude by remember { mutableStateOf(prefs.getFloat("haptic_amplitude", 2.0f)) }
     var customBassBoost by remember { mutableStateOf(prefs.getFloat("haptic_bass_boost", 1.6f)) }
+    var hapticThreshold by remember { mutableStateOf(prefs.getFloat("haptic_threshold", 0f)) }
     var hapticPreset by remember {
         val idx = prefs.getInt("haptic_preset_id", HapticPreset.BALANCED.ordinal)
         mutableStateOf(HapticPreset.entries.getOrElse(idx) { HapticPreset.BALANCED })
@@ -541,6 +581,7 @@ fun HapticDashboard() {
 
     var selectedPersonaName by remember { mutableStateOf(prefs.getString("music_persona", MusicPersona.DEFAULT.name) ?: MusicPersona.DEFAULT.name) }
     var gammaOverride by remember { mutableStateOf(prefs.getFloat("haptic_gamma_override", -1f)) }
+    var vibrationModeLocalized by remember { mutableStateOf(prefs.getString("vibration_mode", "kick") ?: "kick") }
 
     var synthLraF0 by remember { mutableStateOf(prefs.getFloat("synth_lra_f0", HapticSynthesizer.LRA_F0)) }
     var synthLraQ by remember { mutableStateOf(prefs.getFloat("synth_lra_q", HapticSynthesizer.LRA_Q)) }
@@ -567,8 +608,6 @@ fun HapticDashboard() {
     
     val scope = rememberCoroutineScope()
     var dashboardTab by rememberSaveable { mutableStateOf(DashboardTab.CONSOLE) }
-    // The source layer is sampled by the floating tab bar below. Unlike a
-    // translucent fill, this gives the bar a real backdrop blur on Android 12+.
     val liquidGlassBackdrop = remember { HazeState() }
  
 LaunchedEffect(isMasterSwitchOn, isPowerAmplifyActive, isCrossoverBypassActive, selectedPreset, customAmplitude, customBassBoost, hapticPreset,
@@ -581,7 +620,6 @@ LaunchedEffect(isMasterSwitchOn, isPowerAmplifyActive, isCrossoverBypassActive, 
              putBoolean("crossover_bypass", isCrossoverBypassActive)
              putInt("selected_preset", selectedPreset.ordinal)
              putFloat("haptic_amplitude", customAmplitude)
-             // Engine consumes haptic_boost_level; retain the legacy key for backward compatibility.
              putFloat("haptic_bass_boost", customBassBoost)
              putFloat("haptic_boost_level", customBassBoost)
              putInt("haptic_preset_id", hapticPreset.ordinal)
@@ -605,12 +643,8 @@ LaunchedEffect(isMasterSwitchOn, isPowerAmplifyActive, isCrossoverBypassActive, 
 putFloat("synth_master_gain", synthMasterGain)
           }.apply()
 
-          // Hooked app processes own a private preference snapshot. Notify them
-          // to re-read the module provider and apply changes without restart or
-          // dynamic code loading. The receiver requires our signature permission.
           context.sendBroadcast(
-              Intent("com.mouya.musichaptics.ACTION_REFRESH_CONFIG").setPackage(null),
-              "com.mouya.musichaptics.permission.CONFIG_SYNC"
+              Intent("com.mouya.musichaptics.ACTION_REFRESH_CONFIG").setPackage(null)
           )
       }
 
@@ -624,10 +658,6 @@ putFloat("synth_master_gain", synthMasterGain)
         AnimatedContent(
             targetState = dashboardTab,
             transitionSpec = {
-                // Direction follows tab position: switching to a tab on the
-                // right slides content left-to-right; switching left does the
-                // reverse. This matches iOS behavior where the new view comes
-                // from the direction of its tab.
                 if (targetState.ordinal > initialState.ordinal) {
                     (slideInHorizontally { it / 6 } + fadeIn(tween(200))) togetherWith
                         (slideOutHorizontally { -it / 6 } + fadeOut(tween(160)))
@@ -651,7 +681,6 @@ putFloat("synth_master_gain", synthMasterGain)
                 refreshing = hardwareRefreshing,
                 onRefresh = {
                     hardwareRefreshing = true
-                    // Probe uses only read-only root commands; run it off the UI thread.
                     scope.launch {
                         val result = withContext(Dispatchers.IO) { RootHardwareProbe.probeAndPersist(context) }
                         hardwareRootVerified = result.rootGranted
@@ -677,6 +706,7 @@ putFloat("synth_master_gain", synthMasterGain)
                 showAdvancedSettings, { showAdvancedSettings = !showAdvancedSettings },
                 customAmplitude, { customAmplitude = it },
                 customBassBoost, { customBassBoost = it },
+                hapticThreshold, { hapticThreshold = it; prefs.edit().putFloat("haptic_threshold", it).apply() },
                 hapticPreset, { hapticPreset = it },
                 synthLraF0, { synthLraF0 = it; prefs.edit().putFloat("synth_lra_f0", it).apply() },
                 synthLraQ, { synthLraQ = it; prefs.edit().putFloat("synth_lra_q", it).apply() },
@@ -695,7 +725,12 @@ putFloat("synth_master_gain", synthMasterGain)
                 synthContinuousGain, { synthContinuousGain = it; prefs.edit().putFloat("synth_continuous_gain", it).apply() },
                 synthTextureGain, { synthTextureGain = it; prefs.edit().putFloat("synth_texture_gain", it).apply() },
                 synthMasterGain, { synthMasterGain = it; prefs.edit().putFloat("synth_master_gain", it).apply() },
+                vibrationModeLocalized, { newMode ->
+                    vibrationModeLocalized = newMode
+                    prefs.edit().putString("vibration_mode", newMode).apply()
+                },
             )
+            IOSQuietHoursCard(prefs)
             IOSConsole(
                 modifier = Modifier.fillMaxWidth(), isExpanded = consoleExpanded,
                 onToggle = { consoleExpanded = !consoleExpanded },
@@ -710,7 +745,6 @@ putFloat("synth_master_gain", synthMasterGain)
             IOSDeveloperCard()
         }
 
-        // The restart dialog state is hoisted to HapticDashboardActivity root scope
         if (showRestartDialog) ScopedAppsRestartDialog(
             onDismiss = { showRestartDialog = false },
             onConfirm = { selected ->
@@ -762,36 +796,32 @@ private fun LiquidGlassTabBar(
             .height(58.dp)
             .shadow(16.dp, barShape, ambientColor = Color.Black.copy(alpha = 0.08f), spotColor = Color.Black.copy(alpha = 0.12f))
             .clip(barShape)
-            // The main bar gets the heavy haze blur. Since it doesn't move,
-            // it won't trigger 120fps recalculations (unless background logs scroll).
             .hazeEffect(backdrop) {
                 blurRadius = 32.dp
                 noiseFactor = 0.04f
                 backgroundColor = Color.Transparent
             }
-            .background(Color(0xFFF7F7F9).copy(alpha = 0.65f))
-            .border(0.5.dp, Color.White.copy(alpha = 0.4f), barShape)
+            .background(if (isDark()) Color(0xFF1C1C1E).copy(alpha = 0.65f) else Color(0xFFF7F7F9).copy(alpha = 0.65f))
+            .border(0.5.dp, if (isDark()) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.4f), barShape)
             .padding(5.dp)
     ) {
         val computedTabWidth = maxWidth / 2
         val computedTabWidthPx = with(LocalDensity.current) { computedTabWidth.toPx() }
         
         val baseOffset = if (selected == DashboardTab.CONSOLE) 0f else computedTabWidthPx
-        val lensOffsetPxState = animateFloatAsState(
-            targetValue = baseOffset + dragOffset,
-            animationSpec = spring(dampingRatio = 0.6f, stiffness = 500f),
-            label = "LensOffset"
-        )
+    val lensOffsetPxState = animateFloatAsState(
+        targetValue = baseOffset + dragOffset,
+        animationSpec = PhysicsSpring.uiStandard(),  // v3.14: critically-damped, no overshoot
+        label = "LensOffset"
+    )
+    
+    val isInteracting = pressedTab != null || dragOffset != 0f
+    val scaleState = animateFloatAsState(
+        targetValue = if (isInteracting) 0.97f else 1f,  // v3.14: subtle press, was 0.92
+        animationSpec = PhysicsSpring.uiFast(),  // v3.14: critically-damped
+        label = "LensScale"
+    )
         
-        val isInteracting = pressedTab != null || dragOffset != 0f
-        val scaleState = animateFloatAsState(
-            targetValue = if (isInteracting) 0.92f else 1f,
-            animationSpec = spring(dampingRatio = 0.5f, stiffness = 600f),
-            label = "LensScale"
-        )
-        
-        // The moving indicator itself is just a simple drawn shape.
-        // NO HAZE on the moving part! This makes the animation 120fps buttery smooth.
         Box(
             Modifier
                 .width(computedTabWidth)
@@ -803,7 +833,7 @@ private fun LiquidGlassTabBar(
                 }
                 .shadow(if (isInteracting) 6.dp else 2.dp, lensShape, spotColor = Color.Black.copy(alpha = 0.1f))
                 .clip(lensShape)
-                .background(Color.White)
+                .background(if (isDark()) IOSColors.darkCard else Color.White)
         )
         Row(Modifier.fillMaxSize()) {
             listOf(DashboardTab.CONSOLE to "控制台", DashboardTab.APPS to "应用").forEach { (tab, title) ->
@@ -874,8 +904,6 @@ private fun LiquidGlassTabBar(
 private fun ScopedAppsScreen() {
     val context = LocalContext.current
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
-    // PredictiveBackHandler exposes the actual edge-swipe progress. A normal
-    // BackHandler only runs after completion and cannot offer a preview.
     var backProgress by remember { mutableFloatStateOf(0f) }
     var backFromLeft by remember { mutableStateOf(true) }
     PredictiveBackHandler(enabled = selected != null) { events ->
@@ -887,8 +915,6 @@ private fun ScopedAppsScreen() {
             selected = null
             backProgress = 0f
         } catch (cancelled: CancellationException) {
-            // Releasing before the threshold must return the detail view to
-            // its original position; it must not navigate away.
             backProgress = 0f
             throw cancelled
         }
@@ -905,11 +931,7 @@ private fun ScopedAppsScreen() {
         }
     }
     
-    // Instead of completely unloading the underlying list via AnimatedContent (which 
-    // causes it to re-render from scratch), we stack both views.
-    // The list is always present in the background. The detail view slides/scales over it.
     Box(Modifier.fillMaxSize()) {
-        // Background list
         LazyColumn(contentPadding = PaddingValues(16.dp, 24.dp, 16.dp, 102.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
                 Text("应用触觉", color = textPrimary(), fontWeight = FontWeight.Bold, fontSize = 28.sp)
@@ -922,16 +944,12 @@ private fun ScopedAppsScreen() {
             }
         }
         
-        // Detail overlay (animates in/out)
         AnimatedVisibility(
             visible = selected != null,
             enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(tween(220)),
             exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut(tween(180))
         ) {
             val packageName = selected ?: return@AnimatedVisibility
-            // Follow the finger during an Android 13+ predictive-back swipe:
-            // the detail sheet retreats, scales slightly, and reveals the list
-            // underneath. This is progress-driven rather than a fixed tween.
             val density = LocalDensity.current
             val direction = if (backFromLeft) 1f else -1f
             Box(
@@ -972,11 +990,9 @@ private fun ScopedAppsScreen() {
     var crossover by remember(packageName) { mutableStateOf(scopedPrefs.getBoolean("crossover_bypass", global.getBoolean("crossover_bypass", true))) }
     LaunchedEffect(enabled, amp, boost, power, crossover) {
         scopedPrefs.edit().putBoolean("master_switch", enabled).putFloat("haptic_amplitude", amp).putFloat("haptic_boost_level", boost).putBoolean("power_amplify", power).putBoolean("crossover_bypass", crossover).apply()
-        context.sendBroadcast(Intent("com.mouya.musichaptics.ACTION_REFRESH_CONFIG"), "com.mouya.musichaptics.permission.CONFIG_SYNC")
+        context.sendBroadcast(Intent("com.mouya.musichaptics.ACTION_REFRESH_CONFIG"))
     }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp, 24.dp, 16.dp, 104.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        // iOS-style leading navigation control: 44dp touch target, 18dp chevron,
-        // blue tint, then the destination title below it.
         IconButton(onClick = onBack, modifier = Modifier.size(44.dp)) {
             Icon(Icons.Default.KeyboardArrowLeft, contentDescription = "返回应用列表", tint = IOSColors.blue, modifier = Modifier.size(24.dp))
         }
@@ -996,9 +1012,6 @@ private fun ScopedAppsScreen() {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Header Card
-// ════════════════════════════════════════════════════════════════
 
 @Composable
 fun IOSHeaderCard() {
@@ -1056,9 +1069,6 @@ fun IOSHardwareProfileCard(
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Telemetry Card
-// ════════════════════════════════════════════════════════════════
 
 @Composable
 fun IOSTelemetryCard(telemetry: TelemetrySnapshot, isMasterSwitchOn: Boolean) {
@@ -1073,7 +1083,8 @@ fun IOSTelemetryCard(telemetry: TelemetrySnapshot, isMasterSwitchOn: Boolean) {
                 IOSWaveformDisplay(telemetry, isMasterSwitchOn, Modifier.fillMaxSize())
             }
         }
-        Row(Modifier.fillMaxWidth().height(90.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        
+Row(Modifier.fillMaxWidth().height(90.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             IOSThermalPanel(Modifier.weight(1f).graphicsLayer { alpha = if (isMasterSwitchOn) 1f else 0.4f }, telemetry.temperature)
             IOSAttenuationPanel(Modifier.weight(1f).graphicsLayer { alpha = if (isMasterSwitchOn) 1f else 0.4f }, telemetry.thermalAttenuation)
         }
@@ -1091,7 +1102,6 @@ fun IOSWaveformDisplay(telemetry: TelemetrySnapshot, isActive: Boolean, modifier
         initialValue = 0f, targetValue = (2f * PI).toFloat(),
         animationSpec = infiniteRepeatable(tween(3500, easing = LinearEasing), RepeatMode.Restart), label = "Phase2"
     )
-    // ── Standby idle undulation phase: slow drift when no music ──
     val idlePhase by infiniteTransition.animateFloat(
         initialValue = 0f, targetValue = (2f * PI).toFloat(),
         animationSpec = infiniteRepeatable(tween(6000, easing = LinearEasing), RepeatMode.Restart), label = "IdlePhase"
@@ -1105,11 +1115,12 @@ fun IOSWaveformDisplay(telemetry: TelemetrySnapshot, isActive: Boolean, modifier
         targetValue = if (isActive) physicsAmplitude else 0.02f,
         animationSpec = PhysicsSpring.waveformAmp(), label = "Amp"
     )
+    val showIdleMotion = isActive && smoothedAmplitude > 0.01f
     // ── Dynamic energy level for color morphing ──
     val energyLevel = (telemetry.subBass * 0.4f + telemetry.midBass * 0.35f + telemetry.presence * 0.25f).coerceIn(0f, 1f)
     val smoothEnergy by animateFloatAsState(
         targetValue = if (isActive) energyLevel else 0f,
-        animationSpec = spring(dampingRatio = 0.45f, stiffness = 300f), label = "Energy"
+        animationSpec = PhysicsSpring.uiStandard(), label = "Energy"  // v3.14: critically damped
     )
     val wavePath = remember { Path() }
 
@@ -1124,7 +1135,6 @@ fun IOSWaveformDisplay(telemetry: TelemetrySnapshot, isActive: Boolean, modifier
         val midW = telemetry.midBass.coerceIn(0f, 1f)
         val trebleW = telemetry.presence.coerceIn(0f, 1f)
 
-        // ── Dynamic color palette: morphs from cool→warm with energy ──
         val cBase = IOSColors.blue
         val cMid = IOSColors.purple
         val cWarm = IOSColors.pink
@@ -1133,9 +1143,6 @@ fun IOSWaveformDisplay(telemetry: TelemetrySnapshot, isActive: Boolean, modifier
         val color2 = lerp(cMid, cWarm, energyMix)
         val color3 = lerp(cWarm, cHot, (energyMix * 1.5f).coerceIn(0f, 1f))
 
-        // ═══ Simplified Perlin-like noise for irregular waveform ═══
-        // Pseudo-noise: multiple sine sums with incommensurate frequencies
-        // create organic non-repeating perturbations on wave phase
         fun noiseAt(nx: Float, t: Float): Float {
             val n1 = sin(nx * 13.7f + t * 1.3f) * 0.4f
             val n2 = sin(nx * 27.3f + t * 0.7f) * 0.3f
@@ -1144,27 +1151,22 @@ fun IOSWaveformDisplay(telemetry: TelemetrySnapshot, isActive: Boolean, modifier
             return (n1 + n2 + n3 + n4) * 0.15f  // Scale down: subtle irregularity
         }
 
-        // ── Pre-compute waveform points with noise perturbation ──
         val points = FloatArray(res + 1)
         for (i in 0..res) {
             val nx = (i.toFloat() / res); val x = nx * w
             val win = sin(nx * PI).toFloat()
 
             if (isActive && amp > 0.5f) {
-                // Active mode: full waveform with noise perturbation
                 val noise = noiseAt(nx, p * 0.3f)
                 val bass = sin(nx * baseFreq - p + noise * 2f) * amp * bassW
                 val mid = sin(nx * (baseFreq * 2.5f) + p * 1.3f + noise) * amp * 0.5f * midW
                 val treble = sin(nx * (baseFreq * 6f) - p * 2.5f + noise * 3f) * amp * 0.2f * trebleW
                 val harm = sin(nx * (baseFreq * 0.5f) + p * 0.7f) * amp * 0.3f * bassW
                 val detail = sin(nx * (baseFreq * 4f) + p2 * 0.8f) * amp * 0.08f * (midW + trebleW) * 0.5f
-                // Add irregular phase offset from noise
                 val irregularPhase = noise * baseFreq * 0.1f
                 val irregular = sin(nx * baseFreq + irregularPhase + noise * 5f) * amp * 0.15f
                 points[i] = midY + (bass + mid + treble + harm + detail + irregular) * win
-            } else {
-                // ── Standby idle undulation: subtle organic drift ──
-                // Use idle phases + noise to create a gentle, living waveform
+            } else if (showIdleMotion) {
                 val idleAmp = h * 0.02f  // Very small amplitude
                 val n1 = noiseAt(nx, idlePhase * 0.5f)
                 val n2 = noiseAt(nx + 0.3f, idlePhase2 * 0.4f)
@@ -1172,18 +1174,18 @@ fun IOSWaveformDisplay(telemetry: TelemetrySnapshot, isActive: Boolean, modifier
                 val drift2 = sin(nx * 5.5f + idlePhase2 + n2 * 2f) * idleAmp * 0.6f
                 val drift3 = sin(nx * 1.8f + idlePhase * 0.7f + n1) * idleAmp * 0.4f
                 points[i] = midY + (drift1 + drift2 + drift3) * win
+            } else {
+                // v3.14: Inactive — flat line, no animation
+                points[i] = midY
             }
         }
 
-        // ── Build main wave path with smooth quadratic curves ──
         wavePath.reset(); wavePath.moveTo(0f, points[0])
         for (i in 1..res) {
             val nx = (i.toFloat() / res); val x = nx * w
             wavePath.lineTo(x, points[i])
         }
 
-        // ═══ Single-line waveform: clean, organic, irregular ═══
-        // Layer 1: Very faint outer glow (wide, low alpha)
         drawPath(
             wavePath,
             brush = Brush.horizontalGradient(
@@ -1192,7 +1194,6 @@ fun IOSWaveformDisplay(telemetry: TelemetrySnapshot, isActive: Boolean, modifier
             style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
         )
 
-        // Layer 2: Main waveform line — the single expressive line
         val mainStrokeWidth = (1.5f + smoothEnergy * 1.5f).dp.toPx()
         drawPath(
             wavePath,
@@ -1202,7 +1203,6 @@ fun IOSWaveformDisplay(telemetry: TelemetrySnapshot, isActive: Boolean, modifier
             style = Stroke(width = mainStrokeWidth, cap = StrokeCap.Round)
         )
 
-        // ═══ Subtle center axis reference (barely visible) ═══
         drawLine(
             color = cBase.copy(alpha = 0.04f),
             start = Offset(0f, midY),
@@ -1248,9 +1248,6 @@ fun IOSAttenuationPanel(modifier: Modifier, gain: Float) {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Composer Panel
-// ════════════════════════════════════════════════════════════════
 
 @Composable
 fun IOSComposerPanel(
@@ -1299,28 +1296,15 @@ fun IOSComposerPanel(
         }
 
         val effectiveGamma = if (gammaOverride > 0f) gammaOverride else currentGamma
-        var lastGammaHaptic by remember { mutableStateOf(effectiveGamma) }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Gamma 曲线", color = textSecondary(), fontSize = 14.sp, fontFamily = AppFontFamily)
-                Text(String.format(Locale.US, "γ = %.2f", effectiveGamma), color = IOSColors.blue, fontSize = 14.sp, fontWeight = FontWeight.Medium, fontFamily = AppFontFamily)
+            IOSSettingSliderRow("Gamma 曲线", effectiveGamma, 0.3f..0.8f, "γ") {
+                onGammaChange(it)
             }
-            Slider(
-                value = effectiveGamma, onValueChange = {
-                    onGammaChange(it)
-                    if (kotlin.math.abs(it - lastGammaHaptic) >= 0.02f) {
-                        hapticEngine.perform(HapticFeedbackEngine.HapticStyle.LIGHT_TICK)
-                        lastGammaHaptic = it
-                    }
-                }, valueRange = 0.3f..0.8f, steps = 49,
-                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = IOSColors.blue, inactiveTrackColor = if (isDark()) Color(0xFF39393B) else Color(0xFFE0E0E5))
-            )
             Text("γ < 1 提升小信号震感 · γ > 1 强化大信号冲击", color = textTertiary(), fontSize = 11.sp, fontFamily = AppFontFamily)
         }
 
         HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
 
-        // Now Playing with hold mechanism — fixed height to prevent container resize
         Row(Modifier.fillMaxWidth().heightIn(min = 68.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(activePersonaName, color = textPrimary(), fontSize = 16.sp, fontWeight = FontWeight.Medium, fontFamily = AppFontFamily)
             if (primitiveType.isNotEmpty()) {
@@ -1338,7 +1322,6 @@ fun IOSComposerPanel(
                     }
                 }
             } else {
-                // Placeholder with same height as the badge to prevent layout shift
                 Surface(
                     shape = RoundedCornerShape(10.dp), color = Color.Transparent,
                     modifier = Modifier
@@ -1354,9 +1337,6 @@ fun IOSComposerPanel(
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Control Panel
-// ════════════════════════════════════════════════════════════════
 
 @Composable
 fun IOSControlPanel(
@@ -1367,7 +1347,9 @@ fun IOSControlPanel(
     showAdvancedSettings: Boolean, onAdvancedSettingsToggle: () -> Unit,
     customAmplitude: Float, onAmplitudeChange: (Float) -> Unit,
     customBassBoost: Float, onBassBoostChange: (Float) -> Unit,
+   hapticThreshold: Float, onHapticThresholdChange: (Float) -> Unit,
     hapticPreset: HapticPreset, onHapticPresetChange: (HapticPreset) -> Unit,
+
     synthLraF0: Float, onSynthLraF0Change: (Float) -> Unit,
     synthLraQ: Float, onSynthLraQChange: (Float) -> Unit,
     synthRateHz: Int, onSynthRateHzChange: (Int) -> Unit,
@@ -1385,10 +1367,19 @@ fun IOSControlPanel(
     synthContinuousGain: Float, onSynthContinuousGainChange: (Float) -> Unit,
     synthTextureGain: Float, onSynthTextureGainChange: (Float) -> Unit,
     synthMasterGain: Float, onSynthMasterGainChange: (Float) -> Unit,
+    vibrationModeLocalized: String, onVibrationModeChange: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val hapticEngine = remember { HapticFeedbackEngine.create(context) }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                // v4.1: Vibration mode selector
+        Text("震动模式", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium, fontFamily = AppFontFamily)
+        IOSSegmentedControl(
+            items = listOf("鼓点", "低频补偿", "智能"),
+            selected = vibrationModeLocalized,
+            onSelect = onVibrationModeChange,
+            label = { it }
+        )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             IOSButton("线圈放大", isPowerAmplifyActive, Modifier.weight(1f),
                 hapticStyle = if (!isPowerAmplifyActive) HapticFeedbackEngine.HapticStyle.KICK else HapticFeedbackEngine.HapticStyle.IMPACT
@@ -1429,13 +1420,14 @@ fun IOSControlPanel(
 
         AnimatedVisibility(
             visible = showAdvancedSettings,
-            enter = expandVertically(spring(dampingRatio = 0.62f, stiffness = 200f), Alignment.Top) + fadeIn(spring(dampingRatio = 0.62f, stiffness = 200f)),
-            exit = shrinkVertically(spring(dampingRatio = 0.62f, stiffness = 200f), Alignment.Top) + fadeOut(spring(dampingRatio = 0.62f, stiffness = 200f))
+            enter = expandVertically(tween(300, easing = LinearOutSlowInEasing), Alignment.Top) + fadeIn(tween(250)),  // v3.14: ease-out
+            exit = shrinkVertically(tween(300, easing = FastOutLinearInEasing), Alignment.Top) + fadeOut(tween(200))  // v3.14: ease-in
         ) {
             Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("高级设置", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium, fontFamily = AppFontFamily)
                 IOSSettingSliderRow("总强度", customAmplitude, 0.5f..3.0f, "x", onAmplitudeChange)
                 IOSSettingSliderRow("低音强调", customBassBoost, 1.0f..2.5f, "x", onBassBoostChange)
+                IOSSettingSliderRow("震动阈值", hapticThreshold, 0f..1f, "", onHapticThresholdChange)
                 HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
                 Text("触觉合成器参数", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium, fontFamily = AppFontFamily)
                 IOSSettingSliderRow("LRA 谐振频率", synthLraF0, 150f..250f, "Hz", onSynthLraF0Change)
@@ -1470,9 +1462,6 @@ fun IOSControlPanel(
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Developer Card
-// ════════════════════════════════════════════════════════════════
 
 @Composable
 fun IOSDeveloperCard() {
@@ -1497,7 +1486,7 @@ fun IOSDeveloperCard() {
             color = IOSColors.blue, fontSize = 14.sp, fontFamily = AppFontFamily, fontWeight = FontWeight.Medium,
             modifier = Modifier.fillMaxWidth().clickable {
                 hapticEngine.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
-                try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/mouya-q/MusicHaptics"))) } catch (_: Exception) {}
+                try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/mouya-q/MusicHaptics"))) } catch (e: Exception) {}
             }
         )
         Text("修改设置后，点击右上角 ↻ 并重启对应音乐 App，设置才会由 Xposed 重新加载。", color = IOSColors.orange, fontSize = 12.sp, fontFamily = AppFontFamily)
@@ -1567,9 +1556,6 @@ private fun forceStopSelectedAppsWithRoot(packages: List<String>): Boolean {
     } catch (_: Exception) { false }
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Data Classes & Enums
-// ════════════════════════════════════════════════════════════════
 
 data class TelemetrySnapshot(
     val subBass: Float = 0f, val midBass: Float = 0f, val presence: Float = 0f,
@@ -1586,4 +1572,95 @@ enum class HapticPreset(val label: String, val description: String) {
 
 enum class Preset(val label: String) {
     LOW("Low"), MID("Mid"), HIGH("High"), ULTRA("Ultra")
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun IOSQuietHoursCard(prefs: SharedPreferences) {
+    val context = LocalContext.current
+    var enabled by remember { mutableStateOf(prefs.getBoolean("quiet_hours_enabled", false)) }
+    var startTime by remember { mutableStateOf(prefs.getString("quiet_hours_start", "23:00") ?: "23:00") }
+    var endTime by remember { mutableStateOf(prefs.getString("quiet_hours_end", "07:00") ?: "07:00") }
+    var showStartPicker by remember { mutableStateOf(false) }
+    var showEndPicker by remember { mutableStateOf(false) }
+
+    Column(modifier = Modifier.fillMaxWidth().liquidGlass(20.dp).padding(16.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("定时开关", color = textPrimary(), fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+            IOSToggle(checked = enabled, onToggle = {
+                enabled = !enabled
+                prefs.edit().putBoolean("quiet_hours_enabled", enabled).apply()
+                context.sendBroadcast(Intent("com.mouya.musichaptics.ACTION_REFRESH_CONFIG"))
+            })
+        }
+        Spacer(Modifier.height(8.dp))
+        Text("在静音时段内自动暂停震动", color = textSecondary(), fontSize = 13.sp)
+
+        if (enabled) {
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("开始", color = textSecondary(), fontSize = 12.sp)
+                    TextButton(onClick = { showStartPicker = true }) {
+                        Text(startTime, color = IOSColors.blue, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                    }
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("结束", color = textSecondary(), fontSize = 12.sp)
+                    TextButton(onClick = { showEndPicker = true }) {
+                        Text(endTime, color = IOSColors.blue, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                    }
+                }
+            }
+        }
+    }
+
+    // Time picker dialogs
+    if (showStartPicker) {
+        TimePickerDialog(
+            current = startTime,
+            onConfirm = { t ->
+                startTime = t
+                prefs.edit().putString("quiet_hours_start", t).apply()
+                context.sendBroadcast(Intent("com.mouya.musichaptics.ACTION_REFRESH_CONFIG"))
+                showStartPicker = false
+            },
+            onDismiss = { showStartPicker = false }
+        )
+    }
+    if (showEndPicker) {
+        TimePickerDialog(
+            current = endTime,
+            onConfirm = { t ->
+                endTime = t
+                prefs.edit().putString("quiet_hours_end", t).apply()
+                context.sendBroadcast(Intent("com.mouya.musichaptics.ACTION_REFRESH_CONFIG"))
+                showEndPicker = false
+            },
+            onDismiss = { showEndPicker = false }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TimePickerDialog(current: String, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    val parts = current.split(":").map { it.toIntOrNull() ?: 0 }
+    val initialHour = parts.getOrElse(0) { 23 }.coerceIn(0, 23)
+    val initialMinute = parts.getOrElse(1) { 0 }.coerceIn(0, 59)
+    val state = rememberTimePickerState(initialHour, initialMinute, true)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择时间", color = textPrimary()) },
+        text = { TimePicker(state = state) },
+        confirmButton = {
+            TextButton(onClick = {
+                val h = state.hour.toString().padStart(2, '0')
+                val m = state.minute.toString().padStart(2, '0')
+                onConfirm("$h:$m")
+            }) { Text("确定") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }

@@ -1,3 +1,14 @@
+# ─── libxposed (LSPosed modern API) ───
+-dontwarn io.github.libxposed.annotation.**
+-adaptresourcefilecontents META-INF/xposed/java_init.list
+-keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
+    public <init>();
+}
+
+# ─── Legacy XposedBridge API (MainHook internal hooks) ───
+-keep class de.robv.android.xposed.** { *; }
+-keepnames class com.mouya.musichaptics.MainHook
+
 # Add project specific ProGuard rules here.
 # You can control the set of applied configuration files using the
 # proguardFiles setting in build.gradle.

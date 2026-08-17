@@ -1,49 +1,28 @@
 package com.mouya.musichaptics
 
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
-/**
- * Single semantic haptic timeline.
- *
- * Detectors only publish [HapticCommand]s; this class is the sole place where
- * semantic primitives are arbitrated and authored into a future waveform.
- * It intentionally does not call Vibrator APIs.
- */
 class HapticTimelineScheduler(
     private val windowMs: Long = 100L,
     private val binMs: Long = 10L,
-    // v3.11: LRA waveform smoother — dynamically adapted per device Q factor.
-    // High-Q actuators (0816 ESA Q=18, 0815 Q=15) need stronger smoothing
-    // because their narrow resonance band amplifies inter-bin transients.
-    // Lower-Q actuators (CSA0916 Q=12) can use lighter smoothing to
-    // preserve more texture detail.
-    private var maxSlewPerBin: Int = 35,   // max Δ amplitude between adjacent 10ms bins
-    private var smootherAlpha: Float = 0.38f // one-pole LPF coefficient (0=fully smooth, 1=no filter)
+    private var maxSlewPerBin: Int = 255,  // v4.0: No slew limit — full dynamic range
+    private var smootherAlpha: Float = 0.85f
 ) {
 
-    /**
-     * v3.11: Adapt smoothing parameters to the device's actuator Q factor.
-     * Higher Q → more aggressive smoothing needed.
-     * Q < 13:  maxSlew=45, alpha=0.50 (light smoothing, preserve texture)
-     * Q 13-16: maxSlew=35, alpha=0.38 (moderate smoothing, balanced)
-     * Q > 16:  maxSlew=25, alpha=0.25 (heavy smoothing, kill 跳跳糖)
-     */
     fun adaptToActuatorQ(qFactor: Float) {
         when {
             qFactor > 16f -> {
-                // 0816 ESA / OnePlus 15
-                // High Q needs heavy smoothing to avoid pop-rocks. 
-                // Smaller alpha = heavier smoothing (more prev value kept)
-                maxSlewPerBin = 40
-                smootherAlpha = 0.20f 
+                maxSlewPerBin = 255
+                smootherAlpha = 0.80f  // High-Q: slightly more conservative alpha
             }
             qFactor > 12f -> {
-                maxSlewPerBin = 60
-                smootherAlpha = 0.35f
+                maxSlewPerBin = 255
+                smootherAlpha = 0.85f
             }
             else -> {
-                maxSlewPerBin = 85
-                smootherAlpha = 0.50f
+                maxSlewPerBin = 255
+                smootherAlpha = 0.90f  // Low-Q: almost no smoothing needed
             }
         }
     }
@@ -56,23 +35,50 @@ class HapticTimelineScheduler(
     private val lock = Any()
     private val pending = ArrayList<Event>()
 
-    /** Cross-window continuity: the last bin value of the previous render() call. */
     private var prevWindowTail: Int = 0
+
+    private var dynGainEma = 0.5f
+
+    private fun computeDynamicGain(structure: MusicStructureAnalyzer.Snapshot): Float {
+        val energy = structure.energy.coerceIn(0f, 2f)
+
+        val normalizedEnergy = (energy / 2f).coerceIn(0f, 1f)
+        val gammaCurve = normalizedEnergy.pow(0.45f)
+        val targetGain = gammaCurve * 2.5f  // v4.0: was 1.6 → 2.5 (full range)
+
+        val riseBonus = (structure.dynamicRise.coerceIn(0f, 1f) * 0.5f)
+        val targetWithRise = (targetGain + riseBonus).coerceIn(0f, 3.0f)
+
+        val alpha = if (targetWithRise > dynGainEma) 0.40f else 0.30f
+        dynGainEma += alpha * (targetWithRise - dynGainEma)
+
+        val result = dynGainEma.coerceIn(0f, 3.0f)
+
+        android.util.Log.i("HapticTimelineScheduler",
+            "dynGain | energy=${"%.3f".format(energy)} raw=${"%.3f".format(targetWithRise)} ema=${"%.3f".format(result)} rise=${"%.3f".format(structure.dynamicRise)}")
+
+        return result
+    }
 
     fun offer(command: HapticCommand) {
         command.primitive?.let { offerPrimitive(it, command.timestamp) }
+        command.additionalPrimitives.forEach { prim ->
+            offerPrimitive(prim, command.timestamp)
+        }
     }
 
-    /** Used by the explicitly labelled low-band-onset fallback track. */
     fun offerPrimitive(primitive: HapticPrimitive, timestampMs: Long) {
         synchronized(lock) {
             pending += Event(primitive, timestampMs, priorityOf(primitive))
-            // A live engine must not accumulate events while the renderer is stalled.
-            if (pending.size > 96) {
+            if (pending.size > 192) {
                 pending.sortByDescending { it.priority }
-                pending.subList(64, pending.size).clear()
+                pending.subList(128, pending.size).clear()
             }
         }
+    }
+
+    fun hasMultiTrackActive(): Boolean {
+        return tracks["KICK"]!!.active || tracks["BODY"]!!.active || tracks["SNARE"]!!.active || tracks["VOCAL"]!!.active
     }
 
     fun render(
@@ -84,18 +90,27 @@ class HapticTimelineScheduler(
     ): IntArray {
         val bins = (windowMs / binMs).toInt()
         
-        // v3.8: Apply multi-track sidechain if tracks are active.
-        // Otherwise fallback to raw nativeSamples (legacy flat).
-        val hasMultiTrack = tracks["KICK"]!!.active || tracks["BODY"]!!.active || tracks["SNARE"]!!.active || tracks["VOCAL"]!!.active
+        val dynGain = computeDynamicGain(structure)
+        val sectionGain = sectionBodyGain(structure.section)
+        val compositeGain = outputGain * dynGain * sectionGain
+        
+        val hasMultiTrack = hasMultiTrackActive()
         val base = if (hasMultiTrack) {
             val multitrackArray = composeSidechainCompressed()
-            IntArray(bins) { index -> (multitrackArray[index] * sectionBodyGain(structure.section)).roundToInt().coerceIn(0, 255) }
+            IntArray(bins) { index ->
+                val value = if (index < multitrackArray.size) multitrackArray[index] else 0
+                (value * sectionGain).roundToInt().coerceIn(0, 255)
+            }
         } else {
             IntArray(bins) { index ->
                 val source = if (sampleCount > 0) nativeSamples[index.coerceAtMost(sampleCount - 1)] else 0f
-                (source * sectionBodyGain(structure.section)).roundToInt().coerceIn(0, 255)
+                (source * sectionGain).roundToInt().coerceIn(0, 255)
             }
         }
+        
+        if (!hasMultiTrack) {
+        }
+        android.util.Log.i("HapticTimelineScheduler", "render() | hasMultiTrack=$hasMultiTrack bins=$bins sampleCount=$sampleCount")
         val events = synchronized(lock) {
             val expiry = windowStartMs - 40L
             pending.removeAll { it.timestampMs < expiry }
@@ -105,57 +120,42 @@ class HapticTimelineScheduler(
             selected
         }
 
-        // Higher priority events author first; lower-priority layers may fill space
-        // but cannot overwrite an already stronger accent in that bin.
         for (event in events) {
             val start = ((event.timestampMs - windowStartMs) / binMs).toInt().coerceIn(0, bins - 1)
             mixPrimitive(base, start, event.primitive, structure)
         }
 
-        // ── v3.10.19: LRA Waveform Smoother ──
-        // On high-Q X-axis LRAs (OnePlus 15: Q=16, f0=200Hz, 3ms rise), abrupt
-        // inter-bin amplitude jumps produce a series of discrete mechanical
-        // transients — perceived as "pop rocks" (跳跳糖) buzzing.
-        //
-        // Two-stage smoothing:
-        // 1. Slew-rate limiter: cap |Δamp| between adjacent bins to maxSlewPerBin.
-        //    This prevents the LRA from being step-driven.  The LRA's mechanical
-        //    rise time (3ms) is close to the bin duration (10ms), so a 40-count
-        //    slew limit gives ~4ms effective ramp — matching the actuator's
-        //    physical response envelope.
-        // 2. One-pole low-pass: smootherAlpha blends each bin with its predecessor.
-        //    0.45 = gentle smoothing that preserves beat attacks but removes
-        //    sample-level jitter from the C++ synthesizer output.
-        val raw = IntArray(bins) { (base[it] * outputGain).roundToInt().coerceIn(0, 255) }
+        val raw = IntArray(bins) { (base[it] * compositeGain).roundToInt().coerceIn(0, 255) }
         val finalOutput = IntArray(bins)
         var prev = prevWindowTail.toFloat()
         for (i in 0 until bins) {
             val target = raw[i].toFloat()
-            
-            // Asymmetric Slew rate limiting
-            // Fast rise (for kick), slow decay (anti-pop-rocks)
+
             val diff = target - prev
-            val slewedTarget = if (diff > maxSlewPerBin * 1.5f) { 
-                prev + (maxSlewPerBin * 1.5f) // Allow 1.5x speed on attack
-            } else if (diff < -maxSlewPerBin) {
-                prev - maxSlewPerBin
+            val slewedTarget = if (diff > maxSlewPerBin.toFloat()) {
+                prev + maxSlewPerBin.toFloat()
+            } else if (diff < -maxSlewPerBin.toFloat()) {
+                prev - maxSlewPerBin.toFloat()
             } else {
                 target
             }
-            
-            // Asymmetric smoothing
-            // Alpha means how much TARGET we accept (smaller = smoother).
-            // We want very little smoothing on attack to keep the punch.
+
+            // v4.0: Near-pass-through smoothing.
             val currentAlpha = if (slewedTarget > prev) {
-                smootherAlpha * 2f // Double alpha = 2x faster response on attack
+                (smootherAlpha * 1.0f).coerceIn(0f, 1f)  // Attack: full speed
             } else {
-                smootherAlpha      // Heavy smoothing on decay
-            }.coerceIn(0f, 1f)
+                (smootherAlpha * 0.85f).coerceIn(0f, 1f)  // Decay: slightly slower — smooth tail
+            }
 
             prev = (prev * (1f - currentAlpha)) + (slewedTarget * currentAlpha)
             finalOutput[i] = prev.roundToInt().coerceIn(0, 255)
         }
-        prevWindowTail = finalOutput.lastOrNull() ?: 0
+        prevWindowTail = finalOutput.last()
+
+        // v3.8.6: Log final output max for debugging
+        val outputMax = finalOutput.maxOrNull() ?: 0
+        android.util.Log.i("HapticTimelineScheduler", "render() DONE | outputMax=$outputMax dynGain=${"%.3f".format(dynGain)} compositeGain=${"%.3f".format(compositeGain)} section=${structure.section}")
+
         return finalOutput
     }
 
@@ -163,18 +163,11 @@ class HapticTimelineScheduler(
         fun put(index: Int, value: Int) {
             if (index in out.indices) out[index] = maxOf(out[index], value.coerceIn(0, 255))
         }
-        // v3.10.19: Interpolated envelope write — instead of writing discrete
-        // values to sparse bins (which causes step jumps on high-Q LRAs),
-        // linearly interpolate between envelope points so the LRA sees a
-        // continuous drive curve.  This is critical for OnePlus 15 (Q=16):
-        // a jump from 255→112 between adjacent 10ms bins produces a mechanical
-        // transient that sounds like "click click click" (跳跳糖).
         fun putInterpolated(startIdx: Int, envelope: FloatArray, intensity: Int) {
             for (i in envelope.indices) {
                 val targetIdx = startIdx + i
                 if (targetIdx !in out.indices) break
                 put(targetIdx, (intensity * envelope[i]).roundToInt())
-                // Interpolate to next point
                 if (i < envelope.lastIndex) {
                     val nextIdx = startIdx + i + 1
                     if (nextIdx !in out.indices) break
@@ -186,15 +179,18 @@ class HapticTimelineScheduler(
         when (primitive) {
             is HapticPrimitive.Impact -> {
                 val env = when {
+                    primitive.semantic == "BEAT_TAP_STRONG" ->
+                        // v3.11: Strong beat — full punch with quick decay
+                        floatArrayOf(1f, .70f, .35f, .12f, .03f)
+                    primitive.semantic == "BEAT_TAP" ->
+                        // v3.11: Regular beat — crisp, shorter
+                        floatArrayOf(1f, .55f, .20f, .05f, .01f)
                     primitive.semantic.contains("SNARE") || primitive.semantic.contains("PLUCKED") ->
-                        // v3.10.19: Smoother double-stage strike — fill intermediate bins
                         floatArrayOf(1f, .85f, .55f, .72f, .45f, .25f, .18f, .08f, .04f, .02f)
                     primitive.semantic.contains("KICK") || primitive.semantic.contains("SUB_") ||
                         primitive.semantic == "LOW_BAND_ONSET" || primitive.semantic == "PCM_LOW_BAND_ATTACK" ->
-                        // v3.10.19: Smoother dense low-band attack — gradual decay curve
                         floatArrayOf(1f, .92f, .80f, .65f, .50f, .38f, .28f, .20f, .13f, .08f)
                     else ->
-                        // v3.10.19: Extended generic impact with smooth decay
                         floatArrayOf(1f, .80f, .60f, .42f, .28f, .18f, .12f, .07f, .04f, .02f)
                 }
                 putInterpolated(start, env, primitive.intensity)
@@ -211,7 +207,6 @@ class HapticTimelineScheduler(
                 }
             }
             is HapticPrimitive.Texture -> {
-                // v3.10.19: Dense grains with smooth decay instead of sparse clicks.
                 val bins = (primitive.durationMs / binMs).toInt().coerceIn(1, 5)
                 repeat(bins) { i ->
                     val decay = 1f - i * 0.15f
@@ -234,30 +229,32 @@ class HapticTimelineScheduler(
         is HapticPrimitive.Impact -> when {
             primitive.semantic.contains("KICK") || primitive.semantic.contains("SUB_") ||
                 primitive.semantic == "LOW_BAND_ONSET" || primitive.semantic == "PCM_LOW_BAND_ATTACK" -> 100
+            primitive.semantic == "BEAT_TAP_STRONG" -> 95  // v3.11: Strong beat (with kick)
+            primitive.semantic == "BEAT_TAP" -> 88  // v3.11: Regular beat tap
             primitive.semantic.contains("SNARE") || primitive.semantic.contains("PLUCKED") -> 80
             else -> 70
         }
         is HapticPrimitive.Pulse -> 75
         is HapticPrimitive.Wave -> when (primitive.semantic) {
-            "VOCAL_PHRASE", "VOCAL_SUSTAIN" -> 60
-            "BASS_SUSTAIN" -> 45
+            "VOCAL_PHRASE", "VOCAL_SUSTAIN", "VOCAL_WAVE" -> 60
+            "BASS_SUSTAIN", "BASS_BODY" -> 55
             else -> 50
         }
-        is HapticPrimitive.Texture -> 20
+        is HapticPrimitive.Texture -> when {
+            primitive.semantic == "HIHAT_TICK" -> 35
+            else -> 20
+        }
     }
 
     private fun sectionBodyGain(section: MusicStructureAnalyzer.Section): Float = when (section) {
-        MusicStructureAnalyzer.Section.INTRO -> .68f
-        MusicStructureAnalyzer.Section.VERSE -> .82f
-        MusicStructureAnalyzer.Section.BUILD -> .96f
-        MusicStructureAnalyzer.Section.CHORUS -> 1f
-        MusicStructureAnalyzer.Section.BREAKDOWN -> .58f
-        MusicStructureAnalyzer.Section.OUTRO -> .55f
+        MusicStructureAnalyzer.Section.INTRO -> 0.95f  // v4.0: was .68 — full range
+        MusicStructureAnalyzer.Section.VERSE -> 1.0f  // v4.0: was .82 — full range
+        MusicStructureAnalyzer.Section.BUILD -> 1.0f  // v4.0: was .96 — already near full
+        MusicStructureAnalyzer.Section.CHORUS -> 1.0f  // already 1f
+        MusicStructureAnalyzer.Section.BREAKDOWN -> 0.90f  // v4.0: was .65 — boost quiet sections
+        MusicStructureAnalyzer.Section.OUTRO -> 0.95f  // v4.0: was .72 — catch fade tails
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  v3.8 Multi-Track Timeline: Independent track rendering + sidechain
-    // ════════════════════════════════════════════════════════════════
     data class SemanticTrack(
         val name: String,
         val envelope: FloatArray = FloatArray(10) { 0f },
@@ -274,6 +271,7 @@ class HapticTimelineScheduler(
 
     fun applyMultiTrackFrames(frames: FloatArray, count: Int) {
         val maxFramesPerPull = 10
+        var anyActive = false
         for (i in 0 until minOf(count, maxFramesPerPull)) {
             val kick = frames.getOrElse(i * 4 + 0) { 0f }
             val snare = frames.getOrElse(i * 4 + 1) { 0f }
@@ -283,10 +281,22 @@ class HapticTimelineScheduler(
             tracks["SNARE"]!!.envelope[i % 10] = snare
             tracks["VOCAL"]!!.envelope[i % 10] = vocal
             tracks["BODY"]!!.envelope[i % 10] = body
-            tracks["KICK"]!!.active = kick > 0.01f
-            tracks["SNARE"]!!.active = snare > 0.01f
-            tracks["VOCAL"]!!.active = vocal > 0.01f
-            tracks["BODY"]!!.active = body > 0.01f
+            
+            if (kick > 1.0f) tracks["KICK"]!!.active = true
+            if (snare > 1.0f) tracks["SNARE"]!!.active = true
+            if (vocal > 1.0f) tracks["VOCAL"]!!.active = true
+            if (body > 1.0f) tracks["BODY"]!!.active = true
+            
+            if (kick > 1.0f || snare > 1.0f || vocal > 1.0f || body > 1.0f) {
+                anyActive = true
+            }
+        }
+        
+        if (!anyActive) {
+            tracks["KICK"]!!.active = false
+            tracks["SNARE"]!!.active = false
+            tracks["VOCAL"]!!.active = false
+            tracks["BODY"]!!.active = false
         }
     }
 
@@ -302,15 +312,21 @@ class HapticTimelineScheduler(
             val s = snareVals[i]
             val v = vocalVals[i]
             val b = bodyVals[i]
-            val compressedBody = if (k > 0.3f) b * 0.4f else b
-            val compressedVocal = if (s > 0.3f) v * 0.5f else v
+            val compressedBody = if (k > 30.0f) b * 0.5f else b * 0.7f
+            val compressedVocal = if (s > 50.0f) v * 0.5f else v * 0.7f
             val composed = maxOf(
                 k * 1.0f,
                 s * 0.95f,
-                compressedVocal * 0.85f,
-                compressedBody * 0.75f
-            )
-            result[i] = (composed * 255f).roundToInt().coerceIn(0, 255)
+                compressedVocal,
+                compressedBody
+            ).toInt()
+            
+            result[i] = composed.coerceIn(0, 255)
+
+            kickVals[i] = 0f
+            snareVals[i] = 0f
+            vocalVals[i] = 0f
+            bodyVals[i] = 0f
         }
         return result
     }

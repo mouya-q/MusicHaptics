@@ -17,16 +17,12 @@ class HapticSynthesizer(
         const val LRA_W0 = 2f * Math.PI.toFloat() * LRA_F0
         const val LRA_ZETA = 1f / (2f * LRA_Q)
 
-        // v3.10.19: Tuned ADSR for high-Q LRA (OnePlus 15: Q=16, 3ms rise, 4.5ms fall).
-        // Impact attack tau increased to match the LRA's mechanical rise time.
-        // Decay tau increased to let the LRA settle naturally rather than
-        // being force-cut (which causes mechanical ringing on high-Q actuators).
-        const val ATTACK_TAU_IMPACT = 0.0025f     // was 0.001 — now matches 3ms rise
-        const val DECAY_TAU_IMPACT = 0.028f       // was 0.020 — smoother decay
-        const val ATTACK_TAU_CONTINUOUS = 0.012f  // was 0.008 — gentler continuous onset
-        const val DECAY_TAU_CONTINUOUS = 0.10f    // was 0.08 — longer sustain tail
-        const val RELEASE_TAU = 0.065f            // was 0.05 — smoother release
-        const val SUSTAIN_LEVEL = 0.72f
+        const val ATTACK_TAU_IMPACT = 0.0015f
+        const val DECAY_TAU_IMPACT = 0.008f  // 8ms — matches HapticComposer ADSR_DECAY_TAU
+        const val ATTACK_TAU_CONTINUOUS = 0.008f  // 8ms — fast continuous onset (was 12ms)
+        const val DECAY_TAU_CONTINUOUS = 0.025f  // 25ms — faster continuous decay (was 35ms)
+        const val RELEASE_TAU = 0.025f
+        const val SUSTAIN_LEVEL = 0.05f
 
         const val THERMAL_WARN = 70f
         const val THERMAL_CRIT = 90f
@@ -56,7 +52,6 @@ class HapticSynthesizer(
 
     @Volatile private var currentConfig = SynthConfig()
 
-    // v2.0: LRA physical params from ActuatorProfile (per-device, not hardcoded)
     private val actuatorF0: Float = profile.actuator.resonanceFreq
     private val actuatorDamping: Float = profile.actuator.dampingRatio
     private val actuatorW0: Float = profile.actuator.angularFreq
@@ -158,7 +153,6 @@ class HapticSynthesizer(
 
         updateTextureTarget(texture, pitch, timestampMs)
 
-        // v2.0: Actuator-aware ADSR — asymmetric rise/fall scaling
         val impactAttack = currentConfig.attackTauImpact * actuatorRiseScale
         val impactDecay = currentConfig.decayTauImpact * actuatorFallScale
         val contAttack = currentConfig.attackTauContinuous * actuatorRiseScale
@@ -313,7 +307,7 @@ private fun processInputEvents(
                 }
             }
             3 -> {
-                adsr.value = adsr.value * 0.9f + adsr.targetDrive * currentConfig.sustainLevel * 0.1f
+                adsr.value = adsr.value * 0.90f  // Pure decay, no floor
                 if (adsr.targetDrive < 0.02f) {
                     adsr.state = 4
                 }
@@ -363,7 +357,6 @@ private fun processInputEvents(
         drive += continuousAdsr.value * continuousTargetAmp * currentConfig.continuousGain
 
         if (textureAdsr.value > 0f) {
-            // Texture drive contribution raised from 0.3 → 0.55 for fuller texture presence
             textureNoisePhase += 0.3f
             val noise = sin(textureNoisePhase * 7.3f) * 0.5f + sin(textureNoisePhase * 11.7f) * 0.5f
             drive += textureAdsr.value * (0.5f + noise * 0.5f) * 0.55f * currentConfig.textureGain
@@ -373,7 +366,6 @@ private fun processInputEvents(
     }
 
     private fun solveLraPhysics(drive: Float, dt: Float) {
-        // v1.9: Use per-device actuator physical model instead of config defaults
         val w = actuatorW0
         val zeta = actuatorDamping
 
@@ -420,27 +412,23 @@ private fun processInputEvents(
         for (i in 0 until cycles) {
             val phaseInCycle = (i.toFloat() / cycles) * 2f * Math.PI.toFloat()
 
-            // Impact: sharp attack-decay profile — strong punch at cycle start, fast fall-off
             val impactAmp = if (impactEnv > 0.01f) {
                 val impactShape = exp(-phaseInCycle * 1.2f) * (1f - cos(phaseInCycle * 0.5f)) * 0.5f
                 (impactEnv * impactShape * 380f).toInt().coerceIn(1, 255)
             } else 0
 
-            // Continuous: smooth sinusoidal drone with slow swell
             val continuousAmp = if (continuousEnv > 0.01f) {
                 val swell = (sin(phaseInCycle) * 0.30f + 0.70f)
                 val pulseMod = 1f + sin(lraPhase + phaseInCycle * 0.3f) * 0.12f
                 (continuousEnv * swell * pulseMod * 255f).toInt().coerceIn(1, 255)
             } else 0
 
-            // Texture: high-frequency flutter with random-ish micro-bursts
             val textureAmp = if (textureEnv > 0.01f) {
                 val flutter = sin(phaseInCycle * 4f) * cos(phaseInCycle * 7f + textureNoisePhase * 3f)
                 val burst = abs(sin(phaseInCycle * 2f + textureNoisePhase * 5f))
                 (textureEnv * (0.35f + flutter * 0.25f + burst * 0.55f) * 220f).toInt().coerceIn(1, 255)
             } else 0
 
-            // Composite: max-dominance blending for distinct layered feel
             val compositeAmp = maxOf(impactAmp, continuousAmp, textureAmp)
 
             timings[i] = periodMs

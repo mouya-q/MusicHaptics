@@ -31,14 +31,14 @@ class HapticComposer(
 
         private const val BEAT_HISTORY_SIZE = 120
         private const val BEAT_ENERGY_RATIO = 1.35f
-        private const val BEAT_MIN_INTERVAL_MS = 180L
+        private const val BEAT_MIN_INTERVAL_MS = 0L  // v4.0: was 180L — ZERO minimum interval
         private const val BEAT_MAX_INTERVAL_MS = 2500L
         private const val BEAT_PHASE_LOCK_ALPHA = 0.15f
 
         private const val KEY_STRIKE_ENERGY_ACCUM_WINDOW = 3
         private const val KEY_STRIKE_MIN_ENERGY = 0.18f
         private const val KEY_STRIKE_PITCH_GUARD_RATIO = 0.6f
-        private const val KEY_STRIKE_COOLDOWN_MS = 120L
+        private const val KEY_STRIKE_COOLDOWN_MS = 0L  // v4.0: was 120L — ZERO cooldown
         private const val SUB_BASS_EMPHASIS_BOOST = 1.4f
         private const val ACCENT_VELOCITY_THRESHOLD = 1.3f
 
@@ -55,15 +55,10 @@ class HapticComposer(
         const val LRA_MAX_VOLTAGE = 3.6f
         const val LRA_START_STOP_MS = 4.5f
 
-        // v3.10.19: Tuned for high-Q X-axis LRA (OnePlus 15: Q=16, 3ms rise, 4.5ms fall).
-        // Original values (0.0015/0.012/0.035) were too aggressive for high-Q actuators —
-        // the LRA couldn't complete its mechanical rise before the drive was already
-        // decaying, producing incomplete vibrations that sounded like buzzing.
-        // New values give the LRA enough time to fully excite before decay begins.
-        const val ADSR_ATTACK_TAU = 0.0028f   // 2.8ms — matches OnePlus 15's 3ms rise time
-        const val ADSR_DECAY_TAU = 0.022f     // 22ms — gentle decay, lets LRA settle naturally
-        const val ADSR_SUSTAIN_LEVEL = 0.42f  // Higher sustain — keeps body vibration present
-        const val ADSR_RELEASE_TAU = 0.055f   // 55ms — smooth release, no abrupt stop
+        const val ADSR_ATTACK_TAU = 0.0015f  // 1.5ms — 更快启动，击打即时
+        const val ADSR_DECAY_TAU = 0.008f  // 8ms — 极快衰减，低频零拖泥
+        const val ADSR_SUSTAIN_LEVEL = 0.05f  // 0.05 — 真零地板，静音段绝对无振动
+        const val ADSR_RELEASE_TAU = 0.025f  // 25ms — 极快释放，干净利落
 
         const val THERMAL_RTH = 25f
         const val THERMAL_CTH = 1.2f
@@ -75,7 +70,6 @@ class HapticComposer(
         const val FM_MOD_RATE = 0.5f
     }
 
-    // v1.9: LRA physical parameters from ActuatorProfile (per-device)
     private val lraF0: Float = profile.actuator.resonanceFreq
     private val lraDamping: Float = profile.actuator.dampingRatio
     private val lraW0: Float = profile.actuator.angularFreq
@@ -146,7 +140,6 @@ class HapticComposer(
     private var waveBufferIndex = 0
     private var waveBufferCount = 0
 
-    // v1.9: LRA physical state — declared before init block
     private var lraPhase = 0f
     private var lraPhaseVelocity = 0f
     private var lraDisplacement = 0f
@@ -155,7 +148,7 @@ class HapticComposer(
 
     init {
         loadPreferences()
-        lraPhaseVelocity = lraW0  // Initialize phase velocity from actuator resonance
+        lraPhaseVelocity = lraW0
         Log.i(TAG, "HapticComposer v3.7 initialized | Persona=${currentPersona.name} | KeyStrike=ON | ADSR=ON(asymmetricRise/Fall) | Thermal=ON | LRA(f0=${lraF0}Hz ζ=${lraDamping} rise=${profile.actuator.riseTimeMs}ms fall=${profile.actuator.fallTimeMs}ms lat=${lraStartLatencyMs}ms)")
     }
 
@@ -250,7 +243,7 @@ class HapticComposer(
         val midHighTexture = texture * textureGain * semanticWeights.third
         val highTextureDetail = texture * textureGain * semanticWeights.fourth
 
-        val continuousComponent = (bassContinuous + lowMidImpact) * 0.35f
+        val continuousComponent = (bassContinuous + lowMidImpact) * 0.50f  // v4.0: was 0.35 — more body
         val transientComponent = (transientAccumulator + midHighTexture) * transientGain * adsrEnvelope
         val beatComponent = if (isBeat) beatGain * adsrEnvelope else 0f
         val keyStrikeComponent = if (isKeyStrike) keyStrikeGain * keyStrikeSemantic.intensity * adsrEnvelope else 0f
@@ -273,10 +266,6 @@ class HapticComposer(
             timestamp = timestamp
         )
 
-        // v3.12: Legacy heuristic detectSemanticEvent() REMOVED.
-        // We now rely 100% on the native semantic instrument probabilities.
-        // If the C++ Semantic Engine says there's no instrument, we trust it,
-        // preventing mid-band noise from being falsely classified as VOCAL_SUSTAIN.
 
         val primitive = if (semanticEvent != null) {
             mapEventToPrimitive(semanticEvent, currentPersona, finalIntensity, adsrEnvelope, timestamp)
@@ -284,6 +273,18 @@ class HapticComposer(
 
         lastSemanticEvent = semanticEvent
         lastPrimitive = primitive
+
+        val iosLayers = generateIosStyleLayers(
+            isBeat = isBeat,
+            isKeyStrike = isKeyStrike,
+            subBass = subBass,
+            midBass = midBass,
+            texture = texture,
+            instruments = instruments,
+            adsrEnvelope = adsrEnvelope,
+            timestamp = timestamp,
+            persona = currentPersona
+        )
 
         val gamma = getEffectiveGamma()
         val gammaIntensity = applyGammaCurve(finalIntensity, gamma)
@@ -304,7 +305,8 @@ class HapticComposer(
             thermalGain = thermalGain,
             semanticType = semanticType,
             semanticEvent = semanticEvent,
-            primitive = primitive
+            primitive = primitive,
+            additionalPrimitives = iosLayers
         )
 
         hapticCommandChannel.trySend(command)
@@ -509,9 +511,6 @@ class HapticComposer(
         val triggerAttack = isTransient || isBeat || isKeyStrike
         val triggerRelease = !triggerAttack && targetDrive < 0.03f
 
-        // v2.0: Asymmetric actuator-aware ADSR — rise/fall separated
-        // Rise time → attack tau (how fast LRA reaches full displacement)
-        // Fall time → decay/release tau (how long the LRA keeps vibrating after drive stops)
         val riseScale = profile.actuator.riseScale
         val fallScale = profile.actuator.fallScale
         val attackTau = ADSR_ATTACK_TAU * riseScale
@@ -542,7 +541,7 @@ class HapticComposer(
                 }
             }
             3 -> {
-                adsrEnvelopeValue = adsrEnvelopeValue * 0.95f + targetDrive * ADSR_SUSTAIN_LEVEL * 0.05f
+                adsrEnvelopeValue = adsrEnvelopeValue * 0.90f  // Pure decay toward zero, no targetDrive feed
                 if (triggerRelease) {
                     adsrState = 4
                 } else if (triggerAttack) {
@@ -578,7 +577,6 @@ class HapticComposer(
             }
 
             val eventAmp = (adsrEnvelopeValue * semanticGain).coerceAtMost(1.5f)
-            // v2.0: Event duration scaled by actuator response (rise-biased for impact reach)
             val responseScale = profile.actuator.riseScale
             val eventDurMs = when {
                 isKeyStrike && keyStrikeSemantic == KeyStrikeSemantic.SUB_STRIKE -> (180L * responseScale).toLong()
@@ -682,20 +680,21 @@ class HapticComposer(
         isKeyStrike: Boolean,
         timestamp: Long
     ): Float {
-        // v3.10.19: Reduced transient gain multipliers for high-Q LRA.
-        // The original 2.0x / 1.6x multipliers were designed for softer actuators.
-        // On OnePlus 15 (Q=16, 3ms rise), these values cause the LRA to overshoot
-        // its mechanical limit, producing a "snap" that feels like a harsh click
-        // rather than a musical impact.  The LRA's own resonance already amplifies
-        // transients — external gain should be moderate.
-        if (isKeyStrike) return intensity * 1.5f   // was 2.0f
-        if (isBeat || isTransient) return intensity * 1.3f  // was 1.6f
+        val actuatorQ = profile.actuator.qFactor
+        val transientGain = 1.15f  // v4.0: was 1.0/1.25 → 1.15 uniform
+        val beatGain = 1.10f  // v4.0: was 1.0/1.1 → 1.10 uniform
 
-        if (intensity > 0.02f) {
-            // Subtle breathing modulation (±10%) instead of aggressive 50%/15% gating.
-            // Sustained bass & melodic content now retains full body.
-            val breath = 0.90f + 0.10f * sin(timestamp * 0.0008f)
+        if (isKeyStrike) return intensity * transientGain
+        if (isBeat || isTransient) return intensity * beatGain
+
+        if (intensity > 0.003f) {
+            val breath = 0.80f + 0.20f * sin(timestamp * 0.0008f)
             return intensity * breath
+        }
+
+        if (intensity > 0.0005f) {
+            val microGain = (intensity / 0.003f).coerceIn(0f, 1f)
+            return intensity * microGain * 0.6f  // damped but present
         }
 
         return 0f
@@ -708,12 +707,71 @@ class HapticComposer(
     fun release() {
         cancel()
     }
-
     private var lastInstrumentEventMs = 0L
     private var lastInstrumentFamily = InstrumentFamily.NONE
     private var lastKickEventMs = 0L
 
-    /** v3.8 maps native instrument-family confidence to an authored haptic vocabulary. */
+    private var lastBeatTapMs = 0L  // Beat transient refractory
+    private var lastBassBodyMs = 0L  // Bass continuous body refractory
+    private var lastVocalWaveMs = 0L  // Vocal wave refractory
+    private var bassBodyIntensity = 0f  // Smoothed bass intensity for continuous body
+    private var vocalWaveIntensity = 0f  // Smoothed vocal intensity for wave
+
+    private fun generateIosStyleLayers(
+        isBeat: Boolean,
+        isKeyStrike: Boolean,
+        subBass: Float,
+        midBass: Float,
+        texture: Float,
+        instruments: InstrumentFeatures,
+        adsrEnvelope: Float,
+        timestamp: Long,
+        persona: MusicPersona
+    ): List<HapticPrimitive> {
+        val layers = mutableListOf<HapticPrimitive>()
+        val gamma = getEffectiveGamma()
+
+
+        if (isBeat) {
+            lastBeatTapMs = timestamp
+
+            // v4.0: Expanded strong/weak beat distinction.
+            val beatStrength = (subBass * 0.55f + midBass * 0.35f).coerceIn(0.05f, 1f)
+            val beatGamma = applyGammaCurve(beatStrength, gamma).coerceIn(0f, 1f)
+
+            val isStrongBeat = isKeyStrike || instruments.kick > 0.3f
+            val beatIntensity = if (isStrongBeat) {
+                (beatGamma * 255f * persona.impactBias).toInt().coerceIn(180, 255)  // v4.0: was 140-255
+            } else {
+                (beatGamma * 160f * persona.impactBias).toInt().coerceIn(40, 160)  // v4.0: was 25-180
+            }
+
+            layers.add(HapticPrimitive.Impact(
+                intensity = beatIntensity,
+                durationMs = if (isStrongBeat) 14 else 10,  // v4.0: was 16/12 — snappier
+                velocityFactor = beatStrength,
+                sharpness = if (isStrongBeat) 0.85f else 0.70f,  // v4.0: was 0.8/0.65 — sharper
+                semantic = if (isStrongBeat) "BEAT_TAP_STRONG" else "BEAT_TAP"
+            ))
+        }
+
+        // ── HI-HAT TEXTURE (light, non-floor) ──
+        if (instruments.hiHat > 0.40f && timestamp - lastInstrumentEventMs >= 0L) {  // v4.0: was 60L — no refractory
+            val hatIntensity = (instruments.hiHat * 120f * persona.textureBias).toInt().coerceIn(30, 150)  // v4.0: was 25-120 — wider range
+            layers.add(HapticPrimitive.Texture(
+                intensity = hatIntensity,
+                durationMs = 10,
+                modulationDepth = 0.3f,
+                frequencyMod = 0.8f,
+                semantic = "HIHAT_TICK"
+            ))
+        }
+
+
+        return layers
+    }
+
+
     private fun detectInstrumentEvent(
         instruments: InstrumentFeatures,
         subBass: Float,
@@ -723,14 +781,10 @@ class HapticComposer(
         isTransient: Boolean,
         timestamp: Long
     ): SemanticEvent? {
-        // Kick is an independent transient track, not a contestant in dominantFamily.
-        // Bass sustain commonly has the highest smoothed confidence in bass-heavy
-        // material; selecting only that family made genuine low-frequency attacks
-        // disappear into a continuous rumble.
         val kickConfidence = instruments.kick
         val kickCandidate = kickConfidence >= 0.30f &&
             (isTransient || subBass >= 0.12f) &&
-            timestamp - lastKickEventMs >= 90L
+            timestamp - lastKickEventMs >= 0L  // v4.0: was 90L — ZERO cooldown
         if (kickCandidate) {
             lastKickEventMs = timestamp
             return SemanticEvent(
@@ -748,10 +802,10 @@ class HapticComposer(
         if (family == InstrumentFamily.NONE) return null
 
         val minInterval = when (family) {
-            InstrumentFamily.HI_HAT -> 45L
-            InstrumentFamily.KICK, InstrumentFamily.SNARE, InstrumentFamily.PLUCKED -> 70L
-            InstrumentFamily.VOCAL, InstrumentFamily.HARMONIC, InstrumentFamily.BASS_SUSTAIN -> 140L
-            else -> 90L
+            InstrumentFamily.HI_HAT -> 0L  // v4.0: was 45L
+            InstrumentFamily.KICK, InstrumentFamily.SNARE, InstrumentFamily.PLUCKED -> 0L  // v4.0: was 70L
+            InstrumentFamily.VOCAL, InstrumentFamily.HARMONIC, InstrumentFamily.BASS_SUSTAIN -> 0L  // v4.0: was 140L
+            else -> 0L  // v4.0: was 90L
         }
         if (family == lastInstrumentFamily && timestamp - lastInstrumentEventMs < minInterval) return null
 
@@ -766,13 +820,13 @@ class HapticComposer(
             else -> 0f
         }
         val required = when (family) {
-            InstrumentFamily.KICK -> 0.48f
-            InstrumentFamily.SNARE -> 0.46f
-            InstrumentFamily.HI_HAT -> 0.50f
-            InstrumentFamily.VOCAL -> 0.52f
-            InstrumentFamily.PLUCKED -> 0.48f
-            InstrumentFamily.HARMONIC -> 0.55f
-            InstrumentFamily.BASS_SUSTAIN -> 0.50f
+            InstrumentFamily.KICK -> 0.30f
+            InstrumentFamily.SNARE -> 0.28f
+            InstrumentFamily.HI_HAT -> 0.30f
+            InstrumentFamily.VOCAL -> 0.32f
+            InstrumentFamily.PLUCKED -> 0.30f
+            InstrumentFamily.HARMONIC -> 0.35f
+            InstrumentFamily.BASS_SUSTAIN -> 0.30f
             else -> 1f
         }
         if (confidence < required) return null
@@ -932,11 +986,9 @@ class HapticComposer(
 
             "INSTRUMENT_KICK", "KICK_DRUM", "SUB_STRIKE" -> {
                 if (persona.impactBias < 0.3f) return null
-                // Kick needs a perceptible attack above the continuous bass bed. This is
-                // a semantic accent floor, not a global gain increase.
                 val adjustedIntensity = maxOf(
                     (intensity255 * persona.impactBias * 1.18f).toInt(),
-                    (150f + event.strength * 85f).toInt()
+                    (180f + event.strength * 75f).toInt()  // v4.0: was 150+85 → 180+75
                 ).coerceIn(0, 255)
                 val duration = lerp(persona.impactDurationMin, persona.impactDurationMax, event.strength)
                 val velocity = event.strength.coerceIn(0f, 1f)
@@ -991,8 +1043,6 @@ class HapticComposer(
 
             "VOCAL_PHRASE", "VOCAL_SUSTAIN", "HARMONIC_SUSTAIN", "BASS_SUSTAIN" -> {
                 if (persona.waveBias < 0.3f) return null
-                // Authored soft wave: voice/harmonic material should breathe rather
-                // than becoming a repeated TICK. Bass uses a deeper, flatter body.
                 val bassWave = event.label == "BASS_SUSTAIN"
                 val curve = if (bassWave) {
                     floatArrayOf(0.18f, 0.32f, 0.38f, 0.34f, 0.28f, 0.22f)
@@ -1082,7 +1132,8 @@ data class HapticCommand(
     val semanticType: SemanticType,
 
     val semanticEvent: SemanticEvent? = null,
-    val primitive: HapticPrimitive? = null
+    val primitive: HapticPrimitive? = null,
+    val additionalPrimitives: List<HapticPrimitive> = emptyList()
 ) {
     fun toLogString(): String {
         val primStr = primitive?.let { " Prim=${it.typeName}" } ?: ""

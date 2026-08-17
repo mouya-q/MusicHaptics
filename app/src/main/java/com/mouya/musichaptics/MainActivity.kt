@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Bundle
 import android.preference.PreferenceManager
@@ -17,7 +18,6 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-// Console logs are received only by HapticDashboardActivity to avoid duplicates.
 
 class MainActivity : ComponentActivity() {
 
@@ -68,8 +68,6 @@ class MainActivity : ComponentActivity() {
             TelemetryHub.applySnapshot(bundle)
         }
     }
-    // The dashboard owns console-log reception. Registering a second receiver here
-    // appended every broadcast twice to the shared ConsoleLogState archive.
 
 
     private var prefs: SharedPreferences? = null
@@ -83,15 +81,13 @@ class MainActivity : ComponentActivity() {
         window.navigationBarColor = Color.TRANSPARENT
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowCompat.getInsetsController(window, window.decorView).apply {
-            isAppearanceLightStatusBars = false
-            isAppearanceLightNavigationBars = false
+            val night = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+            isAppearanceLightStatusBars = night
+            isAppearanceLightNavigationBars = night
         }
 
         prefs = getSharedPreferences("haptics_config", Context.MODE_PRIVATE)
 
-        // Root is mandatory for hardware-profile activation: Build fields can be
-        // spoofed, while the probe reads board/driver data from the rooted system.
-        // The probe itself is read-only and will trigger Magisk/APatch authorization.
         if (!RootHardwareProbe.hasRootAccess()) {
             startActivity(Intent(this, RootActivationActivity::class.java))
             finish()
@@ -99,8 +95,6 @@ class MainActivity : ComponentActivity() {
         }
         RootHardwareProbe.probeAndPersist(this)
 
-        // Defensive: HapticEngine creates NativeBridge which loads native lib.
-        // First launch after install/update may not have lib extracted yet → catch gracefully.
         try {
             hapticEngine = HapticEngine(this, prefs!!)
         } catch (t: Throwable) {
@@ -116,15 +110,12 @@ class MainActivity : ComponentActivity() {
         }
 
         startActivity(Intent(this, HapticDashboardActivity::class.java))
-        // This activity is a root/bootstrapper only. Keeping it in the back stack
-        // made system Back reveal a blank white window with no Compose content.
         finish()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         try { unregisterReceiver(telemetryReceiver) } catch (_: Exception) {}
-        // Release native resources to prevent leak across Activity recreation
         try { hapticEngine?.release() } catch (_: Exception) {}
         hapticEngine = null
     }

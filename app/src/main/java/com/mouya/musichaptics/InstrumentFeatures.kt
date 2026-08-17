@@ -1,10 +1,5 @@
 package com.mouya.musichaptics
 
-/**
- * v3.8 semantic analysis output from the native DSP filter bank.
- * Values are smoothed confidence estimates in [0, 1]. They deliberately
- * describe instrument families rather than pretending to perform stem separation.
- */
 data class InstrumentFeatures(
     val kick: Float = 0f,
     val snare: Float = 0f,

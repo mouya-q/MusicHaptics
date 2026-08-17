@@ -7,16 +7,6 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
 
-/**
- * Reads a small, non-identifying hardware fingerprint through Magisk/su.
- * Build.MODEL is deliberately not used to select a profile: it is easily
- * spoofed. Kernel board / boot hardware / vibrator-driver paths are preferred.
- *
- * A kernel normally does not expose LRA f0, Q or coil calibration to userspace.
- * Consequently this class only selects profiles that have a known board mapping;
- * unknown hardware remains on the conservative DEFAULT profile instead of
- * inventing physical measurements.
- */
 object RootHardwareProbe {
     private const val TAG = "RootHardwareProbe"
     private const val PREFS = "haptics_config"
@@ -59,20 +49,40 @@ object RootHardwareProbe {
     } catch (_: Exception) { null }
 
     private fun profileForFingerprint(fp: String): String = when {
-        // Board codenames / hardware nodes; no marketing model strings are trusted.
+        // ── Xiaomi 数字系列 ──
         fp.contains("fuxi") -> "XIAOMI13_XAXIS"
-        fp.contains("haotai") || fp.contains("shenni") -> "XIAOMI15"
+        fp.contains("nuwa") -> "XIAOMI_13PRO"
+        fp.contains("venus") || fp.contains("star") || fp.contains("mars") -> "XIAOMI11"
+        fp.contains("cupid") || fp.contains("zeus") || fp.contains("psyche") -> "XIAOMI12"
+        fp.contains("houji") || fp.contains("aurora") -> "XIAOMI14"
+        fp.contains("haotai") -> "XIAOMI15"
+        fp.contains("shenni") -> "XIAOMI_15PRO"
+        fp.contains("zijin") -> "XIAOMI_17_PRO"
         fp.contains("umi") || fp.contains("cmi") || fp.contains("thyme") -> "XIAOMI10_XAXIS"
+        fp.contains("babylon") || fp.contains("goku") -> "XIAOMI_MIX_FOLD"
+        // ── Redmi K系列 ──
+        fp.contains("rubens") -> "REDMI_K50_GAMING"
+        fp.contains("alioth") || fp.contains("munch") || fp.contains("diting") -> "REDMI_K40"
+        fp.contains("mondrian") || fp.contains("invenio") || fp.contains("corot") -> "REDMI_K60"
+        fp.contains("vermeer") || fp.contains("manet") -> "REDMI_K70"
+        fp.contains("rothko") -> "REDMI_K70U"
         fp.contains("k80") || (fp.contains("aw8697") && fp.contains("zaxis")) -> "REDMI_K80U_0809"
+        // ── Lenovo ──
+        fp.contains("tb320fc") || fp.contains("tb321fc") || fp.contains("y700") -> "LENOVO_Y700_GEN2"
+        // ── OPPO ──
+        fp.contains("reno8pro") -> "OPPO_RENO8_PRO"
+        // ── OnePlus ──
         fp.contains("aston") -> "ONEPLUS_13T"
-        fp.contains("plk110") || fp.contains("plk") -> "ONEPLUS_15"
-        fp.contains("opus") -> "ONEPLUS_15" // OnePlus 13, similar class
-        // Samsung S25 series: e1q / s5e8855 board
+        fp.contains("plk") -> "ONEPLUS_15"
+        fp.contains("opus") -> "ONEPLUS_13"
+        fp.contains("waffle") -> "ONEPLUS_12"
+        fp.contains("salami") -> "ONEPLUS_11"
+        fp.contains("ovaltine") -> "ONEPLUS_10PRO"
+        fp.contains("lemonade") -> "ONEPLUS_9"
+        // ── Samsung ──
         fp.contains("s5e8855") || fp.contains("e1q") -> "SAMSUNG_S25"
-        // vivo X200 series: kalama / mt6985
+        // ── vivo ──
         fp.contains("pd24") || fp.contains("pd23") -> "VIVO_FLAGSHIP"
-        // A root fingerprint confirms only the driver family, not physical f0/Q.
-        // Keep DEFAULT until a board has validated actuator measurements.
         else -> "DEFAULT"
     }
 }

@@ -66,4 +66,5 @@ target_link_libraries(
     ${log-lib}
     android
     c++_shared
+    unwind
 )

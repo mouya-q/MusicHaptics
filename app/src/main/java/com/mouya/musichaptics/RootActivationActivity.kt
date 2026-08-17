@@ -27,7 +27,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** First-run gate: a root probe is needed to avoid relying on spoofable Build data. */
 class RootActivationActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,8 +51,6 @@ private fun RootActivationScreen(onActivated: () -> Unit) {
         Modifier.fillMaxSize().background(Color.White)
             .padding(24.dp), contentAlignment = Alignment.Center
     ) {
-        // Translucent, iOS-inspired glass card. No fake blur is used: Compose's
-        // backdrop blur is not reliable across all API 28+ OEM renderers.
         Column(
             Modifier.fillMaxWidth().clip(shape)
                 .background(Color(0xFFF8F9FC))
@@ -78,6 +75,34 @@ private fun RootActivationScreen(onActivated: () -> Unit) {
                 Icon(Icons.Default.Security, null, tint = Color(0xFF64D2FF))
                 Spacer(Modifier.width(12.dp))
                 Text("仅执行只读 getprop、device-tree 与\nvibrator 驱动节点探测。", color = Color(0xFF3C3C43).copy(alpha = 0.82f), fontSize = 13.sp, fontFamily = AppFontFamily)
+            }
+            Spacer(Modifier.height(16.dp))
+            // ── 动态注入提示卡片 ──
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
+                    .background(Color(0xFFFFF4E6))
+                    .border(1.dp, Color(0xFFFF9500).copy(alpha = 0.25f), RoundedCornerShape(18.dp))
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Security, null, tint = Color(0xFFFF9500), modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("动态注入已强制开启", color = Color(0xFF8A5C00), fontWeight = FontWeight.SemiBold, fontSize = 15.sp, fontFamily = AppFontFamily)
+                }
+                Text(
+                    "本模块已声明 xposed.dynamic.support，使 LSPosed 允许设置变更即时下发到被 Hook 的应用进程。",
+                    color = Color(0xFF8A5C00).copy(alpha = 0.85f), fontSize = 13.sp, lineHeight = 19.sp, fontFamily = AppFontFamily
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    " 如果在 LSPosed 管理器中勾选了「禁用动态注入」，设置变更将无法即时生效，必须手动重启每个作用域应用才能加载新参数。",
+                    color = Color(0xFFB8430E), fontSize = 12.sp, fontWeight = FontWeight.Medium, lineHeight = 17.sp, fontFamily = AppFontFamily
+                )
+                Text(
+                    "关闭「禁用动态注入」后需重启所有作用域应用以重新建立动态通道。",
+                    color = Color(0xFF8A5C00).copy(alpha = 0.7f), fontSize = 11.sp, fontFamily = AppFontFamily
+                )
             }
             if (error != null) {
                 Spacer(Modifier.height(16.dp))

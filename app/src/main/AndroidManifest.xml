@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.VIBRATE"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="com.mouya.musichaptics.permission.CONFIG_SYNC"/>
 
     <!-- Visible-package declaration for the scoped-app list; no broad package query. -->
@@ -26,10 +27,23 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.MusicHaptics">
 
-        <meta-data android:name="xposedmodule" android:value="true" />
-        <meta-data android:name="xposeddescription" android:value="音乐音频拦截与振动协同模块" />
-        <meta-data android:name="xposedminversion" android:value="82" />
-        <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
+        <!-- libxposed service bridge (module recognized as API 102) -->
+        <provider
+            android:name="io.github.libxposed.service.XposedProvider"
+            android:authorities="com.mouya.musichaptics.XposedService"
+            android:exported="true"
+            android:writePermission="android.permission.DUMP" />
+
+        <!-- Module settings entry (libxposed module discovery) -->
+        <activity-alias
+            android:name="com.mouya.musichaptics.settings"
+            android:targetActivity="com.mouya.musichaptics.MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
+            </intent-filter>
+        </activity-alias>
 
         <provider android:name="com.itsaky.androidide.logsender.utils.LogSenderInstaller" tools:node="remove" />
         <service android:name="com.itsaky.androidide.logsender.LogSenderService" tools:node="remove" />

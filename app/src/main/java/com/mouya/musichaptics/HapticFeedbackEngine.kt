@@ -9,21 +9,6 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
 
-/**
- * 触觉反馈引擎 — 基于系统预定义效果
- *
- * 设计原则：
- * - 优先使用 VibrationEffect.createPredefined()（API 29+）
- *   这是厂商针对设备 LRA 硬件优化的系统级触觉，效果最接近 iOS Taptic Engine
- * - 复合序列（如"噔噔噔↘"）通过 Handler.postDelayed 依次触发独立预定义效果，
- *   而非依赖 createWaveform 的振幅包络（振幅控制在很多设备上不可靠或被忽略）
- * - API 28 fallback: 使用 createOneShot(不同时长) 模拟层级差异
- *
- * 不使用 createWaveform(timings, amplitudes) 的原因：
- * 1. hasAmplitudeControl() 在很多设备返回 false，amplitude 值被完全丢弃
- * 2. 即使返回 true，Android Vibrator API 的振幅控制为 ERM 设计，LRA 感知差异极小
- * 3. 预定义效果由厂商针对具体硬件调校，远优于手动振幅包络
- */
 class HapticFeedbackEngine private constructor(
     private val vibrator: Vibrator?,
     private val isApi29Plus: Boolean
@@ -59,34 +44,26 @@ class HapticFeedbackEngine private constructor(
 
     private val handler = Handler(Looper.getMainLooper())
 
-    /**
-     * 触觉反馈风格
-     *
-     * LIGHT_TICK  → EFFECT_TICK        (滑块微调、细微交互)
-     * SELECTION   → EFFECT_TICK        (切换选择)
-     * IMPACT      → EFFECT_CLICK       (按钮点击、面板展开)
-     * KICK        → EFFECT_HEAVY_CLICK (主开关、重要操作)
-     * SUCCESS     → EFFECT_DOUBLE_CLICK(成功确认 — 系统级双击)
-     * CRESCENDO   → TICK→CLICK→HEAVY→TICK 序列 ("噔噔噔↘" 递进)
-     */
 enum class HapticStyle {
-         LIGHT_TICK,
-         SELECTION,
-         IMPACT,
-         KICK,
-         SUCCESS,
-         WARNING,
-         CRESCENDO
-     }
+          LIGHT_TICK,
+          SELECTION,
+          IMPACT,
+          KICK,
+          SUCCESS,
+          WARNING,
+          CRESCENDO,
+          CONTINUOUS_HUM,  // v3.14: 滑块拖拽连续触感
+          SOFT_TAP,  // v3.14: 减弱动态模式
+          NONE  // v3.14: 无触觉
+      }
 
-    /**
-     * 执行指定风格的触觉反馈
-     */
     fun perform(style: HapticStyle) {
+        // v3.14: NONE style — no-op
+        if (style == HapticStyle.NONE) return
+
         val vib = vibrator ?: return
         if (!hasVibrator) return
 
-        // Cancel any pending CRESCENDO callbacks to prevent overlapping vibrations
         handler.removeCallbacksAndMessages(null)
 
         if (style == HapticStyle.CRESCENDO) {
@@ -104,9 +81,6 @@ enum class HapticStyle {
         }
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  Predefined Effects (API 29+) — 厂商优化的系统级触觉
-    // ════════════════════════════════════════════════════════════════
 
     private fun tryPredefined(effectId: Int): VibrationEffect? {
         if (!isApi29Plus) return null
@@ -117,9 +91,6 @@ enum class HapticStyle {
         }
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  Effect Builder
-    // ════════════════════════════════════════════════════════════════
 
     private fun buildEffect(style: HapticStyle): VibrationEffect {
         return when (style) {
@@ -144,28 +115,29 @@ enum class HapticStyle {
                     ?: VibrationEffect.createOneShot(30, 255)
 
             HapticStyle.WARNING ->
-                // Warning: double heavy click pattern
                 tryPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
                     ?: VibrationEffect.createOneShot(25, 200)
 
             HapticStyle.CRESCENDO ->
-                // CRESCENDO 由 performCrescendo() 处理，不应走到这里
                 tryPredefined(VibrationEffect.EFFECT_TICK)
                     ?: VibrationEffect.createOneShot(8, 80)
+
+            HapticStyle.CONTINUOUS_HUM ->
+                tryPredefined(VibrationEffect.EFFECT_TICK)
+                    ?: VibrationEffect.createOneShot(12, 50)
+
+            HapticStyle.SOFT_TAP ->
+                tryPredefined(VibrationEffect.EFFECT_TICK)
+                    ?: VibrationEffect.createOneShot(5, 40)
+
+            HapticStyle.NONE ->
+                VibrationEffect.createOneShot(1, 1)
         }
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  CRESCENDO — "噔噔噔↘" 递进序列
-    //
-    //  通过依次触发独立预定义效果实现，而非依赖 createWaveform 振幅包络。
-    //  每个预定义效果都是系统针对 LRA 优化的独立击打，
-    //  用 Handler.postDelayed 控制间隔，确保每个击打清晰可辨。
-    // ════════════════════════════════════════════════════════════════
 
     private fun performCrescendo(vib: Vibrator) {
         if (isApi29Plus) {
-            // API 29+: 预定义效果序列 — TICK → CLICK → HEAVY_CLICK → TICK
             val tick = tryPredefined(VibrationEffect.EFFECT_TICK)
             val click = tryPredefined(VibrationEffect.EFFECT_CLICK)
             val heavy = tryPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
@@ -179,8 +151,6 @@ enum class HapticStyle {
             }
         }
 
-        // API 28 fallback: 用不同时长的 oneShot 模拟递进
-        // 没有预定义效果，靠时长差异制造层级感
         try { vib.vibrate(VibrationEffect.createOneShot(10, 100)) } catch (_: Exception) {}
         handler.postDelayed({ try { vib.vibrate(VibrationEffect.createOneShot(15, 180)) } catch (_: Exception) {} }, 45)
         handler.postDelayed({ try { vib.vibrate(VibrationEffect.createOneShot(20, 255)) } catch (_: Exception) {} }, 90)

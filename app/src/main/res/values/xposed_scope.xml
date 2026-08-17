@@ -30,6 +30,8 @@
         <item>com.spotify.music</item>
         <!-- YouTube Music -->
         <item>com.google.android.apps.youtube.music</item>
+        <!-- Phira (开源音游，Rust + Oboe/AAudio) -->
+        <item>org.flos.phira</item>
         <!-- 系统媒体框架（兜底，确保所有走 AudioTrack 的应用都能被 Hook） -->
         <item>android</item>
     </string-array>

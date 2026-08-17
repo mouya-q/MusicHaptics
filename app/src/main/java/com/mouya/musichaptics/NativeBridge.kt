@@ -49,12 +49,9 @@ class NativeBridge {
 
     init {
         try {
-            // First, see if the engine can be created (meaning the library is already loaded
-            // by MainHook using moduleClassLoader.getResource() or other means).
             try {
                 nativePtr = nativeCreateEngine()
             } catch (e: UnsatisfiedLinkError) {
-                // If not, fall back to explicit loading
                 if (!libraryPreloaded) {
                     synchronized(loadLock) {
                         if (!libraryPreloaded) {
@@ -72,8 +69,6 @@ class NativeBridge {
                 Log.i("NativeBridge", "Native engine created successfully, ptr=$nativePtr")
             }
         } catch (e: UnsatisfiedLinkError) {
-            // Graceful degradation: native lib not yet extracted/available.
-            // App will still launch; DSP pipeline simply produces silence.
             Log.w("NativeBridge", "Native library not available yet (will retry on next launch): ${e.message}")
             nativePtr = 0L
         } catch (e: Exception) {
@@ -107,15 +102,6 @@ class NativeBridge {
         }
     }
 
-    /**
-     * Pull continuous haptic amplitude samples from the C++ ring buffer.
-     * Each sample is a float in range [0, 255] representing the composed
-     * five-layer haptic amplitude at that point in time.
-     *
-     * @param outBuffer pre-allocated FloatArray to receive amplitude samples
-     * @param maxCount maximum number of samples to pull
-     * @return number of samples actually copied into outBuffer
-     */
     fun getHapticFrame(outBuffer: FloatArray, maxCount: Int): Int {
         if (nativePtr != 0L) {
             try {
@@ -138,10 +124,6 @@ class NativeBridge {
         return 0
     }
 
-    /**
-     * Clear the C++ haptic ring buffer and reset all envelope states.
-     * Call on playback pause/stop to prevent stale vibrations.
-     */
     fun clearHapticBuffer() {
         if (nativePtr != 0L) {
             try {
@@ -173,11 +155,6 @@ class NativeBridge {
     private external fun nativeStartScheduler(ptr: Long): Boolean
     private external fun nativeStopScheduler()
 
-    /**
-     * v2.1: Native callback — called from the C++ scheduler thread.
-     * Receives a batch of amplitude samples (20ms = 2 samples).
-     * Override or set [onFrameCallback] to handle these in HapticEngine.
-     */
     @Volatile var onFrameCallback: ((FloatArray, Int) -> Unit)? = null
 
     fun onNativeFrameReady(samples: FloatArray, count: Int) {
@@ -189,7 +166,6 @@ class NativeBridge {
             try {
                 return nativeStartScheduler(nativePtr)
             } catch (e: Throwable) {
-                // UnsatisfiedLinkError extends Error, not Exception — must catch Throwable
                 Log.e("NativeBridge", "startScheduler failed: ${e.javaClass.simpleName}: ${e.message}")
             }
         }

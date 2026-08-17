@@ -1,40 +1,11 @@
-# Android IDE junk
-.androidide/
-.backup/
 .gradle/
-.kotlin/
-.idea/
 build/
+local-sdk/
+platform-tools/
 *.apk
-*.aab
-*.jks
-*.keystore
-local.properties
-
-# IDE files
-*.iml
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Gradle wrapper (keep if needed, ignore local)
-gradle/
-!gradle/wrapper/gradle-wrapper.jar
-
-# Native build artifacts
-.cxx/
-*.o
-*.so
-
-# CMake build artifacts (in-tree build)
-app/src/main/cpp/CMakeCache.txt
-app/src/main/cpp/CMakeFiles/
-app/src/main/cpp/cmake_install.cmake
-app/src/main/cpp/Makefile
-
-# Local Maven repository (not needed in VCS)
-local-maven/
-
-# Build script (local)
-build.sh
+*.log
+.idea/
+.claude/
+.codegraph/
+.backup/
+animation-plans/

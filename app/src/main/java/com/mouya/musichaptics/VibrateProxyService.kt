@@ -11,22 +11,10 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
 
-/**
- * VibrateProxyService — Runs in the module's own process (which has VIBRATE permission).
- * Hooked target apps that lack VIBRATE permission call this via raw Binder IPC.
- *
- * Protocol (no AIDL — uses raw Parcel transact codes):
- *   Code 1: performPredefined(int effectId)
- *   Code 2: performWaveform(long[] timings, int[] amplitudes)
- *   Code 3: performOneShot(long durationMs, int amplitude)
- *   Code 4: cancelVibration()
- *   Code 5: hasVibrator() → boolean
- */
 class VibrateProxyService : Service() {
 
     companion object {
         private const val TAG = "VibrateProxy"
-        // Binder transaction codes
         const val CODE_PERFORM_PREDEFINED = 1
         const val CODE_PERFORM_WAVEFORM = 2
         const val CODE_PERFORM_ONESHOT = 3
@@ -74,7 +62,6 @@ class VibrateProxyService : Service() {
                                     vib.vibrate(VibrationEffect.createOneShot(dur, amp))
                                 }
                             } catch (e: Exception) {
-                                // OEMs may expose the API but reject individual predefined IDs.
                                 Log.w(TAG, "predefined effect $effectId rejected; using one-shot fallback: ${e.message}")
                                 vib.vibrate(VibrationEffect.createOneShot(dur, amp))
                             }
@@ -120,7 +107,6 @@ class VibrateProxyService : Service() {
                         reply?.writeInt(if (hasVib) 1 else 0)
                         return true
                     }
-                    // v3.10.20: Composition API — ColorOS/HyperOS deep adaptation
                     CODE_PERFORM_COMPOSITION -> {
                         val count = data.readInt()
                         val vib = vibrator
@@ -137,7 +123,6 @@ class VibrateProxyService : Service() {
                                 vib.vibrate(composition.compose())
                             } catch (e: Exception) {
                                 Log.w(TAG, "Composition failed, fallback: ${e.message}")
-                                // Fallback: fire one-shot with moderate intensity
                                 try {
                                     vib.vibrate(VibrationEffect.createOneShot(15L, 128))
                                 } catch (_: Exception) {}

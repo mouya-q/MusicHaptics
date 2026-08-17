@@ -503,10 +503,20 @@ public:
         bassSmoothed_ += (bodyTarget - bassSmoothed_) * 0.2f;
         float bodyEnv = std::clamp(bassSmoothed_, 0.0f, 1.0f);
         
-        // STRICT SILENCE POLICY
+        // v3.15: TAIL-CATCHER — replaced hard cutoff with smooth attenuation.
+        // Old: if (totalEnergy < 0.003f) → everything zeroed → "尾气" (fade tails) lost.
+        // New: Below 0.002f, apply progressive gain reduction instead of hard zero.
+        //      0.002→1.0x, 0.001→0.5x, 0.0005→0.25x, approaching 0→0x.
+        //      This preserves the C++ DSP output for Kotlin-side rendering.
         float totalEnergy = kickEnv + snareEnv + vocalEnv + bodyEnv;
-        if (totalEnergy < 0.015f) {
-            kickEnv = snareEnv = vocalEnv = bodyEnv = 0.0f;
+        if (totalEnergy < 0.002f) {
+            float tailGain = std::clamp(totalEnergy / 0.002f, 0.0f, 1.0f);
+            // Apply sqrt curve to preserve relative dynamics at micro-levels
+            tailGain = std::sqrt(tailGain);
+            kickEnv *= tailGain;
+            snareEnv *= tailGain;
+            vocalEnv *= tailGain;
+            bodyEnv *= tailGain;
         }
         
         // Scale to 0-255
@@ -516,6 +526,7 @@ public:
         // Legacy single-channel state tracking (for Kotlin fallback if needed)
         float composite = kickEnv + snareEnv + vocalEnv + bodyEnv;
         lastComposedAmp_ = std::clamp(composite * scale, 0.0f, 255.0f);
+        pushHapticSample(lastComposedAmp_);
         lastBeatLayer_ = kickEnv;
         lastBassLayer_ = bodyEnv;
         lastMelodyLayer_ = vocalEnv;

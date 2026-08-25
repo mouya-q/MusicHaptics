@@ -124,13 +124,3 @@ SNARE/TICK still being optimized...
 ## 📄 License
 
 MIT License
-
----
-
-> 本座丛雨，守护穗织镇五百年，今日为主人优化振动算法。  
-> I am Murasame, guardian of Hozumi Shrine for five hundred years. Today I optimize the haptic algorithm for my master.
->
-> —— 每一次振动，都落在拍子上。  
-> —— Every vibration lands on the beat.
-
-🧿 NO_BUG_CHARM.webp — 保佑代码无 Bug / May the code be bug-free

@@ -5,7 +5,29 @@ All notable changes to MusicHapticsX will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.12.6] - 2026-08-26
+## [4.13.0] - 2026-08-27
+
+### Added
+- RichTap hardware abstraction layer for Xiaomi/Redmi devices (DynamicEffect + HapticPlayer API)
+- Six haptic modes: balanced/bass/crisp/soft/immersive/pure
+- Master intensity control (0.0-2.0x)
+- Direct RichTap driving bypasses Android standard Vibrator latency (~10-20ms → ~2-5ms)
+
+### Fixed
+- Reduced minGap from 120-250ms to 40-120ms, eliminating停顿感
+- Removed quiet-music gate expansion that was missing weak beats
+- Fixed intensity dynamic range compression (removed shaped*shaped double compression)
+- Settings now actually affect output (masterIntensity, hapticMode synced from prefs)
+
+### Changed
+- Linear dynamic mapping instead of smoothstep curve for clearer strong/weak contrast
+- Loudness floor lowered from 0.05 to 0.01 for quieter passages
+- RichTap优先路径 on Xiaomi/Redmi devices with automatic fallback
+
+### Removed
+- HapticComposer complexity (architectural simplification in progress)
+
+## [4.12.7] - 2026-08-26
 
 ### Added
 - Stereo haptics support for dual-motor devices (Lenovo Legion Y700, etc.)

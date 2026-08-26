@@ -5,6 +5,21 @@ All notable changes to MusicHapticsX will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.12.5] - 2026-08-26
+
+### Changed
+- Tighter band filter separation for cleaner instrument detection
+- Adaptive threshold that tracks music energy dynamically
+- BPM-adaptive beat gate timing
+- Band dominance boosting for intensity calculation
+- Shorter, sharper vibration envelopes for KICK/SNARE/TICK
+
+### Fixed
+- Vibration not landing precisely on the beat
+- Music loudness not affecting vibration intensity
+
+---
+
 ## [4.12.4] - 2026-08-26
 
 ### Changed
@@ -140,6 +155,7 @@ KICK intensity=224 (87%)  rms=0.41723
 - EDM-specific vibration patterns
 - Custom haptic profile editor
 
+[4.12.5]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.5
 [4.12.4]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.4
 [4.12.3]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.3
 [4.12.2]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.2

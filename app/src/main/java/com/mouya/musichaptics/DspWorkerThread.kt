@@ -80,7 +80,11 @@ class DspWorkerThread(
     // Rhythm pattern: track last 8 beats for pattern detection
     private var beatCount = 0
 
-    // v9.2: Peak followers for RELATIVE dynamics (the real strong/weak contrast)
+// v10: Adaptive threshold - tracks music energy dynamically
+    private var adaptiveThreshold = 0.02f
+    private val thresholdAlpha = 0.03f
+
+    // v10: Peak followers for RELATIVE dynamics (the real strong/weak contrast)
     private var peakLow = 0f
     private var peakMid = 0f
     private var peakHigh = 0f
@@ -95,10 +99,10 @@ class DspWorkerThread(
     @Volatile var energyThreshold: Float = 0.005f
     @Volatile var userGainOverride: Float = 1.0f
 
-    // Band filters
-    private val lowAlpha = 0.06f
-    private val midHpAlpha = 0.08f
-    private val midLpAlpha = 0.45f
+    // Band filters - v10: tighter separation
+    private val lowAlpha = 0.04f      // Lower cutoff for cleaner bass
+    private val midHpAlpha = 0.06f    // High-pass for mid
+    private val midLpAlpha = 0.35f    // Low-pass for mid (narrower band)
 
     fun start() {
         if (running) return
@@ -107,7 +111,7 @@ class DspWorkerThread(
         thread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
 
-            Log.i(TAG, "DSP Worker v9.2 started — proportional peak decay + beat gate")
+            Log.i(TAG, "DSP Worker v10 started — adaptive threshold + BPM-adaptive gate")
             Log.i(TAG, "[DSP-CAL] framePeriod=${"%.2f".format(framePeriodMs)}ms")
 
             var nextWakeNs = System.nanoTime() + framePeriodNs
@@ -185,6 +189,9 @@ class DspWorkerThread(
         bassEma = 0.94f * bassEma + 0.06f * rmsLow
         midEma = 0.94f * midEma + 0.06f * rmsMid
         highEma = 0.95f * highEma + 0.05f * rmsHigh
+
+        // v10: Adaptive threshold tracks music energy
+        adaptiveThreshold = max(0.005f, (1f - thresholdAlpha) * adaptiveThreshold + thresholdAlpha * rmsFull * 0.3f)
     }
 
     private fun addBpmSample(bpm: Float) {
@@ -207,11 +214,13 @@ class DspWorkerThread(
     private fun detectBeat() {
         val now = SystemClock.elapsedRealtime()
 
-        // --- 1. Global beat gate ---
-        val minGap = if (smoothedBpm > 140f) 200L else 195L
+        // --- 1. Global beat gate with BPM-adaptive timing ---
+        val bpmFactor = if (smoothedBpm > 0f) smoothedBpm / 120f else 1f
+        val minGap = (195f / bpmFactor).toLong().coerceIn(120L, 250L)
         if (lastBeatTimeMs > 0 && now - lastBeatTimeMs < minGap) return
 
-        val effectiveThreshold = energyThreshold * globalGain * userGainOverride
+        // v10: Use adaptive threshold instead of fixed
+        val effectiveThreshold = adaptiveThreshold * globalGain * userGainOverride
 
         // --- 2. Rising-edge per band ---
         val lowDelta = max(0f, rmsLow - prevLowRms)
@@ -260,14 +269,24 @@ class DspWorkerThread(
         val dyn = 0.40f + 0.60f * rel          // 0.40..1.0
         val shaped = dyn * dyn * (3f - 2f * dyn)   // smoothstep
 
-        // --- 6. Intensity = music loudness × timbre base × dynamics ---
+        // --- 6. Intensity = music loudness × timbre base × band dominance × dynamics ---
         val timbreBase = when (beatType) {
             "KICK"  -> 1.00f
-            "SNARE" -> 0.72f
-            else    -> 0.42f
+            "SNARE" -> 0.78f
+            else    -> 0.48f
         }
         val loudness = rmsFull.coerceIn(0.05f, 1f)
-        val intensity = (255f * loudness * timbreBase * shaped).toInt().coerceIn(10, 255)
+
+        // v10: Band dominance - boost intensity when this band dominates the mix
+        val totalBandEnergy = rmsLow + rmsMid + rmsHigh
+        val bandDominance = when (beatType) {
+            "KICK"  -> if (totalBandEnergy > 0f) rmsLow / totalBandEnergy else 0.33f
+            "SNARE" -> if (totalBandEnergy > 0f) rmsMid / totalBandEnergy else 0.33f
+            else    -> if (totalBandEnergy > 0f) rmsHigh / totalBandEnergy else 0.33f
+        }
+        val dominanceBoost = 0.7f + 0.6f * bandDominance  // 0.7..1.3
+
+        val intensity = (255f * loudness * timbreBase * dominanceBoost * shaped).toInt().coerceIn(8, 255)
 
         hapticEngine.onKotlinBeatDetected(beatType, intensity, rmsFull)
         lastBeatTimeMs = now

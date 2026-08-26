@@ -89,34 +89,33 @@ class HapticEngine(
                 attackAmpFrac = 1.0f, sustainAmpFrac = 0.85f, decayAmpFrac = 0.40f,
                 weight = { it.subWeight }
             ),
-            // Strong punch: fast attack, shorter body.
+            // Strong punch: fast attack, shorter body - v10: tighter envelope
             "KICK" to BeatShape(
-                force = BeatTiming(13f, 50L, 90L),
-                ampCtrl = BeatTiming(7.5f, 20L, 50L),
-                plain = BeatTiming(11f, 35L, 70L),
-                ampBase = 220f, attackFrac = 0.20f, sustainFrac = 0.50f,
-                attackAmpFrac = 1.0f, sustainAmpFrac = 0.75f, decayAmpFrac = 0.30f,
+                force = BeatTiming(11f, 45L, 80L),
+                ampCtrl = BeatTiming(6f, 18L, 45L),
+                plain = BeatTiming(9f, 30L, 60L),
+                ampBase = 220f, attackFrac = 0.25f, sustainFrac = 0.40f,
+                attackAmpFrac = 1.0f, sustainAmpFrac = 0.65f, decayAmpFrac = 0.25f,
                 weight = { it.subWeight }
             ),
-            // Mid transient.
+            // Mid transient - v10: sharper attack
             "SNARE" to BeatShape(
-                force = BeatTiming(7.5f, 30L, 55L),
-                ampCtrl = BeatTiming(4.5f, 12L, 30L),
-                plain = BeatTiming(6.5f, 20L, 40L),
-                ampBase = 160f, attackFrac = 0.25f, sustainFrac = 0.45f,
-                attackAmpFrac = 1.0f, sustainAmpFrac = 0.60f, decayAmpFrac = 0.20f,
+                force = BeatTiming(6.5f, 25L, 50L),
+                ampCtrl = BeatTiming(4f, 10L, 28L),
+                plain = BeatTiming(5.5f, 18L, 38L),
+                ampBase = 170f, attackFrac = 0.30f, sustainFrac = 0.35f,
+                attackAmpFrac = 1.0f, sustainAmpFrac = 0.55f, decayAmpFrac = 0.18f,
                 weight = { it.midWeight }
             ),
-            // Light high-freq needle — two segments only (no sustain).
+            // Light high-freq needle - v10: even shorter
             "TICK" to BeatShape(
-                force = BeatTiming(3.5f, 12L, 25L),
-                ampCtrl = BeatTiming(1.8f, 5L, 15L),
-                plain = BeatTiming(2.8f, 8L, 20L),
-                ampBase = 80f, attackFrac = 0.40f, sustainFrac = 0f,
-                attackAmpFrac = 1.0f, decayAmpFrac = 0.30f,
+                force = BeatTiming(3f, 10L, 22L),
+                ampCtrl = BeatTiming(1.5f, 4L, 12L),
+                plain = BeatTiming(2.5f, 7L, 18L),
+                ampBase = 85f, attackFrac = 0.45f, sustainFrac = 0f,
+                attackAmpFrac = 1.0f, decayAmpFrac = 0.25f,
                 weight = { it.presenceWeight }
             ),
-            // Warm sustained — attack is quieter than the sustain (swell, not strike).
             "BODY" to BeatShape(
                 force = BeatTiming(9f, 35L, 60L),
                 ampCtrl = BeatTiming(3.5f, 12L, 25L),

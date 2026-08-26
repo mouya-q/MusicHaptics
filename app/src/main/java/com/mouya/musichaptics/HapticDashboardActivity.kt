@@ -1097,14 +1097,6 @@ fun IOSTelemetryCard(telemetry: TelemetrySnapshot, isMasterSwitchOn: Boolean) {
                 IOSWaveformDisplay(telemetry, isMasterSwitchOn, Modifier.fillMaxSize())
             }
         }
-        Row(Modifier.fillMaxWidth().height(90.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(
-                modifier = Modifier.weight(1f).height(90.dp).liquidGlass().padding(14.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("频谱与触觉动态", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            }
-        }
     }
 }
 

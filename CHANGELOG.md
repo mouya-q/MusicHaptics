@@ -5,6 +5,29 @@ All notable changes to MusicHapticsX will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.12.1] - 2026-08-26
+
+### Changed
+- **UI Cleanup**: Removed thermal model and loop attenuation panels (dead code)
+- **Waveform Fix**: Fixed idle motion using normalized threshold instead of pixel threshold
+  - Before: `amp > 0.5f` (pixel value) — idle drift branch never triggered
+  - After: `smoothedAmplitude > 0.08f` (normalized 0-1) — three-state waveform works correctly
+- **Font Removal**: Removed built-in PingFang font (saved 80MB)
+  - Now uses system default font (MiSans on Xiaomi devices)
+- **Project Slimming**: Removed unused Python scripts and backup files
+
+### Fixed
+- Waveform display showing flat line during quiet music passages
+- Idle drift animation never triggering due to wrong threshold type
+
+### Removed
+- `IOSThermalPanel` composable (no longer called)
+- `IOSAttenuationPanel` composable (no longer called)
+- Built-in `pingfang.ttf` (assets + res/font, 80MB total)
+- Unused Python scripts in project root
+
+---
+
 ## [4.12.0] - 2026-08-25
 
 ### Added
@@ -93,5 +116,6 @@ KICK intensity=224 (87%)  rms=0.41723
 - EDM-specific vibration patterns
 - Custom haptic profile editor
 
+[4.12.1]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.1
 [4.12.0]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.0
 [4.11.0]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.11.0

@@ -216,7 +216,13 @@ class DspWorkerThread(
 
         // --- 1. Global beat gate with BPM-adaptive timing ---
         val bpmFactor = if (smoothedBpm > 0f) smoothedBpm / 120f else 1f
-        val minGap = (195f / bpmFactor).toLong().coerceIn(120L, 250L)
+        var minGap = (195f / bpmFactor).toLong().coerceIn(120L, 250L)
+        
+        // v4.12.7: Stricter gate for quiet music - reduce noise-triggered beats
+        if (rmsFull < 0.15f) {
+            minGap = (minGap * 1.5f).toLong().coerceIn(150L, 300L)
+        }
+        
         if (lastBeatTimeMs > 0 && now - lastBeatTimeMs < minGap) return
 
         // v10: Use adaptive threshold instead of fixed
@@ -284,16 +290,17 @@ class DspWorkerThread(
             "SNARE" -> if (totalBandEnergy > 0f) rmsMid / totalBandEnergy else 0.33f
             else    -> if (totalBandEnergy > 0f) rmsHigh / totalBandEnergy else 0.33f
         }
-        val dominanceBoost = 0.7f + 0.6f * bandDominance  // 0.7..1.3
+        val dominanceBoost = 0.7f + 0.6f * bandDominance
 
-        val intensity = (255f * loudness * timbreBase * dominanceBoost * shaped).toInt().coerceIn(8, 255)
+        // v4.12.7: Stronger dynamics curve - more contrast between strong and weak beats
+        val intensity = (255f * loudness * timbreBase * dominanceBoost * shaped * shaped).toInt().coerceIn(1, 255)
 
         hapticEngine.onKotlinBeatDetected(beatType, intensity, rmsFull)
         lastBeatTimeMs = now
         lastBeatType = beatType
         beatCount++
 
-        Log.i(TAG, "[BEAT-v9.2] #$beatCount $beatType intensity=$intensity " +
+        Log.i(TAG, "[BEAT-v11] #$beatCount $beatType intensity=$intensity " +
             "rel=${"%.2f".format(rel)} delta=${"%.4f".format(delta)} " +
             "peak=${"%.4f".format(peakDelta)}")
     }

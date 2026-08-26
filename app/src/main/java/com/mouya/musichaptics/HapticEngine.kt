@@ -631,7 +631,7 @@ class HapticEngine(
         try {
             val maxAmp = deviceProfile.maxAmplitude
             val normalized = (intensity.coerceIn(0, 255) / 255f).coerceIn(0.1f, 1.0f)
-            val msg = "[Beat] TRIGGER event=$event intensity=$intensity (${(normalized * 100).toInt()}%) ampCtrl=$ampCtrl forceDefault=$forceDefault maxAmp=$maxAmp riseMs=${act.riseTimeMs} totalDur=${totalDur}ms primitives: click=${vibrateProxy.primitiveClickSupported} tick=${vibrateProxy.primitiveTickSupported} heavy=${vibrateProxy.primitiveHeavyClickSupported}"
+            val msg = "[Beat] TRIGGER event=$event intensity=$intensity (${(normalized * 100).toInt()}%) ampCtrl=$ampCtrl forceDefault=$forceDefault maxAmp=$maxAmp riseMs=${act.riseTimeMs} totalDur=${totalDur}ms q=${act.qFactor} primitives: click=${vibrateProxy.primitiveClickSupported} tick=${vibrateProxy.primitiveTickSupported} heavy=${vibrateProxy.primitiveHeavyClickSupported}"
             Log.i(TAG, msg)
             LogBroadcaster.sendLog(context, msg)
 

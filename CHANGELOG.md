@@ -11,11 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stereo haptics support for dual-motor devices (Lenovo Legion Y700, etc.)
 - Spatial vibration routing: KICK spreads across both motors, TICK routes to secondary motor
 
+### Fixed
+- SNARE/TICK intensity incorrectly clamped to minimum 10%, now uses full 1-255 range
+- Quiet music no longer triggers excessive beats (adaptive gate timing)
+- q factor now logged in beat trigger messages for diagnostics
+
 ### Changed
 - VibrateProxy now detects and manages secondary vibrator via VibratorManager API
 - HapticEngine routes beats to appropriate motor(s) based on frequency content
-
----
+- Stronger dynamics curve for more contrast between strong and weak beats
 
 ## [4.12.5] - 2026-08-26
 

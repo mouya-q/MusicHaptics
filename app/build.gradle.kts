@@ -12,8 +12,8 @@ android {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
         targetSdk = 34
-        versionCode = 41201
-        versionName = "4.12.1"
+        versionCode = 41202
+        versionName = "4.12.2"
         ndkVersion = "27.0.12077973"
         // C++ 编译通过手动 CMake 完成，.so 要放到 jniLibs
         // externalNativeBuild 在 proot 环境下有 compile_commands.json 原子重命名 bug

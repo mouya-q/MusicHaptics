@@ -80,13 +80,14 @@ class DspWorkerThread(
     // Rhythm pattern: track last 8 beats for pattern detection
     private var beatCount = 0
 
-    // v9: Peak followers for RELATIVE dynamics (the real strong/weak contrast)
+    // v9.2: Peak followers for RELATIVE dynamics (the real strong/weak contrast)
     private var peakLow = 0f
     private var peakMid = 0f
     private var peakHigh = 0f
-    // Fast decay: ~0.5s to 50% @200Hz → 0.5/100 = 0.005
-    // This lets each hit's rel value reflect its true strength vs recent context
-    private val peakDecay = 0.005f
+    // Proportional decay: 0.9965/frame @200Hz → halflife ≈ 1s.
+    // ponytail: multiplicative decay keeps ratio semantics across bands;
+    // absolute decay wiped small mid/high peaks in <300ms → constant SNARE/TICK intensity
+    private val peakDecayFactor = 0.9965f
 
     // Gain settings
     @Volatile var globalGain: Float = 0.5f
@@ -106,7 +107,7 @@ class DspWorkerThread(
         thread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
 
-            Log.i(TAG, "DSP Worker v9.0 started — timbre dynamics + beat gate")
+            Log.i(TAG, "DSP Worker v9.2 started — proportional peak decay + beat gate")
             Log.i(TAG, "[DSP-CAL] framePeriod=${"%.2f".format(framePeriodMs)}ms")
 
             var nextWakeNs = System.nanoTime() + framePeriodNs
@@ -120,10 +121,10 @@ class DspWorkerThread(
 
                     analyzeFrame(framesRead)
 
-                    // v9: peak followers decay every frame
-                    peakLow = max(peakLow - peakDecay, 0f)
-                    peakMid = max(peakMid - peakDecay, 0f)
-                    peakHigh = max(peakHigh - peakDecay, 0f)
+                    // v9.2: peak followers decay every frame (proportional, not absolute)
+                    peakLow = max(peakLow * peakDecayFactor, 0f)
+                    peakMid = max(peakMid * peakDecayFactor, 0f)
+                    peakHigh = max(peakHigh * peakDecayFactor, 0f)
 
                     detectBeat()
 
@@ -207,7 +208,7 @@ class DspWorkerThread(
         val now = SystemClock.elapsedRealtime()
 
         // --- 1. Global beat gate ---
-        val minGap = if (smoothedBpm > 140f) 330L else 195L
+        val minGap = if (smoothedBpm > 140f) 200L else 195L
         if (lastBeatTimeMs > 0 && now - lastBeatTimeMs < minGap) return
 
         val effectiveThreshold = energyThreshold * globalGain * userGainOverride
@@ -239,6 +240,11 @@ class DspWorkerThread(
         }
 
         // --- 4. Peak follower on DELTA (not level!) ---
+        // v9.3: proportional decay so peak follows recent strongest attack
+        peakLow = max(peakLow * 0.995f, 0.001f)
+        peakMid = max(peakMid * 0.995f, 0.001f)
+        peakHigh = max(peakHigh * 0.995f, 0.001f)
+
         val peakDelta: Float
         when (beatType) {
             "KICK"  -> { peakDelta = max(peakLow, delta); peakLow = peakDelta }
@@ -267,7 +273,7 @@ class DspWorkerThread(
         lastBeatType = beatType
         beatCount++
 
-        Log.i(TAG, "[BEAT-v9.1] #$beatCount $beatType intensity=$intensity " +
+        Log.i(TAG, "[BEAT-v9.2] #$beatCount $beatType intensity=$intensity " +
             "rel=${"%.2f".format(rel)} delta=${"%.4f".format(delta)} " +
             "peak=${"%.4f".format(peakDelta)}")
     }

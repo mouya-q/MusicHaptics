@@ -5,6 +5,19 @@ All notable changes to MusicHapticsX will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.12.2] - 2026-08-26
+
+### Changed
+- Fast song beat interval: 330ms → 200ms
+- Peak follower now has proportional decay for SNARE/TICK dynamics
+
+### Fixed
+- Waveform display appearing twice in UI
+- SNARE stuck at constant 71% intensity
+- TICK stuck at constant 41% intensity
+
+---
+
 ## [4.12.1] - 2026-08-26
 
 ### Added
@@ -109,6 +122,7 @@ KICK intensity=224 (87%)  rms=0.41723
 - EDM-specific vibration patterns
 - Custom haptic profile editor
 
+[4.12.2]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.2
 [4.12.1]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.1
 [4.12.0]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.0
 [4.11.0]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.11.0

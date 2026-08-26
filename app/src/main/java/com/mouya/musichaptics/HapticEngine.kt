@@ -667,8 +667,32 @@ class HapticEngine(
             LogBroadcaster.sendLog(context,
                 "[Beat] $event → performEnvelope${segments.size}seg total=${totalDur}ms " +
                 "a/s/d=$attack/$sustain/$decay amp=$amp q=${act.qFactor} qShape=${"%.2f".format(qShape)} " +
-                "forceDefault=$forceDefault")
-            vibrateProxy.performEnvelope(segments)
+                "forceDefault=$forceDefault stereo=${vibrateProxy.hasStereoVibrator}")
+
+            // v4.12.5: Stereo haptics routing for dual-motor devices
+            if (vibrateProxy.hasStereoVibrator) {
+                val stereoDelay = when (event.uppercase()) {
+                    "KICK" -> 5L   // Sub-bass: slight delay on secondary for spatial spread
+                    "SNARE" -> 0L  // Mid: simultaneous both motors
+                    "TICK" -> 0L   // High: secondary only, primary silent
+                    else -> 0L
+                }
+                val secSegments = when (event.uppercase()) {
+                    "KICK" -> buildList {
+                        val secAmp = (amp * 0.4f).toInt().coerceIn(1, maxAmp)
+                        add(attack to if (forceDefault) VibrationEffect.DEFAULT_AMPLITUDE else secAmp)
+                        if (shape.hasSustain) add(sustain to if (forceDefault) VibrationEffect.DEFAULT_AMPLITUDE else (secAmp * 0.6f).toInt().coerceIn(1, maxAmp))
+                        add(decay to if (forceDefault) VibrationEffect.DEFAULT_AMPLITUDE else (secAmp * 0.3f).toInt().coerceIn(1, maxAmp))
+                    }
+                    "SNARE" -> segments // Same envelope on secondary
+                    "TICK" -> segments  // TICK goes to secondary motor
+                    else -> emptyList()
+                }
+                val primarySegs = if (event.uppercase() == "TICK") emptyList() else segments
+                vibrateProxy.performStereoEnvelope(primarySegs, secSegments, stereoDelay)
+            } else {
+                vibrateProxy.performEnvelope(segments)
+            }
 
             lastBeatEvent = event
         } catch (e: Exception) {

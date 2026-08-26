@@ -5,6 +5,18 @@ All notable changes to MusicHapticsX will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.12.6] - 2026-08-26
+
+### Added
+- Stereo haptics support for dual-motor devices (Lenovo Legion Y700, etc.)
+- Spatial vibration routing: KICK spreads across both motors, TICK routes to secondary motor
+
+### Changed
+- VibrateProxy now detects and manages secondary vibrator via VibratorManager API
+- HapticEngine routes beats to appropriate motor(s) based on frequency content
+
+---
+
 ## [4.12.5] - 2026-08-26
 
 ### Changed
@@ -155,6 +167,7 @@ KICK intensity=224 (87%)  rms=0.41723
 - EDM-specific vibration patterns
 - Custom haptic profile editor
 
+[4.12.6]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.6
 [4.12.5]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.5
 [4.12.4]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.4
 [4.12.3]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.3

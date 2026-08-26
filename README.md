@@ -36,6 +36,9 @@ In short: **Your music vibrates, but this time it's on beat.**
 - **全局节拍门控** — 振动最少间隔 195ms
 - **Global Beat Gate** — Minimum 195ms interval
 
+- **立体振动** — 双马达设备空间振动（联想拯救者Y700等）
+- **Stereo Haptics** — Spatial vibration for dual-motor devices
+
 ## 技术细节 / Technical Details
 
 ```kotlin
@@ -54,15 +57,15 @@ rel = peakDelta / (peakLow + 0.01f)
 
 ## 版本历史 / Version History
 
+- **v4.12.7** (2026-08-26) — SNARE/TICK 动态范围修复 / SNARE/TICK dynamic range fix
+- **v4.12.6** (2026-08-26) — 立体振动支持 / Stereo haptics support
+- **v4.12.5** (2026-08-26) — 音频分析大修 / Audio analysis overhaul
 - **v4.12.2** (2026-08-26) — 修复 SNARE/TICK 动态，快歌间隔优化 / Fixed SNARE/TICK dynamics, fast song interval
 - **v4.12.1** (2026-08-26) — UI 清理，波形修复，移除内置字体 / UI cleanup, waveform fix, font removal
 - **v4.12.0** (2026-08-25) — 节奏感知引擎 v9.1，峰值跟随器修复 / Rhythm engine v9.1, peak follower fix
 - **v4.11.0** (2026-08-20) — 初始版本 / Initial release
 
 ## 已知问题 / Known Issues
-
-- SNARE/TICK 的强度动态范围仍需优化
-- SNARE/TICK intensity dynamic range needs further optimization
 
 - 某些曲风（如电子舞曲）的振动密度可以进一步优化
 - Vibration density for certain genres (e.g., EDM) can be further improved

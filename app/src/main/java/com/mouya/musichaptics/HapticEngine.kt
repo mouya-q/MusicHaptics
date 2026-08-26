@@ -572,6 +572,8 @@ class HapticEngine(
         val msg = "[KL-BEAT] TRIGGER event=$event intensity=$intensity rms=${"%.5f".format(rms)}"
         Log.i(TAG, msg)
         LogBroadcaster.sendLog(context, msg)
+        TelemetryHub.adsrEnvelope = intensity / 255f
+        TelemetryHub.lraForce = intensity / 255f
         triggerBeatVibration(event, intensity)
     }
 

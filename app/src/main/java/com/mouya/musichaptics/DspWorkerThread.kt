@@ -260,13 +260,14 @@ class DspWorkerThread(
         val dyn = 0.40f + 0.60f * rel          // 0.40..1.0
         val shaped = dyn * dyn * (3f - 2f * dyn)   // smoothstep
 
-        // --- 6. Intensity = timbre base × dynamics ---
+        // --- 6. Intensity = music loudness × timbre base × dynamics ---
         val timbreBase = when (beatType) {
             "KICK"  -> 1.00f
             "SNARE" -> 0.72f
             else    -> 0.42f
         }
-        val intensity = (255f * timbreBase * shaped).toInt().coerceIn(25, 255)
+        val loudness = rmsFull.coerceIn(0.05f, 1f)
+        val intensity = (255f * loudness * timbreBase * shaped).toInt().coerceIn(10, 255)
 
         hapticEngine.onKotlinBeatDetected(beatType, intensity, rmsFull)
         lastBeatTimeMs = now

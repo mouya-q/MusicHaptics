@@ -48,19 +48,9 @@ peakDelta = rmsLow - peakLow
 rel = peakDelta / (peakLow + 0.01f)
 ```
 
-**为什么之前是假的？ / Why was it fake before?**
+修复了峰值跟随器跟踪 RMS 电平导致强度恒定的问题。现在跟踪攻击量（delta），KICK 有了真实的动态变化：255, 199, 89, 224...
 
-日志实锤：TICK 恒定 107 (41%)，SNARE 恒定 183 (71%)。
-
-Log evidence: TICK stuck at 107 (41%), SNARE stuck at 183 (71%).
-
-原因：峰值跟随器跟踪了 RMS 电平，而 RMS 几乎恒定（0.17±0.01），导致 `rel = rmsLow / peakLow ≈ 1.0`，永远是最大值。
-
-Cause: The peak follower tracked RMS level, but RMS was nearly constant (0.17±0.01), making `rel = rmsLow / peakLow ≈ 1.0` — always maxed out.
-
-**修复后：** 跟踪攻击量（delta），只有真正的"冲击"才会触发高强度振动。
-
-**After fix:** Tracking attack delta — only real "impacts" trigger high-intensity haptics.
+Fixed peak follower tracking RMS level which caused constant intensity. Now tracking attack delta — KICK has real dynamics: 255, 199, 89, 224...
 
 ### 振动触发条件 / Beat Trigger Condition
 
@@ -102,7 +92,7 @@ SNARE/TICK still being optimized...
 
 1. 安装 APK / Install APK
 2. 在目标音乐播放器中启用模块 / Enable module in target music player
-3. 享受节奏感振动 / Enjoy rhythm-synced haptics
+3. 感受节奏感振动 / Enjoy rhythm-synced haptics
 
 ## 📝 版本历史 / Version History
 

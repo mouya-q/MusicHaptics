@@ -7,24 +7,20 @@ plugins {
 android {
     namespace = "com.mouya.musichaptics"
     compileSdk = 34
-    
-    // NDK 26 was partially installed in the build environment (clang was missing).
-    // Use the complete installed NDK so externalNativeBuild is reproducible.
-    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
         targetSdk = 34
-        versionCode = 440
-        versionName = "3.13.0-semantic-alpha"
-
-        // externalNativeBuild {
-        //     cmake {
-        //         abiFilters += "arm64-v8a"
-        //     }
-        // }
+        versionCode = 41201
+        versionName = "4.12.1"
+        ndkVersion = "27.0.12077973"
+        // C++ 编译通过手动 CMake 完成，.so 要放到 jniLibs
+        // externalNativeBuild 在 proot 环境下有 compile_commands.json 原子重命名 bug
     }
+    
+    // externalNativeBuild 已禁用，.so 自行管理
+
 
     buildFeatures {
         compose = true
@@ -43,13 +39,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    // Native libraries were bundled from src/main/jniLibs, but now we compile them:
-    // externalNativeBuild {
-    //     cmake {
-    //         path("src/main/cpp/CMakeLists.txt")
-    //         version = "3.22.1"
-    //     }
-    // }
 
     sourceSets.configureEach {
         if (name == "main") {
@@ -75,9 +64,6 @@ android {
 
 dependencies {
     compileOnly("de.robv.android.xposed:api:82")
-    // Official modern LSPosed Service API binaries. Kept locally because their
-    // published AAR metadata requires compileSdk 36, while this module is built
-    // against API 34 for the installed AndroidIDE/AAPT2 toolchain.
     implementation(files("libs/libxposed-interface-101.0.0.aar"))
     implementation(files("libs/libxposed-service-101.0.0.aar"))
     implementation("androidx.core:core-ktx:1.13.1")
@@ -96,9 +82,7 @@ dependencies {
     implementation("androidx.interpolator:interpolator:1.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
-    // AGSL RuntimeShader support for liquid glass effects - use older compatible version
     implementation("androidx.graphics:graphics-core:1.0.0")
-    // Haze blur (librepods style)
     implementation("dev.chrisbanes.haze:haze:1.5.0")
 
     configurations.all {

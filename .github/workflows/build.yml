@@ -35,31 +35,22 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
       
-      - name: Setup keystore for signing
+      - name: Setup fixed debug keystore for consistent signing
         run: |
-          echo 'STORE_PASS=android' >> gradle.properties
-          echo 'KEYSTORE_FILE=app/debug.keystore' >> gradle.properties
-          echo 'KEYALIAS=androiddebugkey' >> gradle.properties
-          echo 'KEY_PASS=android' >> gradle.properties
-          cat gradle.properties
+          mkdir -p ~/.android
+          cp app/debug.keystore ~/.android/debug.keystore
+          echo "Fixed debug.keystore copied to ~/.android/"
+          ls -la ~/.android/debug.keystore
       
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
         env:
           GRADLE_OPTS: "-Xmx4096m"
-          STORE_PASS: android
-          KEYSTORE_FILE: app/debug.keystore
-          KEYALIAS: androiddebugkey
-          KEY_PASS: android
       
       - name: Build Release APK
         run: ./gradlew assembleRelease --stacktrace
         env:
           GRADLE_OPTS: "-Xmx4096m"
-          STORE_PASS: android
-          KEYSTORE_FILE: app/debug.keystore
-          KEYALIAS: androiddebugkey
-          KEY_PASS: android
       
       - name: Upload Debug APK - with fixed signature
         uses: actions/upload-artifact@v4

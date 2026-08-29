@@ -342,6 +342,18 @@ public:
         airHp_.setHighPass(sampleRate, 8000.0f);
     }
 
+    // Portable horizontal sum of a float32x4_t.
+    // vaddvq_f32 is aarch64-only; on armeabi-v7a use pairwise add (vpadd).
+    static inline float neonReduceF32(float32x4_t v) {
+#if defined(__aarch64__)
+        return vaddvq_f32(v);
+#else
+        float32x2_t s = vadd_f32(vget_low_f32(v), vget_high_f32(v));
+        s = vpadd_f32(s, s);
+        return vget_lane_f32(s, 0);
+#endif
+    }
+
     static float computeRmsNeon(const float* buffer, int size) {
         if (size <= 0) return 0.0f;
         int i = 0;
@@ -350,7 +362,7 @@ public:
             float32x4_t vIn = vld1q_f32(buffer + i);
             vSum = vmlaq_f32(vSum, vIn, vIn);
         }
-        float sum = vaddvq_f32(vSum);
+        float sum = neonReduceF32(vSum);
         for (; i < size; ++i) {
             sum += buffer[i] * buffer[i];
         }
@@ -381,7 +393,7 @@ public:
                 float32x4_t vB = vld1q_f32(lagged + i);
                 vSum = vmlaq_f32(vSum, vA, vB);
             }
-            corr = vaddvq_f32(vSum);
+            corr = neonReduceF32(vSum);
             for (; i < size; ++i) {
                 corr += base[i] * lagged[i];
             }

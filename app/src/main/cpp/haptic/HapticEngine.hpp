@@ -452,10 +452,10 @@ public:
         float subRms = computeRmsNeon(subOutput_, size);
         float midRms = computeRmsNeon(midOutput_, size);
         float textureRms = computeRmsNeon(textureOutput_, size);
-        // v4.14: Cap texture channel at 15% to avoid motor noise floor pollution.
-        // iOS Taptic Engine keeps micro-texture very subtle; excessive texture
-        // makes the motor feel "fuzzy" and masks clean transient events.
-        textureRms = std::min(textureRms, 0.15f);
+        // v4.21: Lowered cap from 0.15f to 0.05f to avoid "一直震" (constant vibration).
+        // texture channel contains most music content (200Hz+), so it's always high.
+        // It should only add micro-texture, not drive volume envelope.
+        textureRms = std::min(textureRms, 0.05f);
         const float invSize = 1.0f / static_cast<float>(size);
         float bassBand = std::sqrt(bassSq * invSize);
         float lowMidBand = std::sqrt(lowMidSq * invSize);
@@ -677,23 +677,28 @@ public:
         float kickEnv = std::max(0.0f, subRms - prevSubRms_) * 6.0f * kickProbability_;  // lowered from 8.0f
         kickEnv = std::clamp(kickEnv, 0.0f, 1.0f);
         
-        // 2. Snare Track: Snap transient
-        float snareEnv = (midRms * 1.2f + textureRms * 1.0f) * snareProbability_;  // lowered texture weight
-        snareEnv = std::clamp(snareEnv, 0.0f, 1.0f);
+        // 2. Snare Track: Snap transient (NO texture component to avoid constant vibration)
+        // v4.21: Lowered snare gain to avoid "一直震"
+        float snareEnv = midRms * 0.5f * snareProbability_;  // added 0.5f gain reduction
+        snareEnv = std::clamp(snareEnv, 0.0f, 0.60f);  // hard cap at 60%
         
         // 3. Vocal Track: Long-sustain low-pass envelope (capped to avoid constant vibration)
-        float vocalTarget = (midRms * 0.5f + textureRms * 0.15f) * vocalProbability_;  // lowered weights
-        vocalEnvelope_ += (vocalTarget - vocalEnvelope_) * 0.10f;  // slower attack
-        float vocalEnv = std::clamp(vocalEnvelope_, 0.0f, 0.4f);  // hard cap at 40%
+        // v4.20.1: Removed textureRms component to avoid "一直震" (constant vibration)
+        // v4.21: Further lowered vocal gain
+        float vocalTarget = midRms * 0.15f * vocalProbability_;  // lowered from 0.3f to 0.15f
+        vocalEnvelope_ += (vocalTarget - vocalEnvelope_) * 0.20f;  // slower attack (was 0.25f)
+        float vocalEnv = std::clamp(vocalEnvelope_, 0.0f, 0.10f);  // lowered cap from 0.20f to 0.10f
         
         // 4. Body (Background Rumble) - capped to avoid continuous rumble
-        float bodyTarget = (subRms * 0.3f + midRms * 0.1f) * bassSustainProbability_;  // lowered weights
-        bassSmoothed_ += (bodyTarget - bassSmoothed_) * 0.15f;  // slower attack
-        float bodyEnv = std::clamp(bassSmoothed_, 0.0f, 0.25f);  // hard cap at 25%
+        // v4.21: Lowered body gain further
+        float bodyTarget = subRms * 0.08f * bassSustainProbability_;  // lowered from 0.15f to 0.08f
+        bassSmoothed_ += (bodyTarget - bassSmoothed_) * 0.20f;  // slower attack (was 0.25f)
+        float bodyEnv = std::clamp(bassSmoothed_, 0.0f, 0.05f);  // lowered cap from 0.10f to 0.05f
         
         // v4.20: Volume envelope modulation — scale all layers by overall music volume
         // This ensures haptic amplitude follows the music's dynamic range
-        float overallVolume = std::clamp((subRms + midRms + textureRms) / 3.0f, 0.0f, 1.0f);
+        // v4.21: Removed textureRms from overallVolume calculation to avoid "一直震"
+        float overallVolume = std::clamp((subRms + midRms) / 2.0f, 0.0f, 1.0f);
         // Apply sqrt curve to preserve relative dynamics at micro-levels
         float volumeMod = std::sqrt(overallVolume);
         kickEnv *= volumeMod;

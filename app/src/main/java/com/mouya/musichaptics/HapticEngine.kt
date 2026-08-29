@@ -72,11 +72,11 @@ class HapticEngine(
             ),
             
             "KICK" to BeatShape(
-                force = BeatTiming(13f, 50L, 90L),
-                ampCtrl = BeatTiming(7.5f, 20L, 50L),
-                plain = BeatTiming(11f, 35L, 70L),
-                ampBase = 220f, attackFrac = 0.20f, sustainFrac = 0.50f,
-                attackAmpFrac = 1.0f, sustainAmpFrac = 0.75f, decayAmpFrac = 0.30f,
+                force = BeatTiming(4f, 30L, 50L),
+                ampCtrl = BeatTiming(3f, 15L, 40L),
+                plain = BeatTiming(3.5f, 20L, 45L),
+                ampBase = 255f, attackFrac = 0.08f, sustainFrac = 0.25f,
+                attackAmpFrac = 1.0f, sustainAmpFrac = 0.60f, decayAmpFrac = 0.15f,
                 weight = { it.subWeight }
             ),
             

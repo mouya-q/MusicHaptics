@@ -20,7 +20,9 @@ android {
         // DSP 引擎使用 ARM NEON SIMD 指令，仅支持 ARM 架构（arm64-v8a / armeabi-v7a）。
         // x86/x86_64 设备在现代 Android 生态中极少，且本项目目标设备（小米 10）为 arm64。
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            // Only arm64-v8a for modern devices (Xiaomi 10 is arm64)
+            // This reduces APK size by ~50%
+            abiFilters += listOf("arm64-v8a")
         }
     }
 

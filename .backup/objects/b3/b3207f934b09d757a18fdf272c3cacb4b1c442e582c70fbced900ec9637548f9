@@ -1,0 +1,299 @@
+package com.mouya.musichaptics
+
+import android.os.Process
+import android.os.SystemClock
+import android.util.Log
+import kotlin.math.sqrt
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
+
+/**
+ * Dedicated DSP Worker Thread.
+ * Runs at THREAD_PRIORITY_URGENT_AUDIO for real-time processing.
+ * Pulls PCM from PcmFifo at fixed 5ms intervals (200Hz), processes DSP,
+ * and feeds native engine / onset ring buffer.
+ *
+ * v6.0: Precision rhythm-aware haptic — true musical vibration
+ * - Stable BPM detection with multi-sample averaging
+ * - Dynamic intensity mapping with proper headroom
+ * - True "strong-weak-weak-strong" rhythm pattern
+ * - Vibrations land precisely on the beat
+ */
+class DspWorkerThread(
+    private val pcmFifo: PcmFifo,
+    private val nativeBridge: NativeBridge,
+    private val hapticEngine: HapticEngine,
+    private val deviceProfile: DeviceProfile = DeviceProfile.DEFAULT,
+    private val frameSize: Int = 256,
+    private val sampleRate: Int = 48000
+) {
+    private val TAG = "DspWorkerThread"
+
+    private val framePeriodNs: Long = (frameSize.toLong() * 1_000_000_000L) / sampleRate.toLong()
+    private val framePeriodMs: Float = frameSize.toFloat() / sampleRate.toFloat() * 1000f
+
+    @Volatile private var running = false
+    private var thread: Thread? = null
+
+    private val processFrame = FloatArray(frameSize)
+
+    private val directPcmBuffer = java.nio.ByteBuffer.allocateDirect(frameSize * 4).apply {
+        java.nio.ByteOrder.nativeOrder()
+    }
+    private val floatPcmView = directPcmBuffer.asFloatBuffer()
+
+    // Multi-band energy analysis
+    private var lowBandState = 0f
+    private var midBandState = 0f
+    private var highBandState = 0f
+    private var prevLowRms = 0f
+    private var prevMidRms = 0f
+    private var prevHighRms = 0f
+    private var prevFullRms = 0f
+
+    // RMS values
+    private var rmsFull = 0f
+    private var rmsLow = 0f
+    private var rmsMid = 0f
+    private var rmsHigh = 0f
+
+    // EMA for baseline
+    private var rmsEma = 0f
+    private var bassEma = 0f
+    private var midEma = 0f
+    private var highEma = 0f
+
+    // Beat detection state
+    private var dspFrameCount = 0
+    private var totalFramesRead = 0L
+    private var lastBeatType = ""
+    private var lastBeatTimeMs = 0L
+
+    // BPM detection with smoothing
+    private var estimatedBpm = 0f
+    private var bpmHistory = FloatArray(8)
+    private var bpmHistoryCount = 0
+    private var smoothedBpm = 0f
+
+    // Rhythm pattern: track last 8 beats for pattern detection
+    private var beatCount = 0
+
+// v10: Adaptive threshold - tracks music energy dynamically
+    private var adaptiveThreshold = 0.02f
+    private val thresholdAlpha = 0.03f
+
+    // v10: Peak followers for RELATIVE dynamics (the real strong/weak contrast)
+    private var peakLow = 0f
+    private var peakMid = 0f
+    private var peakHigh = 0f
+    // Proportional decay: 0.9965/frame @200Hz → halflife ≈ 1s.
+    // ponytail: multiplicative decay keeps ratio semantics across bands;
+    // absolute decay wiped small mid/high peaks in <300ms → constant SNARE/TICK intensity
+    private val peakDecayFactor = 0.9965f
+
+    // Gain settings
+    @Volatile var globalGain: Float = 0.5f
+    @Volatile var bassBoost: Float = 1.0f
+    @Volatile var energyThreshold: Float = 0.005f
+    @Volatile var userGainOverride: Float = 1.0f
+
+    // Band filters - v10: tighter separation
+    private val lowAlpha = 0.04f      // Lower cutoff for cleaner bass
+    private val midHpAlpha = 0.06f    // High-pass for mid
+    private val midLpAlpha = 0.35f    // Low-pass for mid (narrower band)
+
+    fun start() {
+        if (running) return
+        running = true
+
+        thread = Thread({
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+
+            Log.i(TAG, "DSP Worker v9.2 started — proportional peak decay + beat gate")
+            Log.i(TAG, "[DSP-CAL] framePeriod=${"%.2f".format(framePeriodMs)}ms")
+
+            var nextWakeNs = System.nanoTime() + framePeriodNs
+
+            while (running) {
+                val framesRead = pcmFifo.read(processFrame, frameSize)
+
+                if (framesRead > 0) {
+                    totalFramesRead += framesRead
+                    dspFrameCount++
+
+                    analyzeFrame(framesRead)
+
+                    // v9.2: peak followers decay every frame (proportional, not absolute)
+                    peakLow = max(peakLow * peakDecayFactor, 0f)
+                    peakMid = max(peakMid * peakDecayFactor, 0f)
+                    peakHigh = max(peakHigh * peakDecayFactor, 0f)
+
+                    detectBeat()
+
+                    prevLowRms = rmsLow
+                    prevMidRms = rmsMid
+                    prevHighRms = rmsHigh
+                    prevFullRms = rmsFull
+                }
+
+                nextWakeNs += framePeriodNs
+                val sleepNs = nextWakeNs - System.nanoTime()
+                if (sleepNs > 0) {
+                    try {
+                        Thread.sleep(sleepNs / 1_000_000, (sleepNs % 1_000_000).toInt())
+                    } catch (e: InterruptedException) { break }
+                } else {
+                    nextWakeNs = System.nanoTime() + framePeriodNs
+                }
+            }
+
+            Log.i(TAG, "DSP Worker stopped")
+        }, "DspWorkerThread")
+
+        thread?.start()
+    }
+
+    private fun analyzeFrame(framesRead: Int) {
+        var sumSqFull = 0f
+        var sumSqLow = 0f
+        var sumSqMid = 0f
+        var sumSqHigh = 0f
+
+        var midHpState = 0f
+        var midLpState = 0f
+
+        for (i in 0 until framesRead) {
+            val v = processFrame[i]
+            sumSqFull += v * v
+
+            lowBandState += lowAlpha * (v - lowBandState)
+            sumSqLow += lowBandState * lowBandState
+
+            midHpState += midHpAlpha * (v - midHpState)
+            val midHpOut = v - midHpState
+            midLpState += midLpAlpha * (midHpOut - midLpState)
+            sumSqMid += midLpState * midLpState
+
+            val highOut = v - lowBandState - midLpState
+            sumSqHigh += highOut * highOut
+        }
+
+        rmsFull = sqrt(sumSqFull / framesRead)
+        rmsLow = sqrt(sumSqLow / framesRead)
+        rmsMid = sqrt(sumSqMid / framesRead)
+        rmsHigh = sqrt(sumSqHigh / framesRead)
+
+        rmsEma = 0.96f * rmsEma + 0.04f * rmsFull
+        bassEma = 0.94f * bassEma + 0.06f * rmsLow
+        midEma = 0.94f * midEma + 0.06f * rmsMid
+        highEma = 0.95f * highEma + 0.05f * rmsHigh
+
+        // v10: Adaptive threshold tracks music energy
+        adaptiveThreshold = max(0.005f, (1f - thresholdAlpha) * adaptiveThreshold + thresholdAlpha * rmsFull * 0.3f)
+    }
+
+    private fun addBpmSample(bpm: Float) {
+        if (bpm < 40f || bpm > 220f) return
+        bpmHistory[bpmHistoryCount % bpmHistory.size] = bpm
+        bpmHistoryCount++
+        val count = min(bpmHistoryCount, bpmHistory.size)
+        var sum = 0f
+        for (i in 0 until count) sum += bpmHistory[i]
+        smoothedBpm = sum / count
+    }
+
+    /**
+     * v9.1: Track ATTACK delta, not RMS level.
+     *
+     * The peak follower must follow the RISING EDGE energy (delta),
+     * because RMS level is nearly constant during continuous playback.
+     * rel = current_delta / recent_peak_delta gives real dynamics.
+     */
+    private fun detectBeat() {
+        val now = SystemClock.elapsedRealtime()
+
+        // --- 1. Global beat gate with BPM-adaptive timing ---
+        val bpmFactor = if (smoothedBpm > 0f) smoothedBpm / 120f else 1f
+        val minGap = (195f / bpmFactor).toLong().coerceIn(120L, 250L)
+        if (lastBeatTimeMs > 0 && now - lastBeatTimeMs < minGap) return
+
+        // v10: Use adaptive threshold instead of fixed
+        val effectiveThreshold = adaptiveThreshold * globalGain * userGainOverride
+
+        // --- 2. Rising-edge per band ---
+        val lowDelta = max(0f, rmsLow - prevLowRms)
+        val midDelta = max(0f, rmsMid - prevMidRms)
+        val highDelta = max(0f, rmsHigh - prevHighRms)
+
+        // --- 3. Score: attack strength above threshold ---
+        val lowScore = if (lowDelta > effectiveThreshold * 0.5f) lowDelta else -1f
+        val midScore = if (midDelta > effectiveThreshold * 0.4f) midDelta else -1f
+        val highScore = if (highDelta > effectiveThreshold * 0.3f) highDelta else -1f
+
+        val beatType: String
+        val delta: Float
+        val rawEnergy: Float
+        when {
+            lowScore >= midScore && lowScore >= highScore -> {
+                beatType = "KICK"; delta = lowDelta; rawEnergy = rmsLow
+            }
+            midScore >= highScore -> {
+                beatType = "SNARE"; delta = midDelta; rawEnergy = rmsMid
+            }
+            highScore >= 0f -> {
+                beatType = "TICK"; delta = highDelta; rawEnergy = rmsHigh
+            }
+            else -> return
+        }
+
+        // --- 4. Peak follower on DELTA (not level!) ---
+        // v9.3: proportional decay so peak follows recent strongest attack
+        peakLow = max(peakLow * 0.995f, 0.001f)
+        peakMid = max(peakMid * 0.995f, 0.001f)
+        peakHigh = max(peakHigh * 0.995f, 0.001f)
+
+        val peakDelta: Float
+        when (beatType) {
+            "KICK"  -> { peakDelta = max(peakLow, delta); peakLow = peakDelta }
+            "SNARE" -> { peakDelta = max(peakMid, delta); peakMid = peakDelta }
+            else    -> { peakDelta = max(peakHigh, delta); peakHigh = peakDelta }
+        }
+
+        // --- 5. Relative dynamics: how strong is THIS attack vs recent strongest? ---
+        // rel=1.0 → downbeat of chorus; rel≈0.3 → weak offbeat
+        val rel = if (peakDelta > 0.001f) (delta / peakDelta).coerceIn(0f, 1f) else 0.5f
+
+        // Gentle curve: keeps quiet hits audible while loud hits punch hard
+        val dyn = 0.40f + 0.60f * rel          // 0.40..1.0
+        val shaped = dyn * dyn * (3f - 2f * dyn)   // smoothstep
+
+        // --- 6. Intensity = music loudness × timbre base × dynamics ---
+        val timbreBase = when (beatType) {
+            "KICK"  -> 1.00f
+            "SNARE" -> 0.72f
+            else    -> 0.42f
+        }
+        val loudness = rmsFull.coerceIn(0.05f, 1f)
+        val intensity = (255f * loudness * timbreBase * shaped).toInt().coerceIn(10, 255)
+
+        hapticEngine.onKotlinBeatDetected(beatType, intensity, rmsFull)
+        lastBeatTimeMs = now
+        lastBeatType = beatType
+        beatCount++
+
+        Log.i(TAG, "[BEAT-v9.2] #$beatCount $beatType intensity=$intensity " +
+            "rel=${"%.2f".format(rel)} delta=${"%.4f".format(delta)} " +
+            "peak=${"%.4f".format(peakDelta)}")
+    }
+
+    fun stop() {
+        running = false
+        thread?.interrupt()
+        thread?.join(1000)
+        thread = null
+    }
+
+    fun getLoadFactor(): Float = pcmFifo.loadFactor()
+}

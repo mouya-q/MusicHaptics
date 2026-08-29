@@ -1,0 +1,260 @@
+package com.mouya.musichaptics
+
+import android.os.Process
+import android.os.SystemClock
+import android.util.Log
+import kotlin.math.sqrt
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
+
+
+class DspWorkerThread(
+    private val pcmFifo: PcmFifo,
+    private val nativeBridge: NativeBridge,
+    private val hapticEngine: HapticEngine,
+    private val deviceProfile: DeviceProfile = DeviceProfile.DEFAULT,
+    private val frameSize: Int = 256,
+    private val sampleRate: Int = 48000
+) {
+    private val TAG = "DspWorkerThread"
+
+    private val framePeriodNs: Long = (frameSize.toLong() * 1_000_000_000L) / sampleRate.toLong()
+    private val framePeriodMs: Float = frameSize.toFloat() / sampleRate.toFloat() * 1000f
+
+    @Volatile private var running = false
+    private var thread: Thread? = null
+
+    private val processFrame = FloatArray(frameSize)
+
+    private val directPcmBuffer = java.nio.ByteBuffer.allocateDirect(frameSize * 4).apply {
+        java.nio.ByteOrder.nativeOrder()
+    }
+    private val floatPcmView = directPcmBuffer.asFloatBuffer()
+
+    
+    private var lowBandState = 0f
+    private var midBandState = 0f
+    private var highBandState = 0f
+    private var prevLowRms = 0f
+    private var prevMidRms = 0f
+    private var prevHighRms = 0f
+    private var prevFullRms = 0f
+
+    
+    private var rmsFull = 0f
+    private var rmsLow = 0f
+    private var rmsMid = 0f
+    private var rmsHigh = 0f
+
+    
+    private var rmsEma = 0f
+    private var bassEma = 0f
+    private var midEma = 0f
+    private var highEma = 0f
+
+    
+    private var dspFrameCount = 0
+    private var totalFramesRead = 0L
+    private var lastBeatType = ""
+    private var lastBeatTimeMs = 0L
+
+    
+    private var estimatedBpm = 0f
+    private var bpmHistory = FloatArray(8)
+    private var bpmHistoryCount = 0
+    private var smoothedBpm = 0f
+
+    
+    private var beatCount = 0
+
+    
+    private var peakLow = 0f
+    private var peakMid = 0f
+    private var peakHigh = 0f
+    
+    
+    private val peakDecay = 0.005f
+
+    
+    @Volatile var globalGain: Float = 0.5f
+    @Volatile var bassBoost: Float = 1.0f
+    @Volatile var energyThreshold: Float = 0.002f
+    @Volatile var userGainOverride: Float = 1.0f
+
+    
+    private val lowAlpha = 0.06f
+    private val midHpAlpha = 0.08f
+    private val midLpAlpha = 0.45f
+
+    fun start() {
+        if (running) return
+        running = true
+
+        thread = Thread({
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+
+            Log.i(TAG, "DSP Worker v9.0 started — timbre dynamics + beat gate")
+            Log.i(TAG, "[DSP-CAL] framePeriod=${"%.2f".format(framePeriodMs)}ms")
+
+            var nextWakeNs = System.nanoTime() + framePeriodNs
+
+            while (running) {
+                val framesRead = pcmFifo.read(processFrame, frameSize)
+
+                if (framesRead > 0) {
+                    totalFramesRead += framesRead
+                    dspFrameCount++
+
+                    analyzeFrame(framesRead)
+
+                    
+                    peakLow = max(peakLow - peakDecay, 0f)
+                    peakMid = max(peakMid - peakDecay, 0f)
+                    peakHigh = max(peakHigh - peakDecay, 0f)
+
+                    detectBeat()
+
+                    prevLowRms = rmsLow
+                    prevMidRms = rmsMid
+                    prevHighRms = rmsHigh
+                    prevFullRms = rmsFull
+                }
+
+                nextWakeNs += framePeriodNs
+                val sleepNs = nextWakeNs - System.nanoTime()
+                if (sleepNs > 0) {
+                    try {
+                        Thread.sleep(sleepNs / 1_000_000, (sleepNs % 1_000_000).toInt())
+                    } catch (e: InterruptedException) { break }
+                } else {
+                    nextWakeNs = System.nanoTime() + framePeriodNs
+                }
+            }
+
+            Log.i(TAG, "DSP Worker stopped")
+        }, "DspWorkerThread")
+
+        thread?.start()
+    }
+
+    private fun analyzeFrame(framesRead: Int) {
+        var sumSqFull = 0f
+        var sumSqLow = 0f
+        var sumSqMid = 0f
+        var sumSqHigh = 0f
+
+        var midHpState = 0f
+        var midLpState = 0f
+
+        for (i in 0 until framesRead) {
+            val v = processFrame[i]
+            sumSqFull += v * v
+
+            lowBandState += lowAlpha * (v - lowBandState)
+            sumSqLow += lowBandState * lowBandState
+
+            midHpState += midHpAlpha * (v - midHpState)
+            val midHpOut = v - midHpState
+            midLpState += midLpAlpha * (midHpOut - midLpState)
+            sumSqMid += midLpState * midLpState
+
+            val highOut = v - lowBandState - midLpState
+            sumSqHigh += highOut * highOut
+        }
+
+        rmsFull = sqrt(sumSqFull / framesRead)
+        rmsLow = sqrt(sumSqLow / framesRead)
+        rmsMid = sqrt(sumSqMid / framesRead)
+        rmsHigh = sqrt(sumSqHigh / framesRead)
+
+        rmsEma = 0.96f * rmsEma + 0.04f * rmsFull
+        bassEma = 0.94f * bassEma + 0.06f * rmsLow
+        midEma = 0.94f * midEma + 0.06f * rmsMid
+        highEma = 0.95f * highEma + 0.05f * rmsHigh
+    }
+
+    private fun addBpmSample(bpm: Float) {
+        if (bpm < 40f || bpm > 220f) return
+        bpmHistory[bpmHistoryCount % bpmHistory.size] = bpm
+        bpmHistoryCount++
+        val count = min(bpmHistoryCount, bpmHistory.size)
+        var sum = 0f
+        for (i in 0 until count) sum += bpmHistory[i]
+        smoothedBpm = sum / count
+    }
+
+    
+    private fun detectBeat() {
+        val now = SystemClock.elapsedRealtime()
+
+        val minGap = if (smoothedBpm > 140f) 120L else 80L
+        if (lastBeatTimeMs > 0 && now - lastBeatTimeMs < minGap) return
+
+        val effectiveThreshold = energyThreshold * globalGain * userGainOverride
+
+        val lowDelta = max(0f, rmsLow - prevLowRms)
+        val midDelta = max(0f, rmsMid - prevMidRms)
+        val highDelta = max(0f, rmsHigh - prevHighRms)
+
+        val lowScore = if (lowDelta > effectiveThreshold * 0.5f) lowDelta else -1f
+        val midScore = if (midDelta > effectiveThreshold * 0.4f) midDelta else -1f
+        val highScore = if (highDelta > effectiveThreshold * 0.3f) highDelta else -1f
+
+        val beatType: String
+        val delta: Float
+        val rawEnergy: Float
+        when {
+            lowScore >= midScore && lowScore >= highScore -> {
+                beatType = "KICK"; delta = lowDelta; rawEnergy = rmsLow
+            }
+            midScore >= highScore -> {
+                beatType = "SNARE"; delta = midDelta; rawEnergy = rmsMid
+            }
+            highScore >= 0f -> {
+                beatType = "TICK"; delta = highDelta; rawEnergy = rmsHigh
+            }
+            else -> return
+        }
+
+        val peakDelta: Float
+        when (beatType) {
+            "KICK"  -> { peakDelta = max(peakLow, delta); peakLow = peakDelta }
+            "SNARE" -> { peakDelta = max(peakMid, delta); peakMid = peakDelta }
+            else    -> { peakDelta = max(peakHigh, delta); peakHigh = peakDelta }
+        }
+
+        val rel = if (peakDelta > 0.001f) (delta / peakDelta).coerceIn(0f, 1f) else 0.5f
+
+        val dyn = 0.40f + 0.60f * rel
+        val shaped = dyn * dyn * (3f - 2f * dyn)
+
+        val timbreBase = when (beatType) {
+            "KICK"  -> 1.00f
+            "SNARE" -> 0.72f
+            else    -> 0.42f
+        }
+
+        val rmsBoost = (rmsFull * 8f).coerceIn(0.3f, 1.5f)
+        val intensity = (255f * timbreBase * shaped * rmsBoost).toInt().coerceIn(15, 255)
+
+        hapticEngine.onKotlinBeatDetected(beatType, intensity, rmsFull)
+        lastBeatTimeMs = now
+        lastBeatType = beatType
+        beatCount++
+
+        Log.i(TAG, "[BEAT-v9.1] #$beatCount $beatType intensity=$intensity " +
+            "rel=${"%.2f".format(rel)} delta=${"%.4f".format(delta)} " +
+            "peak=${"%.4f".format(peakDelta)} rms=${"%.4f".format(rmsFull)}")
+    }
+
+    fun stop() {
+        running = false
+        thread?.interrupt()
+        thread?.join(1000)
+        thread = null
+    }
+
+    fun getLoadFactor(): Float = pcmFifo.loadFactor()
+}

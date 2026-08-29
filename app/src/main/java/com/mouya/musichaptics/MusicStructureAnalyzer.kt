@@ -3,13 +3,6 @@ package com.mouya.musichaptics
 import kotlin.math.abs
 import kotlin.math.max
 
-/**
- * v3.8 phase 2: low-cost musical structure tracker.
- *
- * It deliberately works on the live feature stream rather than guessing a genre
- * from one audio frame. The result is stable enough to guide future haptic
- * density/contrast decisions while preserving a graceful real-time fallback.
- */
 class MusicStructureAnalyzer {
     enum class Section { INTRO, VERSE, BUILD, CHORUS, BREAKDOWN, OUTRO }
 
@@ -61,7 +54,6 @@ class MusicStructureAnalyzer {
             else -> current.section
         }
 
-        // A 4-second hysteresis avoids section labels bouncing on every fill.
         if (candidate != current.section && timestampMs - lastSectionChangeMs >= 4_000L) {
             current = current.copy(section = candidate)
             lastSectionChangeMs = timestampMs

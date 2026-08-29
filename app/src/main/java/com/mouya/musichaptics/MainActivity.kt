@@ -17,7 +17,6 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-// Console logs are received only by HapticDashboardActivity to avoid duplicates.
 
 class MainActivity : ComponentActivity() {
 
@@ -68,8 +67,6 @@ class MainActivity : ComponentActivity() {
             TelemetryHub.applySnapshot(bundle)
         }
     }
-    // The dashboard owns console-log reception. Registering a second receiver here
-    // appended every broadcast twice to the shared ConsoleLogState archive.
 
 
     private var prefs: SharedPreferences? = null
@@ -89,24 +86,26 @@ class MainActivity : ComponentActivity() {
 
         prefs = getSharedPreferences("haptics_config", Context.MODE_PRIVATE)
 
-        // Root is mandatory for hardware-profile activation: Build fields can be
-        // spoofed, while the probe reads board/driver data from the rooted system.
-        // The probe itself is read-only and will trigger Magisk/APatch authorization.
         if (!RootHardwareProbe.hasRootAccess()) {
             startActivity(Intent(this, RootActivationActivity::class.java))
             finish()
             return
         }
-        RootHardwareProbe.probeAndPersist(this)
 
-        // Defensive: HapticEngine creates NativeBridge which loads native lib.
-        // First launch after install/update may not have lib extracted yet → catch gracefully.
-        try {
-            hapticEngine = HapticEngine(this, prefs!!)
-        } catch (t: Throwable) {
-            Log.w("MainActivity", "HapticEngine init failed, will retry on next launch: ${t.message}")
-            hapticEngine = null
-        }
+        // v4.6: Launch dashboard immediately for visible startup animation,
+        // then perform heavy initialization in background.
+        // Previously all init was synchronous, causing ~1s blank screen.
+        Thread {
+            try {
+                RootHardwareProbe.probeAndPersist(this)
+                NativeBridge.preloadLibrary(this)
+                Log.i("MainActivity", "NativeBridge preload=${NativeBridge.isLibraryPreloaded()}")
+                startRootHapticDaemon()
+                hapticEngine = HapticEngine(this, prefs!!)
+            } catch (t: Throwable) {
+                Log.w("MainActivity", "HapticEngine init failed: ${t.message}")
+            }
+        }.start()
 
         val telemetryFilter = IntentFilter("com.mouya.musichaptics.ACTION_TELEMETRY")
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
@@ -115,17 +114,48 @@ class MainActivity : ComponentActivity() {
             registerReceiver(telemetryReceiver, telemetryFilter)
         }
 
+        // Navigate to dashboard immediately (UI appears without waiting for init)
         startActivity(Intent(this, HapticDashboardActivity::class.java))
-        // This activity is a root/bootstrapper only. Keeping it in the back stack
-        // made system Back reveal a blank white window with no Compose content.
         finish()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         try { unregisterReceiver(telemetryReceiver) } catch (_: Exception) {}
-        // Release native resources to prevent leak across Activity recreation
         try { hapticEngine?.release() } catch (_: Exception) {}
         hapticEngine = null
+        // Do NOT stop RootHapticDaemon here. MainActivity intentionally finishes
+        // after opening HapticDashboardActivity; stopping it here killed the root
+        // UDP bridge immediately after a successful start. The daemon is shared
+        // with hooked target processes and remains alive for the app process.
+    }
+
+    private fun startRootHapticDaemon() {
+        try {
+            // Get cached direct drive nodes from SharedPreferences
+            val nodes = prefs?.getString(RootHardwareProbe.PREF_DIRECT_DRIVE_NODES, null)
+            if (nodes.isNullOrBlank()) {
+                Log.w("MainActivity", "No cached direct drive nodes, skipping daemon start")
+                return
+            }
+
+            val paths = nodes.split(",").filter { it.isNotBlank() }
+            val activatePath = paths.firstOrNull()?.trim() ?: return
+            val dirPath = activatePath.substringBeforeLast('/')
+            var amplitudePath: String? = null
+            for (ampName in listOf("gain", "amplitude", "index_value")) {
+                val candidate = "$dirPath/$ampName"
+                if (java.io.File(candidate).exists()) {
+                    amplitudePath = candidate
+                    break
+                }
+            }
+
+            Log.i("MainActivity", "Starting RootHapticDaemon: activate=$activatePath amp=$amplitudePath")
+            val started = RootHapticDaemon.start(this, activatePath, amplitudePath)
+            Log.i("MainActivity", "RootHapticDaemon started: $started")
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to start RootHapticDaemon: ${e.message}", e)
+        }
     }
 }

@@ -1,0 +1,4 @@
+/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/CMakeFiles/haptic-engine.dir
+/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/CMakeFiles/native-bridge.dir
+/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/CMakeFiles/edit_cache.dir
+/sdcard/AndroidIDEProjects/MusicHapticsX/app/src/main/cpp/CMakeFiles/rebuild_cache.dir

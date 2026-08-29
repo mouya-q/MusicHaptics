@@ -1,0 +1,194 @@
+package com.mouya.musichaptics
+
+import android.os.Build
+import android.util.Log
+import java.lang.reflect.Method
+
+/**
+ * v4.13: RichTap 硬件抽象层
+ * 
+ * 为小米/Redmi设备提供直接 RichTap API 访问，绕过 Android 标准 Vibrator 延迟。
+ * 参考 14PRO_MusicHaptic 模块的 DynamicEffect/HapticPlayer 实现。
+ * 
+ * 关键差异（对标 14PRO daemon）：
+ * - 使用 createTransient 而非 createContinuous（瞬态脉冲，非连续）
+ * - sharpness 固定：KICK=0.32, SNARE=0.46, TICK=0.55
+ * - duration 固定：KICK=62ms, SNARE=47ms, TICK=35ms
+ * - 支持 boost 标志（全振幅）
+ * - 需要系统属性 sys.haptic.dynamiceffect=true, sys.haptic.media=true
+ * 
+ * 支持厂商：
+ * - Xiaomi/Redmi: HyperOS RichTap (DynamicEffect + HapticPlayer)
+ * - OnePlus/OPPO: ColorOS haptic (待实现)
+ * - vivo: OriginOS haptic (待实现)
+ */
+class RichTapAdapter {
+    companion object {
+        private const val TAG = "RichTapAdapter"
+        
+        // 动态加载 MIUI/HyperOS 私有类
+        private var sDynamicEffectClass: Class<*>? = null
+        private var sHapticPlayerClass: Class<*>? = null
+        private var sCreateTransientMethod: Method? = null
+        private var sCreateParameterMethod: Method? = null
+        private var sAddPrimitiveMethod: Method? = null
+        private var sHapticPlayerConstructor: java.lang.reflect.Constructor<*>? = null
+        private var sStartMethod: Method? = null
+        
+        @Volatile private var sAvailable: Boolean? = null
+        
+        // 对标 14PRO daemon 的固定参数
+        private const val SHARPNESS_KICK = 0.32f
+        private const val SHARPNESS_SNARE = 0.46f
+        private const val SHARPNESS_TICK = 0.55f
+        
+        private const val DURATION_KICK = 0.062f  // 62ms
+        private const val DURATION_SNARE = 0.047f // 47ms
+        private const val DURATION_TICK = 0.035f  // 35ms
+        
+        /**
+         * 检测设备是否支持 RichTap API
+         */
+        fun isAvailable(): Boolean {
+            sAvailable?.let { return it }
+            
+            // 仅小米/Redmi设备尝试加载
+            val mfr = Build.MANUFACTURER.lowercase()
+            if (mfr != "xiaomi" && mfr != "redmi") {
+                sAvailable = false
+                return false
+            }
+            
+            return try {
+                sDynamicEffectClass = Class.forName("android.os.DynamicEffect")
+                sHapticPlayerClass = Class.forName("android.os.HapticPlayer")
+                
+                // 14PRO 用 createTransient 而非 create
+                sCreateTransientMethod = sDynamicEffectClass?.getDeclaredMethod(
+                    "createTransient", Float::class.java, Float::class.java, Float::class.java
+                )
+                sCreateParameterMethod = sDynamicEffectClass?.getDeclaredMethod(
+                    "createParameter", Int::class.java, FloatArray::class.java, FloatArray::class.java
+                )
+                sAddPrimitiveMethod = sDynamicEffectClass?.getDeclaredMethod(
+                    "addPrimitive", Float::class.java, 
+                    Class.forName("android.os.DynamicEffect\$PrimitiveEffect")
+                )
+                sHapticPlayerConstructor = sHapticPlayerClass?.getDeclaredConstructor(
+                    sDynamicEffectClass
+                )
+                sStartMethod = sHapticPlayerClass?.getDeclaredMethod("start")
+                
+                sAvailable = true
+                Log.i(TAG, "RichTap API available on ${Build.MODEL}")
+                true
+            } catch (e: Exception) {
+                sAvailable = false
+                Log.w(TAG, "RichTap API not available: ${e.message}")
+                false
+            }
+        }
+        
+        /**
+         * 触发 RichTap 振动（对标 14PRO daemon 的 pulse 逻辑）
+         * 
+         * @param event 节拍类型：KICK/SNARE/TICK/BODY
+         * @param intensity 强度 0-255
+         * @param mode 震感模式：balanced/bass/crisp/soft/immersive/pure
+         * @param boost 是否增强（全振幅）
+         */
+        fun triggerPulse(event: String, intensity: Int, mode: String = "balanced", boost: Boolean = false): Boolean {
+            if (!isAvailable()) return false
+            
+            // 14PRO: amplitude = value * (boost ? 1.0 : 0.8) 约束到 0.05-1.0
+            val amplitude = (intensity.coerceIn(0, 255) / 255f).coerceIn(0.05f, 1.0f)
+            
+            // 固定 sharpness/duration（对标 14PRO）
+            val (sharpness, duration) = when (event.uppercase()) {
+                "KICK"  -> Pair(SHARPNESS_KICK, DURATION_KICK)
+                "SNARE" -> Pair(SHARPNESS_SNARE, DURATION_SNARE)
+                "TICK"  -> Pair(SHARPNESS_TICK, DURATION_TICK)
+                else    -> Pair(SHARPNESS_KICK, DURATION_KICK)  // BODY 等按 KICK
+            }
+            
+            // 模式微调（14PRO 只有 crisp/balanced 之分，这里扩展）
+            val modeSharpnessMod = when (mode) {
+                "crisp" -> sharpness + 0.05f
+                "soft" -> sharpness - 0.05f
+                "pure" -> sharpness * 0.85f
+                else -> sharpness
+            }.coerceIn(0.15f, 0.7f)
+            
+            return try {
+                // DynamicEffect.createTransient(amplitude, sharpness, duration)
+                val primitive = sCreateTransientMethod?.invoke(
+                    null, amplitude, modeSharpnessMod, duration
+                )
+                
+                // 14PRO: 简单 attack-decay 包络，attack 固定 2ms
+                val attack = 0.002f
+                val times = floatArrayOf(0f, attack, attack + duration * 0.6f, duration)
+                val decayAmp = if (boost) amplitude * 0.5f else amplitude * 0.3f
+                val amplitudes = floatArrayOf(0f, amplitude, decayAmp, 0f)
+                val parameter = sCreateParameterMethod?.invoke(
+                    null, 0, times, amplitudes
+                )
+                
+                primitive?.javaClass?.getDeclaredMethod("addParameter", parameter?.javaClass)
+                    ?.invoke(primitive, parameter)
+                
+                // 单 primitive 直接用 effect = primitive（14PRO 模式）
+                // 或 effect.addPrimitive(0f, primitive)
+                val player = sHapticPlayerConstructor?.newInstance(primitive)
+                sStartMethod?.invoke(player)
+                
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "RichTap triggerPulse failed: ${e.message}")
+                false
+            }
+        }
+        
+        /**
+         * 兼容旧接口
+         */
+        @Deprecated("Use triggerPulse instead")
+        fun trigger(amplitude: Float, sharpness: Float, duration: Float, attack: Float): Boolean {
+            return triggerPulse("KICK", (amplitude * 255).toInt(), "balanced", false)
+        }
+        
+        /**
+         * 获取最小间隔（ms）- 基于模式（对标 14PRO）
+         */
+        fun getMinIntervalMs(mode: String): Long = when (mode) {
+            "pure" -> 260L
+            "crisp" -> 85L   // 14PRO crisp 更激进
+            "immersive" -> 100L
+            "bass" -> 120L
+            "soft" -> 135L
+            else -> 105L  // balanced
+        }
+        
+        /** 确保系统属性已开启 */
+        fun ensureSystemProps() {
+            try {
+                val props = arrayOf(
+                    "sys.haptic.dynamiceffect" to "true",
+                    "sys.haptic.media" to "true",
+                    "sys.haptic.dynamiceffect.richtap" to "true"
+                )
+                for ((k, v) in props) {
+                    if (System.getProperty(k) != v) {
+                        System.setProperty(k, v)
+                    }
+                }
+                // 也尝试用 resetprop（需要 root）
+                Runtime.getRuntime().exec("resetprop sys.haptic.dynamiceffect true")
+                Runtime.getRuntime().exec("resetprop sys.haptic.media true")
+                Runtime.getRuntime().exec("resetprop sys.haptic.dynamiceffect.richtap true")
+            } catch (e: Exception) {
+                Log.w(TAG, "ensureSystemProps failed: ${e.message}")
+            }
+        }
+    }
+}

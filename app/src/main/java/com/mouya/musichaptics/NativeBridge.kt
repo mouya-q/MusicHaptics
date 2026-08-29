@@ -30,8 +30,8 @@ class NativeBridge {
                         Log.i("NativeBridge", "Library loaded from module APK: ${libFile.absolutePath}")
                         return
                     }
-                } catch (e: Exception) {
-                    Log.w("NativeBridge", "Load from module APK failed: ${e.message}")
+                } catch (t: Throwable) {
+                    Log.e("NativeBridge", "Load from module APK failed: ${t.javaClass.name}: ${t.message}", t)
                 }
 
                 try {
@@ -49,12 +49,9 @@ class NativeBridge {
 
     init {
         try {
-            // First, see if the engine can be created (meaning the library is already loaded
-            // by MainHook using moduleClassLoader.getResource() or other means).
             try {
                 nativePtr = nativeCreateEngine()
             } catch (e: UnsatisfiedLinkError) {
-                // If not, fall back to explicit loading
                 if (!libraryPreloaded) {
                     synchronized(loadLock) {
                         if (!libraryPreloaded) {
@@ -72,8 +69,6 @@ class NativeBridge {
                 Log.i("NativeBridge", "Native engine created successfully, ptr=$nativePtr")
             }
         } catch (e: UnsatisfiedLinkError) {
-            // Graceful degradation: native lib not yet extracted/available.
-            // App will still launch; DSP pipeline simply produces silence.
             Log.w("NativeBridge", "Native library not available yet (will retry on next launch): ${e.message}")
             nativePtr = 0L
         } catch (e: Exception) {
@@ -107,15 +102,6 @@ class NativeBridge {
         }
     }
 
-    /**
-     * Pull continuous haptic amplitude samples from the C++ ring buffer.
-     * Each sample is a float in range [0, 255] representing the composed
-     * five-layer haptic amplitude at that point in time.
-     *
-     * @param outBuffer pre-allocated FloatArray to receive amplitude samples
-     * @param maxCount maximum number of samples to pull
-     * @return number of samples actually copied into outBuffer
-     */
     fun getHapticFrame(outBuffer: FloatArray, maxCount: Int): Int {
         if (nativePtr != 0L) {
             try {
@@ -138,10 +124,138 @@ class NativeBridge {
         return 0
     }
 
-    /**
-     * Clear the C++ haptic ring buffer and reset all envelope states.
-     * Call on playback pause/stop to prevent stale vibrations.
-     */
+    fun getOnsetFrames(outBuffer: FloatArray, maxFrames: Int): Int {
+        if (nativePtr != 0L) {
+            try {
+                return nativeGetOnsetFrames(nativePtr, outBuffer, maxFrames)
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "getOnsetFrames failed: ${e.message}")
+            }
+        }
+        return 0
+    }
+
+    fun setDirectDriveNodes(nodes: String) {
+        if (nativePtr != 0L) {
+            try {
+                val ok = nativeSetDirectDriveNodes(nodes)
+                Log.i("NativeBridge", "setDirectDriveNodes: result=$ok nodes=$nodes")
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "setDirectDriveNodes failed: ${e.message}")
+            }
+        }
+    }
+
+    fun setDirectDriveFd(enableFd: Int, amplitudeFd: Int, enablePath: String, amplitudePath: String): Boolean {
+        if (nativePtr != 0L) {
+            try {
+                val ok = nativeSetDirectDriveFd(enableFd, amplitudeFd, enablePath, amplitudePath)
+                Log.i("NativeBridge", "setDirectDriveFd: result=$ok enableFd=$enableFd ampFd=$amplitudeFd")
+                return ok
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "setDirectDriveFd failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    fun triggerDirectDriveStrike(durationMs: Int, amplitude: Int): Boolean {
+        if (nativePtr != 0L) {
+            try {
+                return nativeTriggerDirectDriveStrike(durationMs, amplitude)
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "triggerDirectDriveStrike failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    fun isDirectDriveAvailable(): Boolean {
+        if (nativePtr != 0L) {
+            try {
+                return nativeIsDirectDriveAvailable()
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "isDirectDriveAvailable failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    fun initRootPipe(pipeFd: Int, enablePath: String, amplitudePath: String): Boolean {
+        if (nativePtr != 0L) {
+            try {
+                val ok = nativeInitRootPipe(pipeFd, enablePath, amplitudePath)
+                Log.i("NativeBridge", "initRootPipe: result=$ok pipeFd=$pipeFd enablePath=$enablePath ampPath=$amplitudePath")
+                return ok
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "initRootPipe failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    fun isRootPipeAvailable(): Boolean {
+        if (nativePtr != 0L) {
+            try {
+                return nativeIsRootPipeAvailable()
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "isRootPipeAvailable failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    fun initUdpHaptic(port: Int): Boolean {
+        // Seccomp blocks socket() in C++. Use initUdpHapticFromFd instead.
+        Log.w("NativeBridge", "initUdpHaptic: socket() blocked by seccomp, use initUdpHapticFromFd")
+        return false
+    }
+
+    fun initUdpHapticFromFd(fd: Int, port: Int): Boolean {
+        if (nativePtr != 0L) {
+            try {
+                val ok = nativeInitUdpHapticFromFd(fd, port)
+                Log.i("NativeBridge", "initUdpHapticFromFd: fd=$fd port=$port result=$ok")
+                return ok
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "initUdpHapticFromFd failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    fun testUdpHaptic(): Boolean {
+        if (nativePtr != 0L) {
+            try {
+                return nativeTestUdpHaptic()
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "testUdpHaptic failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    fun isUdpHapticReady(): Boolean {
+        if (nativePtr != 0L) {
+            try {
+                return nativeIsUdpHapticReady()
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "isUdpHapticReady failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    fun shutdownUdpHaptic() {
+        if (nativePtr != 0L) {
+            try {
+                nativeShutdownUdpHaptic()
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "shutdownUdpHaptic failed: ${e.message}")
+            }
+        }
+    }
+
     fun clearHapticBuffer() {
         if (nativePtr != 0L) {
             try {
@@ -172,13 +286,57 @@ class NativeBridge {
     private external fun nativeClearHapticBuffer(ptr: Long)
     private external fun nativeStartScheduler(ptr: Long): Boolean
     private external fun nativeStopScheduler()
+    private external fun nativeGetOnsetFrames(ptr: Long, outBuffer: FloatArray, maxFrames: Int): Int
+    private external fun nativeSetDirectDriveNodes(nodes: String): Boolean
+    private external fun nativeSetDirectDriveFd(enableFd: Int, amplitudeFd: Int, enablePath: String, amplitudePath: String): Boolean
+    private external fun nativeTriggerDirectDriveStrike(durationMs: Int, amplitude: Int): Boolean
+    private external fun nativeIsDirectDriveAvailable(): Boolean
+    private external fun nativeInitRootPipe(pipeFd: Int, enablePath: String, amplitudePath: String): Boolean
+    private external fun nativeIsRootPipeAvailable(): Boolean
+    private external fun nativeInitUdpHaptic(port: Int): Boolean
+    private external fun nativeInitUdpHapticFromFd(fd: Int, port: Int): Boolean
+    private external fun nativeTestUdpHaptic(): Boolean
+    private external fun nativeIsUdpHapticReady(): Boolean
+    private external fun nativeShutdownUdpHaptic()
+    private external fun nativeEnableJavaPipe(): Boolean
+    private external fun nativeDisableJavaPipe()
+
+    @Volatile var onFrameCallback: ((FloatArray, Int) -> Unit)? = null
+
+    @Volatile private var _rootPipeCb: ((Int, Int) -> Unit)? = null
 
     /**
-     * v2.1: Native callback — called from the C++ scheduler thread.
-     * Receives a batch of amplitude samples (20ms = 2 samples).
-     * Override or set [onFrameCallback] to handle these in HapticEngine.
+     * Beat-triggered vibration callback.
+     * Called when the C++ scheduler detects a significant onset event (kick, snare, etc.).
+     * The Kotlin side uses Android Vibrator API with predefined effects for reliable vibration.
      */
-    @Volatile var onFrameCallback: ((FloatArray, Int) -> Unit)? = null
+    @Volatile var beatTriggerCallback: ((String, Int) -> Unit)? = null
+
+    fun enableRootPipe(cb: (Int, Int) -> Unit) {
+        _rootPipeCb = cb
+        if (nativePtr != 0L) {
+            try {
+                val ok = nativeEnableJavaPipe()
+                Log.i("NativeBridge", "nativeEnableJavaPipe: $ok")
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "nativeEnableJavaPipe failed: ${e.message}")
+            }
+        }
+    }
+
+    fun disableRootPipe() {
+        try { nativeDisableJavaPipe() } catch (_: Exception) {}
+        _rootPipeCb = null
+    }
+
+    fun onRootPipeTrigger(amplitude: Int, duration: Int) {
+        _rootPipeCb?.invoke(amplitude, duration)
+    }
+
+    /** Called from C++ via JNI when a beat/onset is detected */
+    fun onBeatTrigger(event: String, intensity: Int) {
+        beatTriggerCallback?.invoke(event, intensity)
+    }
 
     fun onNativeFrameReady(samples: FloatArray, count: Int) {
         onFrameCallback?.invoke(samples, count)
@@ -189,7 +347,6 @@ class NativeBridge {
             try {
                 return nativeStartScheduler(nativePtr)
             } catch (e: Throwable) {
-                // UnsatisfiedLinkError extends Error, not Exception — must catch Throwable
                 Log.e("NativeBridge", "startScheduler failed: ${e.javaClass.simpleName}: ${e.message}")
             }
         }

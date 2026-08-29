@@ -6,86 +6,77 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 
-/**
- * 弹簧动画预设
- *
- * 本质是 Compose spring() 的参数预设管理器。
- * 通过低阻尼比 (0.25-0.62) 和低刚度 (200-400) 产生明显的过冲与振荡，
- * 实现"QQ弹弹"的物理手感。
- *
- * 注意：底层使用 Compose 内置 SpringSpec，未自定义积分器。
- * spring() 的 dampingRatio 和 stiffness 参数会真实生效，
- * dampingRatio < 1 会产生可见的过冲振荡。
- */
 object PhysicsSpring {
 
-    // ════════════════════════════════════════════════════════════════
-    //  预设弹簧规格 — 每种都有独特的物理手感
-    // ════════════════════════════════════════════════════════════════
+    //  v3.14 iOS-grade 令牌 — 统一弹簧语言
 
-    /** QQ弹弹 — Toggle、滑块拇指，强烈过冲后优雅回弹 */
+    fun uiStandard(): SpringSpec<Float> = spring(
+        dampingRatio = 1.0f,  // 临界阻尼 — 无过冲
+        stiffness = 400f  // ~250ms 完成
+    )
+
+    fun uiFast(): SpringSpec<Float> = spring(
+        dampingRatio = 1.0f,
+        stiffness = 800f  // ~150ms
+    )
+
+    fun uiFastDp(): SpringSpec<androidx.compose.ui.unit.Dp> = spring(
+        dampingRatio = 1.0f,
+        stiffness = 800f
+    )
+
+    fun uiSlow(): SpringSpec<Float> = spring(
+        dampingRatio = 0.9f,  // 接近临界，1次极微过冲
+        stiffness = 250f  // ~400ms
+    )
+
+
     fun bouncy(): SpringSpec<Float> = spring(
-        dampingRatio = 0.32f,   // 低阻尼 → 2-3次过冲振荡
-        stiffness = 280f        // 中低刚度 → ~600-800ms完成
+        dampingRatio = 1.0f,  // 临界阻尼 — 无过冲
+        stiffness = 500f  // ~200ms
     )
 
-    /** QQ弹弹 (Dp版本) */
     fun bouncyDp(): SpringSpec<androidx.compose.ui.unit.Dp> = spring(
-        dampingRatio = 0.32f,
-        stiffness = 280f
+        dampingRatio = 1.0f,
+        stiffness = 500f
     )
 
-    /** 弹性选择 — SegmentedControl 指示器滑动 */
     fun elasticSelect(): SpringSpec<Float> = spring(
-        dampingRatio = 0.42f,   // 中低阻尼 → 1次轻微过冲
-        stiffness = 320f        // 中刚度 → ~500ms
+        dampingRatio = 0.85f,  // 近临界 → 1次极微过冲
+        stiffness = 400f  // ~300ms
     )
 
-    /** 弹性选择 (Dp版本) */
     fun elasticSelectDp(): SpringSpec<androidx.compose.ui.unit.Dp> = spring(
-        dampingRatio = 0.42f,
-        stiffness = 320f
+        dampingRatio = 0.85f,
+        stiffness = 400f
     )
 
-    /** 柔和弹跳 — 按钮按下/释放，有弹性但不夸张 */
     fun softBounce(): SpringSpec<Float> = spring(
-        dampingRatio = 0.48f,   // 接近临界阻尼但仍有轻微过冲
-        stiffness = 350f
+        dampingRatio = 1.0f,  // 临界阻尼 — 无过冲
+        stiffness = 450f  // ~220ms
     )
 
-    /** 优雅展开 — 面板展开/收起，温和的弹性 */
     fun elegantExpand(): SpringSpec<Float> = spring(
-        dampingRatio = 0.62f,   // 临界阻尼附近，1次微弱过冲
-        stiffness = 200f        // 低刚度 → 慢而优雅，~700ms
+        dampingRatio = 0.9f,  // 近临界，1次微弱过冲
+        stiffness = 250f  // ~400ms
     )
 
-    /** 优雅展开 (Dp版本) */
     fun elegantExpandDp(): SpringSpec<androidx.compose.ui.unit.Dp> = spring(
-        dampingRatio = 0.62f,
-        stiffness = 200f
+        dampingRatio = 0.9f,
+        stiffness = 250f
     )
 
-    /** 波形振幅 — 频谱显示的物理响应 */
     fun waveformAmp(): SpringSpec<Float> = spring(
-        dampingRatio = 0.25f,   // 很低阻尼 → 活跃的振荡
-        stiffness = 400f        // 中等刚度 → 响应灵敏
+        dampingRatio = 0.55f,  // 中低阻尼 → 活跃响应（频谱显示需要灵敏度）
+        stiffness = 500f
     )
 
-    /** 颜色渐变 — 带轻微弹性 */
     fun colorBounce(): SpringSpec<androidx.compose.ui.graphics.Color> = spring(
-        dampingRatio = 0.55f,
-        stiffness = 300f
+        dampingRatio = 0.9f,  // 近临界
+        stiffness = 350f
     )
 }
 
-/**
- * 多阶段弹性按压动画控制器
- *
- * 实现真实的弹簧按压手感：
- * 1. 按下 → 快速压缩到 ~0.92 (硬弹簧)
- * 2. 释放 → 过冲到 ~1.06 (QQ弹弹)
- * 3. 回弹 → 振荡衰减到 1.0 (2-3次弹跳)
- */
 @Composable
 fun rememberBouncyPress(): BouncyPressController {
     val scope = rememberCoroutineScope()
@@ -94,59 +85,68 @@ fun rememberBouncyPress(): BouncyPressController {
 
 class BouncyPressController(private val scope: kotlinx.coroutines.CoroutineScope) {
 
-    /**
-     * 执行完整的弹跳按压序列
-     * @param scale Animatable 实例，初始值应为 1f
-     */
     fun pressAndRelease(scale: Animatable<Float, *>) {
         scope.launch {
-            // Phase 1: 快速压缩 (硬弹簧，无过冲)
             scale.animateTo(
-                targetValue = 0.92f,
+                targetValue = 0.97f,  // v3.14: subtle press, was 0.92
                 animationSpec = spring(
-                    dampingRatio = 1f,      // 临界阻尼 — 无过冲的快速压缩
+                    dampingRatio = 1f,  // 临界阻尼 — 无过冲
                     stiffness = Spring.StiffnessHigh
                 )
             )
-            // Phase 2: QQ弹弹回弹 — 低阻尼弹簧，明显过冲
             scale.animateTo(
                 targetValue = 1f,
                 animationSpec = spring(
-                    dampingRatio = 0.28f,   // 很低阻尼 → 2-3次弹跳
-                    stiffness = 260f        // 低刚度 → 慢而弹
+                    dampingRatio = 1f,  // 临界阻尼 — 干净回弹
+                    stiffness = 600f  // ~180ms
                 )
             )
-            // Phase 3 由 spring 自动完成振荡衰减
         }
     }
 
-    /**
-     * 只执行释放弹跳 (用于已经处理按下逻辑的场景)
-     */
     fun release(scale: Animatable<Float, *>) {
         scope.launch {
             scale.animateTo(
                 targetValue = 1f,
                 animationSpec = spring(
-                    dampingRatio = 0.28f,
-                    stiffness = 260f
+                    dampingRatio = 1f,
+                    stiffness = 600f
                 )
             )
         }
     }
 
-    /**
-     * 只执行按下压缩
-     */
     fun press(scale: Animatable<Float, *>) {
         scope.launch {
             scale.animateTo(
-                targetValue = 0.92f,
+                targetValue = 0.97f,  // v3.14: subtle press
                 animationSpec = spring(
-                    dampingRatio = 0.8f,
+                    dampingRatio = 1f,
                     stiffness = Spring.StiffnessHigh
                 )
             )
         }
+    }
+}
+
+object HapticSpringMap {
+
+    fun hapticForSpringName(name: String): HapticFeedbackEngine.HapticStyle = when (name) {
+        "uiFast"        -> HapticFeedbackEngine.HapticStyle.IMPACT  // 150ms press
+        "uiStandard"    -> HapticFeedbackEngine.HapticStyle.CONTINUOUS_HUM  // 300ms toggle/slider
+        "elasticSelect" -> HapticFeedbackEngine.HapticStyle.SELECTION  // segmented commit
+        "bouncy"        -> HapticFeedbackEngine.HapticStyle.IMPACT  // toggle commit
+        "softBounce"    -> HapticFeedbackEngine.HapticStyle.IMPACT  // button press
+        "release"       -> HapticFeedbackEngine.HapticStyle.KICK  // button release
+        else            -> HapticFeedbackEngine.HapticStyle.LIGHT_TICK
+    }
+
+    fun hapticForReducedMotion(original: HapticFeedbackEngine.HapticStyle): HapticFeedbackEngine.HapticStyle = when (original) {
+        HapticFeedbackEngine.HapticStyle.KICK,
+        HapticFeedbackEngine.HapticStyle.IMPACT -> HapticFeedbackEngine.HapticStyle.SOFT_TAP  // functional → soft
+        HapticFeedbackEngine.HapticStyle.SELECTION,
+        HapticFeedbackEngine.HapticStyle.LIGHT_TICK -> HapticFeedbackEngine.HapticStyle.NONE  // decorative → none
+        HapticFeedbackEngine.HapticStyle.CONTINUOUS_HUM -> HapticFeedbackEngine.HapticStyle.NONE  // decorative → none
+        else -> HapticFeedbackEngine.HapticStyle.NONE
     }
 }

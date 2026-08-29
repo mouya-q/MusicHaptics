@@ -1,0 +1,203 @@
+# Changelog
+
+All notable changes to MusicHapticsX will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [4.13.0] - 2026-08-27
+
+### Added
+- RichTap hardware abstraction layer for Xiaomi/Redmi devices (DynamicEffect + HapticPlayer API)
+- Six haptic modes: balanced/bass/crisp/soft/immersive/pure
+- Master intensity control (0.0-2.0x)
+- Direct RichTap driving bypasses Android standard Vibrator latency (~10-20ms → ~2-5ms)
+
+### Fixed
+- Reduced minGap from 120-250ms to 40-120ms, eliminating停顿感
+- Removed quiet-music gate expansion that was missing weak beats
+- Fixed intensity dynamic range compression (removed shaped*shaped double compression)
+- Settings now actually affect output (masterIntensity, hapticMode synced from prefs)
+
+### Changed
+- Linear dynamic mapping instead of smoothstep curve for clearer strong/weak contrast
+- Loudness floor lowered from 0.05 to 0.01 for quieter passages
+- RichTap优先路径 on Xiaomi/Redmi devices with automatic fallback
+
+### Removed
+- HapticComposer complexity (architectural simplification in progress)
+
+## [4.12.7] - 2026-08-26
+
+### Added
+- Stereo haptics support for dual-motor devices (Lenovo Legion Y700, etc.)
+- Spatial vibration routing: KICK spreads across both motors, TICK routes to secondary motor
+
+### Fixed
+- SNARE/TICK intensity incorrectly clamped to minimum 10%, now uses full 1-255 range
+- Quiet music no longer triggers excessive beats (adaptive gate timing)
+- q factor now logged in beat trigger messages for diagnostics
+
+### Changed
+- VibrateProxy now detects and manages secondary vibrator via VibratorManager API
+- HapticEngine routes beats to appropriate motor(s) based on frequency content
+- Stronger dynamics curve for more contrast between strong and weak beats
+
+## [4.12.5] - 2026-08-26
+
+### Changed
+- Tighter band filter separation for cleaner instrument detection
+- Adaptive threshold that tracks music energy dynamically
+- BPM-adaptive beat gate timing
+- Band dominance boosting for intensity calculation
+- Shorter, sharper vibration envelopes for KICK/SNARE/TICK
+
+### Fixed
+- Vibration not landing precisely on the beat
+- Music loudness not affecting vibration intensity
+
+---
+
+## [4.12.4] - 2026-08-26
+
+### Changed
+- Music loudness now affects vibration intensity (RMS-based scaling)
+- Waveform display now updates on beat detection
+
+### Fixed
+- Vibration intensity not responding to music volume changes
+
+---
+
+## [4.12.3] - 2026-08-26
+
+### Changed
+- Removed empty waveform container card from UI
+
+---
+
+## [4.12.2] - 2026-08-26
+
+### Changed
+- Fast song beat interval: 330ms → 200ms
+- Peak follower now has proportional decay for SNARE/TICK dynamics
+
+### Fixed
+- Waveform display appearing twice in UI
+- SNARE stuck at constant 71% intensity
+- TICK stuck at constant 41% intensity
+
+---
+
+## [4.12.1] - 2026-08-26
+
+### Added
+- System default font (MiSans on Xiaomi devices)
+
+### Changed
+- Removed thermal model and loop attenuation panels
+- Fixed waveform idle motion using normalized threshold
+
+### Removed
+- Built-in PingFang font (saved 80MB)
+- `IOSThermalPanel` and `IOSAttenuationPanel` composables
+- Unused Python scripts and backup files
+
+---
+
+## [4.12.0] - 2026-08-25
+
+### Added
+- Rhythm-aware vibration engine v9.1
+- Global beat gate with 195ms minimum interval
+- Three-band timbre analysis (Bass/Mid/High)
+- Dynamic intensity mapping based on peak follower
+- Bilingual README (Chinese/English)
+- NO_BUG_CHARM.webp for good luck
+
+### Changed
+- **v9.1**: Fixed peak follower to track attack delta instead of RMS level
+  - KICK now has real dynamics: 255, 199, 89, 224... (was stuck at constant values)
+  - Increased peak decay speed from 0.0006 to 0.005 for faster response
+- **v9.0**: Complete redesign with global beat gate
+  - Fast tracks (>140 BPM) automatically keep only strong beats
+  - Minimum 195ms interval between vibrations
+- **v8.0**: Simplified beat detection conditions
+  - Reduced from 4 conditions to 2 core conditions
+  - More beats are now detected correctly
+- **v7.0**: Fixed HapticEngine intensity scaling
+  - Changed minimum normalized value from 0.35 to 0.1
+  - Allows 10%-100% dynamic range instead of 35%-100%
+
+### Fixed
+- Peak follower tracking RMS level instead of attack delta (caused constant intensity)
+- HapticEngine forcing minimum 35% intensity (all vibrations felt the same)
+- Beat detection conditions too strict (many beats were missed)
+- BPM detection unstable (single-sample measurement)
+
+### Technical Details
+
+#### v9.1 Core Fix
+```kotlin
+// Before: Tracking RMS level (constant ~0.17)
+peakLow = max(peakLow, rmsLow)
+rel = rmsLow / peakLow  // Always ≈ 1.0
+
+// After: Tracking attack delta
+peakLow = max(peakLow, rmsLow) * (1 - peakDecay)
+peakDelta = rmsLow - peakLow
+rel = peakDelta / (peakLow + 0.01f)  // Now has real dynamics
+```
+
+#### Log Evidence
+
+**Before (v7):**
+```
+KICK intensity=53 (35%)  ← All vibrations at 35%
+KICK intensity=52 (35%)
+KICK intensity=73 (35%)
+```
+
+**After (v9.1):**
+```
+KICK intensity=255 (100%) rms=0.48359
+KICK intensity=199 (78%)  rms=0.53425
+KICK intensity=89  (34%)  rms=0.39654
+KICK intensity=224 (87%)  rms=0.41723
+```
+
+### Known Issues
+- SNARE/TICK intensity dynamic range still needs optimization
+  - SNARE stuck at 183 (71%)
+  - TICK stuck at 107 (41%)
+- Vibration density for EDM can be further improved
+
+---
+
+## [4.11.0] - 2026-08-20
+
+### Added
+- Initial LSPosed module structure
+- Native DSP pipeline
+- Basic haptic feedback engine
+- Haptic Composer UI
+
+### Changed
+- First public release
+
+---
+
+## Unreleased
+
+- SNARE/TICK dynamic range optimization
+- EDM-specific vibration patterns
+- Custom haptic profile editor
+
+[4.12.6]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.6
+[4.12.5]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.5
+[4.12.4]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.4
+[4.12.3]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.3
+[4.12.2]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.2
+[4.12.1]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.1
+[4.12.0]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.12.0
+[4.11.0]: https://github.com/mouya-q/MusicHaptics/releases/tag/v4.11.0

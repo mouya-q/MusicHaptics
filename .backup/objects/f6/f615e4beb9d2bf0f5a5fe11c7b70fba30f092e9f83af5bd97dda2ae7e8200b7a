@@ -1,0 +1,631 @@
+package com.mouya.musichaptics
+
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.Build
+import android.os.IBinder
+import android.os.Parcel
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.util.Log
+import java.util.Locale
+
+class VibrateProxy(private val context: Context) {
+
+    companion object {
+        private const val TAG = "VibrateProxy"
+    }
+
+    @Volatile private var remoteBinder: IBinder? = null
+    @Volatile private var bound = false
+    @Volatile private var useProxy = false
+    private var directVibrator: Vibrator? = null
+    private var hasDirectVibrator = false
+    // v4.12.5: Stereo haptics support for dual-motor devices
+    private var secondaryVibrator: Vibrator? = null
+    private var hasSecondaryVibrator = false
+
+    @Volatile var paused = false
+        private set
+
+    private val connection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            remoteBinder = service
+            Log.i(TAG, "Proxy service connected — IPC vibration path active")
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            remoteBinder = null
+            Log.w(TAG, "Proxy service disconnected")
+        }
+    }
+
+    @Volatile var primitiveLowTickSupported = false
+        private set
+    @Volatile var primitiveSpinSupported = false
+        private set
+    @Volatile var primitiveQuickRiseSupported = false
+        private set
+    @Volatile var primitiveSlowRiseSupported = false
+        private set
+    // v3.10.20: Vendor-specific haptic API capability
+    @Volatile var colorOSHapticAvailable = false
+        private set
+    @Volatile var hyperOSHapticAvailable = false
+        private set
+
+    @Volatile var primitiveClickSupported = false
+        private set
+    @Volatile var primitiveTickSupported = false
+        private set
+    @Volatile var primitiveHeavyClickSupported = false
+        private set
+    @Volatile var hasAmplitudeControl = false
+        private set
+
+    // v4.8: Custom ROM flag — set when device reports hasAmplitudeControl=true
+    // but actual HAL amplitude scaling is broken (e.g. Xiaomi 10 custom ROM).
+    // When true, always use DEFAULT_AMPLITUDE for full motor drive.
+    @Volatile var forceDefaultAmplitude = false
+        private set
+
+    /** v4.10: true when the Xiaomi-10-style HAL quirk was auto-detected on this device. */
+    @Volatile var forceDefaultAutoDetected = false
+        private set
+
+    /**
+     * v4.10: User-facing "强制满驱动" toggle (pref `force_default_amplitude`).
+     *
+     * Some devices report hasAmplitudeControl=true while the HAL silently ignores the
+     * amplitude parameter, so every custom amplitude comes out equally weak. Auto-detecting
+     * that is not reliable across ROMs, so the toggle stays manual; the Xiaomi 10 series
+     * (umi/cmi/thyme), where the quirk is confirmed, defaults it on.
+     */
+    fun setForceDefaultAmplitude(enabled: Boolean) {
+        if (forceDefaultAmplitude == enabled) return
+        forceDefaultAmplitude = enabled
+        Log.i(TAG, "v4.10: forceDefaultAmplitude → $enabled (autoDetected=$forceDefaultAutoDetected)")
+    }
+
+    fun init(): Boolean {
+        val pkgName = try { context.packageName } catch (e: Exception) { "unknown" }
+        val hasPermission = try {
+            context.checkSelfPermission("android.permission.VIBRATE") ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        } catch (e: Exception) { false }
+
+        Log.i(TAG, "═══ VIBRATE PROXY INIT ═══")
+        Log.i(TAG, "context.pkg=$pkgName hasVIBRATE=$hasPermission mfr=${Build.MANUFACTURER} model=${Build.MODEL} sdk=${Build.VERSION.SDK_INT}")
+
+        if (hasPermission) {
+            useProxy = false
+            directVibrator = try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
+                    vm?.defaultVibrator
+                } else {
+                    @Suppress("DEPRECATION")
+                    context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Vibrator resolution failed: ${e.message}")
+                null
+            }
+            hasDirectVibrator = directVibrator?.hasVibrator() ?: false
+
+            // v4.12.5: Detect secondary vibrator for stereo haptics
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                try {
+                    val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
+                    if (vm != null) {
+                        val vibrators = vm.vibrators
+                        if (vibrators.size >= 2) {
+                            // First is default, second is the secondary motor
+                            secondaryVibrator = vibrators[1]
+                            hasSecondaryVibrator = secondaryVibrator?.hasVibrator() ?: false
+                            Log.i(TAG, "Stereo haptics: found ${vibrators.size} vibrators, secondary=${hasSecondaryVibrator}")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Stereo haptics detection failed: ${e.message}")
+                }
+            }
+
+            hasAmplitudeControl = if (directVibrator != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                try { directVibrator!!.hasAmplitudeControl() } catch (_: Exception) { false }
+            } else false
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && directVibrator != null) {
+                try {
+                    val vib = directVibrator!!
+                    primitiveClickSupported = try {
+                        vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_CLICK)
+                    } catch (_: Exception) { false }
+                    primitiveTickSupported = try {
+                        vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_TICK)
+                    } catch (_: Exception) { false }
+                    primitiveHeavyClickSupported = try {
+                        vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_THUD)
+                    } catch (_: Exception) { false }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        primitiveLowTickSupported = try {
+                            vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_LOW_TICK)
+                        } catch (_: Exception) { false }
+                        primitiveSpinSupported = try {
+                            vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_SPIN)
+                        } catch (_: Exception) { false }
+                        primitiveQuickRiseSupported = try {
+                            vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_QUICK_RISE)
+                        } catch (_: Exception) { false }
+                        primitiveSlowRiseSupported = try {
+                            vib.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_SLOW_RISE)
+                        } catch (_: Exception) { false }
+                    }
+                } catch (_: Exception) {}
+            }
+
+            // v3.10.20: Detect vendor-specific haptic platforms
+            val mfr = Build.MANUFACTURER.lowercase()
+            colorOSHapticAvailable = mfr == "oneplus" || mfr == "oppo"
+            hyperOSHapticAvailable = mfr == "xiaomi"
+            val isLenovoHaptic = mfr == "lenovo"
+
+            // v4.8: Detect Xiaomi 10 series — custom ROM reports hasAmplitudeControl=true
+            // but the HAL doesn't actually scale amplitude. Force DEFAULT_AMPLITUDE.
+            val device = Build.DEVICE.lowercase(Locale.ROOT)
+            if (mfr == "xiaomi" && (device.contains("umi") || device.contains("cmi") || device.contains("thyme"))) {
+                forceDefaultAmplitude = true
+                forceDefaultAutoDetected = true
+                Log.w(TAG, "v4.8: Xiaomi 10 series detected — forcing DEFAULT_AMPLITUDE (known custom ROM amp scaling issue)")
+            }
+
+            // v4.10: The UI toggle wins over auto-detection in both directions, so a user
+            // on any device can opt into full-drive mode (or opt a Xiaomi 10 back out).
+            try {
+                val cfg = context.getSharedPreferences("haptics_config", Context.MODE_PRIVATE)
+                if (cfg.contains("force_default_amplitude")) {
+                    val userChoice = cfg.getBoolean("force_default_amplitude", forceDefaultAmplitude)
+                    if (userChoice != forceDefaultAmplitude) {
+                        forceDefaultAmplitude = userChoice
+                        Log.i(TAG, "v4.10: force_default_amplitude pref overrides detection → $userChoice")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "v4.10: force_default_amplitude pref read failed: ${e.message}")
+            }
+
+            Log.i(TAG, "Direct path: hasVibrator=$hasDirectVibrator hasAmpCtrl=$hasAmplitudeControl")
+            Log.i(TAG, "Primitive support: CLICK=$primitiveClickSupported TICK=$primitiveTickSupported THUD=$primitiveHeavyClickSupported")
+            Log.i(TAG, "Extended primitives: LOW_TICK=$primitiveLowTickSupported SPIN=$primitiveSpinSupported QUICK_RISE=$primitiveQuickRiseSupported SLOW_RISE=$primitiveSlowRiseSupported")
+            Log.i(TAG, "Vendor haptic: ColorOS=$colorOSHapticAvailable HyperOS=$hyperOSHapticAvailable Lenovo=$isLenovoHaptic")
+
+            if (!hasDirectVibrator) Log.e(TAG, "No direct vibrator available")
+
+            Log.i(TAG, "═══ END VIBRATE PROXY INIT ═══")
+            return hasDirectVibrator
+        } else {
+            useProxy = true
+            // proxy 模式：尝试从服务端获取振幅控制能力（通过 IPC 探测远端 vibrator）
+            hasAmplitudeControl = false // 默认保守；实际设备支持需远端探测
+            primitiveClickSupported = false
+            primitiveHeavyClickSupported = false
+            primitiveTickSupported = false
+            Log.i(TAG, "Target lacks VIBRATE — binding to VibrateProxyService (proxy) hasAmpCtrl=$hasAmplitudeControl")
+            Log.i(TAG, "═══ END VIBRATE PROXY INIT ═══")
+            return bind()
+        }
+    }
+
+    private fun bind(): Boolean {
+        return try {
+            val intent = Intent().apply {
+                component = ComponentName("com.mouya.musichaptics", "com.mouya.musichaptics.VibrateProxyService")
+            }
+            context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+            bound = true
+            Log.i(TAG, "bindService called")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "bind failed: ${e.message}")
+            false
+        }
+    }
+
+    val hasVibrator: Boolean
+        get() = if (useProxy) {
+            true
+        } else hasDirectVibrator
+
+    fun setPaused() {
+        paused = true
+        if (useProxy) {
+            val b = remoteBinder
+            if (b != null) {
+                try {
+                    val data = Parcel.obtain()
+                    val reply = Parcel.obtain()
+                    try {
+                        b.transact(VibrateProxyService.CODE_CANCEL, data, reply, 0)
+                        reply.readException()
+                    } finally {
+                        data.recycle()
+                        reply.recycle()
+                    }
+                } catch (_: Exception) {}
+            }
+        } else {
+            try { directVibrator?.cancel() } catch (_: Exception) {}
+        }
+    }
+
+    fun setResumed() {
+        paused = false
+    }
+
+    fun performPredefined(effectId: Int) {
+        if (paused) return
+        if (useProxy) {
+            val b = remoteBinder ?: return
+            try {
+                val data = Parcel.obtain()
+                val reply = Parcel.obtain()
+                try {
+                    data.writeInt(effectId)
+                    b.transact(VibrateProxyService.CODE_PERFORM_PREDEFINED, data, reply, 0)
+                    reply.readException()
+                } finally {
+                    data.recycle()
+                    reply.recycle()
+                }
+            } catch (e: Exception) { Log.w(TAG, "IPC performPredefined: ${e.message}") }
+        } else {
+            val vib = directVibrator
+            if (vib != null && hasDirectVibrator) {
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        try {
+                            vib.vibrate(VibrationEffect.createPredefined(effectId))
+                        } catch (e: Exception) {
+                            val (dur, amp) = when (effectId) {
+                                VibrationEffect.EFFECT_TICK -> 8L to 80
+                                VibrationEffect.EFFECT_CLICK -> 20L to 128
+                                VibrationEffect.EFFECT_HEAVY_CLICK -> 30L to 255
+                                else -> 10L to 100
+                            }
+                            val finalAmp = if (hasAmplitudeControl) amp else VibrationEffect.DEFAULT_AMPLITUDE
+                            vib.vibrate(VibrationEffect.createOneShot(dur, finalAmp))
+                        }
+                    } else {
+                        val (dur, amp) = when (effectId) {
+                            VibrationEffect.EFFECT_TICK -> 8L to 80
+                            VibrationEffect.EFFECT_CLICK -> 20L to 128
+                            VibrationEffect.EFFECT_HEAVY_CLICK -> 30L to 255
+                            else -> 10L to 100
+                        }
+                        vib.vibrate(VibrationEffect.createOneShot(dur, amp))
+                    }
+                } catch (e: Exception) { Log.w(TAG, "Direct performPredefined: ${e.message}") }
+            }
+        }
+    }
+
+    fun performWaveform(timings: LongArray, amplitudes: IntArray) {
+        if (paused) {
+            android.util.Log.w(TAG, "performWaveform SKIPPED: paused=true")
+            return
+        }
+        if (timings.isEmpty() || amplitudes.isEmpty()) {
+            android.util.Log.w(TAG, "performWaveform SKIPPED: empty arrays")
+            return
+        }
+
+        // If no amplitude control, fall back to primitive composition or single strong click
+        if (!hasAmplitudeControl) {
+            Log.w(TAG, "performWaveform: no amplitude control, fallback path, proxy=$useProxy hasAmpCtrl=$hasAmplitudeControl, primitives CLICK=$primitiveClickSupported THUD=$primitiveHeavyClickSupported")
+            val maxAmp = amplitudes.maxOrNull() ?: 0
+            if (primitiveHeavyClickSupported) {
+                performComposition(listOf(Triple(VibrationEffect.Composition.PRIMITIVE_THUD, (maxAmp / 255f).coerceIn(0f, 1f), 0)))
+            } else if (primitiveClickSupported) {
+                performComposition(listOf(Triple(VibrationEffect.Composition.PRIMITIVE_CLICK, (maxAmp / 255f).coerceIn(0f, 1f), 0)))
+            } else {
+                // Last resort: one-shot at default amplitude
+                val totalDuration = timings.sum()
+                Log.i(TAG, "performWaveform: no amp ctrl, no primitives → performOneShot($totalDuration, DEFAULT)")
+                performOneShot(totalDuration.coerceAtMost(100L), VibrationEffect.DEFAULT_AMPLITUDE)
+            }
+            return
+        }
+
+        if (useProxy) {
+            val b = remoteBinder
+            if (b == null) {
+                android.util.Log.w(TAG, "performWaveform SKIPPED: remoteBinder is null (IPC not connected)")
+                return
+            }
+            try {
+                val data = Parcel.obtain()
+                val reply = Parcel.obtain()
+                try {
+                    data.writeLongArray(timings)
+                    data.writeIntArray(amplitudes)
+                    b.transact(VibrateProxyService.CODE_PERFORM_WAVEFORM, data, reply, 0)
+                    reply.readException()
+                } finally {
+                    data.recycle()
+                    reply.recycle()
+                }
+            } catch (e: Exception) { Log.w(TAG, "IPC performWaveform: ${e.message}") }
+        } else {
+            val vib = directVibrator
+            if (vib != null && hasDirectVibrator) {
+                try {
+                    Log.i(TAG, "performWaveform: vibrate(waveform, ${timings.size} segments) useProxy=$useProxy ampCtrl=$hasAmplitudeControl")
+                    vib.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+                } catch (e: Exception) { Log.e(TAG, "Direct performWaveform FAILED: ${e.message}", e) }
+            } else {
+                Log.e(TAG, "performWaveform SKIPPED: vib=$vib hasDirect=$hasDirectVibrator")
+            }
+        }
+    }
+
+    fun performOneShot(durationMs: Long, amplitude: Int) {
+        if (paused) {
+            android.util.Log.w(TAG, "performOneShot SKIPPED: paused=true")
+            return
+        }
+        // v4.8: When forceDefaultAmplitude=true (Xiaomi 10 custom ROM), amplitude param
+        // is IGNORED by the HAL — all custom amplitudes vibrate weakly.
+        // Use DEFAULT_AMPLITUDE for full motor drive; duration is the differentiator.
+        // Other devices keep original amplitude-controlled path.
+        if (forceDefaultAmplitude && directVibrator != null && hasDirectVibrator) {
+            try {
+                val dur = durationMs.coerceAtLeast(1L)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    directVibrator!!.vibrate(VibrationEffect.createOneShot(dur, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    directVibrator!!.vibrate(dur)
+                }
+                return
+            } catch (e: Exception) {
+                Log.e(TAG, "performOneShot (forceDefault) FAILED: ${e.message}")
+            }
+        }
+        if (useProxy) {
+            val b = remoteBinder ?: return
+            try {
+                val data = Parcel.obtain()
+                val reply = Parcel.obtain()
+                try {
+                    data.writeLong(durationMs)
+                    data.writeInt(amplitude)
+                    b.transact(VibrateProxyService.CODE_PERFORM_ONESHOT, data, reply, 0)
+                    reply.readException()
+                } finally {
+                    data.recycle()
+                    reply.recycle()
+                }
+            } catch (e: Exception) { Log.w(TAG, "IPC performOneShot: ${e.message}") }
+        } else {
+            val vib = directVibrator
+            if (vib != null && hasDirectVibrator) {
+                try {
+                    Log.i(TAG, "performOneShot: vibrate(duration=$durationMs, amp=$amplitude) useProxy=$useProxy")
+                    vib.vibrate(VibrationEffect.createOneShot(durationMs, amplitude))
+                } catch (e: Exception) {
+                    Log.e(TAG, "Direct performOneShot FAILED: ${e.message}", e)
+                }
+            } else {
+                Log.e(TAG, "performOneShot SKIPPED: vib=$vib hasDirect=$hasDirectVibrator")
+            }
+        }
+    }
+
+    /**
+     * v4.9: Envelope waveform — submit an attack-sustain-release envelope as a single
+     * VibrationEffect.createWaveform call. This avoids CANCELLED_SUPERSEDED issues where
+     * consecutive performOneShot calls cancel each other mid-vibration.
+     *
+     * For forceDefault devices (Xiaomi 10): amplitude values are ignored by HAL,
+     * but timing segments create duration-based layering. We use DEFAULT_AMPLITUDE (-1).
+     * For normal devices: amplitude envelope creates intensity layering within a single
+     * vibration request that won't be interrupted.
+     *
+     * @param segments List of (durationMs, amplitude) pairs defining the envelope.
+     *                 amplitude: 1-255 for controlled, or -1 for DEFAULT_AMPLITUDE.
+     */
+    fun performEnvelope(segments: List<Pair<Long, Int>>) {
+        if (paused) {
+            android.util.Log.w(TAG, "performEnvelope SKIPPED: paused=true")
+            return
+        }
+        if (segments.isEmpty()) return
+
+        val forceDef = forceDefaultAmplitude
+        val useAmpCtrl = hasAmplitudeControl && !forceDef
+
+        if (forceDef && directVibrator != null && hasDirectVibrator) {
+            // Xiaomi 10: createWaveform with timings + DEFAULT_AMPLITUDE for all segments.
+            // Duration-based layering only (amplitude ignored by HAL).
+            try {
+                val timings = LongArray(segments.size) { segments[it].first.coerceAtLeast(1L) }
+                val amplitudes = IntArray(segments.size) { VibrationEffect.DEFAULT_AMPLITUDE }
+                Log.i(TAG, "performEnvelope(forceDef): ${timings.size} segments total=${timings.sum()}ms DEFAULT_AMPLITUDE")
+                directVibrator!!.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+                return
+            } catch (e: Exception) {
+                Log.e(TAG, "performEnvelope (forceDefault) FAILED: ${e.message}")
+            }
+        }
+
+        if (!useAmpCtrl) {
+            // No amplitude control: fall back to single one-shot with total duration.
+            val totalDur = segments.sumOf { it.first }.coerceAtMost(100L)
+            val maxAmp = segments.maxOfOrNull { it.second } ?: VibrationEffect.DEFAULT_AMPLITUDE
+            Log.i(TAG, "performEnvelope(noAmpCtrl): fallback oneShot(${totalDur}ms, amp=$maxAmp)")
+            performOneShot(totalDur, maxAmp)
+            return
+        }
+
+        // Normal path: amplitude-controlled waveform envelope.
+        if (useProxy) {
+            val b = remoteBinder ?: return
+            try {
+                val data = Parcel.obtain()
+                val reply = Parcel.obtain()
+                try {
+                    val timings = LongArray(segments.size) { segments[it].first.coerceAtLeast(1L) }
+                    val amplitudes = IntArray(segments.size) { segments[it].second.coerceIn(1, 255) }
+                    data.writeLongArray(timings)
+                    data.writeIntArray(amplitudes)
+                    b.transact(VibrateProxyService.CODE_PERFORM_WAVEFORM, data, reply, 0)
+                    reply.readException()
+                } finally {
+                    data.recycle()
+                    reply.recycle()
+                }
+            } catch (e: Exception) { Log.w(TAG, "IPC performEnvelope: ${e.message}") }
+        } else {
+            val vib = directVibrator
+            if (vib != null && hasDirectVibrator) {
+                try {
+                    val timings = LongArray(segments.size) { segments[it].first.coerceAtLeast(1L) }
+                    val amplitudes = IntArray(segments.size) { segments[it].second.coerceIn(1, 255) }
+                    Log.i(TAG, "performEnvelope: ${timings.size} segments total=${timings.sum()}ms ampCtrl=$hasAmplitudeControl")
+                    vib.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+                } catch (e: Exception) {
+                    Log.e(TAG, "performEnvelope FAILED: ${e.message}", e)
+                    // Fallback to one-shot with total duration
+                    val totalDur = segments.sumOf { it.first }.coerceAtMost(100L)
+                    val maxAmp = segments.maxOfOrNull { it.second } ?: 200
+                    performOneShot(totalDur, maxAmp)
+                }
+            }
+        }
+    }
+
+    fun cancel() {
+        if (useProxy) {
+            val b = remoteBinder ?: return
+            try {
+                val data = Parcel.obtain()
+                val reply = Parcel.obtain()
+                try {
+                    b.transact(VibrateProxyService.CODE_CANCEL, data, reply, 0)
+                    reply.readException()
+                } finally {
+                    data.recycle()
+                    reply.recycle()
+                }
+            } catch (_: Exception) {}
+        } else {
+            try { directVibrator?.cancel() } catch (_: Exception) {}
+        }
+    }
+
+    fun performComposition(
+        primitives: List<Triple<Int, Float, Int>>
+    ) {
+        if (paused) return
+        if (primitives.isEmpty()) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            primitives.forEach { (_, scale, _) ->
+                performOneShot(15L, (scale * 255).toInt().coerceIn(1, 255))
+            }
+            return
+        }
+
+        if (useProxy) {
+            val b = remoteBinder ?: return
+            try {
+                val data = Parcel.obtain()
+                val reply = Parcel.obtain()
+                try {
+                    data.writeInt(primitives.size)
+                    primitives.forEach { (pid, scale, delay) ->
+                        data.writeInt(pid)
+                        data.writeFloat(scale)
+                        data.writeInt(delay)
+                    }
+                    b.transact(VibrateProxyService.CODE_PERFORM_COMPOSITION, data, reply, 0)
+                    reply.readException()
+                } finally {
+                    data.recycle()
+                    reply.recycle()
+                }
+            } catch (e: Exception) { Log.w(TAG, "IPC performComposition: ${e.message}") }
+        } else {
+            val vib = directVibrator
+            if (vib != null && hasDirectVibrator) {
+                try {
+                    val composition = VibrationEffect.startComposition()
+                    var totalDelay = 0
+                    for ((pid, scale, delay) in primitives) {
+                        composition.addPrimitive(pid, scale.coerceIn(0f, 1f), delay.coerceAtLeast(0))
+                        totalDelay += delay
+                    }
+                    vib.vibrate(composition.compose())
+                } catch (e: Exception) {
+                    Log.w(TAG, "Composition failed, fallback to one-shot: ${e.message}")
+                    val avgScale = primitives.map { it.second }.avg()
+                    performOneShot(20L, (avgScale * 255).toInt().coerceIn(1, 255))
+                }
+            }
+        }
+    }
+
+    fun performTextureTick(intensity: Float) {
+        if (paused) return
+        val scale = intensity.coerceIn(0f, 1f)
+        if (primitiveLowTickSupported && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            performComposition(listOf(Triple(VibrationEffect.Composition.PRIMITIVE_LOW_TICK, scale, 0)))
+        } else if (primitiveTickSupported) {
+            performComposition(listOf(Triple(VibrationEffect.Composition.PRIMITIVE_TICK, scale, 0)))
+        } else {
+            performOneShot(8L, (scale * 128).toInt().coerceIn(1, 255))
+        }
+    }
+
+    fun performImpact(intensity: Float) {
+        if (paused) return
+        val scale = intensity.coerceIn(0f, 1f)
+        if (primitiveHeavyClickSupported) {
+            performComposition(listOf(Triple(VibrationEffect.Composition.PRIMITIVE_THUD, scale, 0)))
+        } else if (primitiveClickSupported) {
+            performComposition(listOf(Triple(VibrationEffect.Composition.PRIMITIVE_CLICK, scale, 0)))
+        } else {
+            performOneShot(20L, (scale * 255).toInt().coerceIn(1, 255))
+        }
+    }
+
+    fun performRise(intensity: Float, fast: Boolean = true) {
+        if (paused) return
+        val scale = intensity.coerceIn(0f, 1f)
+        val primitive = if (fast) {
+            if (primitiveQuickRiseSupported) VibrationEffect.Composition.PRIMITIVE_QUICK_RISE
+            else null
+        } else {
+            if (primitiveSlowRiseSupported) VibrationEffect.Composition.PRIMITIVE_SLOW_RISE
+            else null
+        }
+        if (primitive != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            performComposition(listOf(Triple(primitive, scale, 0)))
+        } else {
+            performOneShot(12L, (scale * 200).toInt().coerceIn(1, 255))
+        }
+    }
+
+    private fun List<Float>.avg(): Float = if (isEmpty()) 0.5f else sum() / size
+
+    fun unbind() {
+        if (useProxy && bound) {
+            try { context.unbindService(connection) } catch (_: Exception) {}
+            bound = false
+            remoteBinder = null
+        }
+    }
+
+    val isProxyActive: Boolean get() = useProxy && remoteBinder != null
+}

@@ -138,8 +138,32 @@ data class MusicPersona(
             pulsePeriodMax = 70
         )
 
+        val NETEASE = MusicPersona(
+            name = "NETEASE",
+            displayName = "网易云·嗨动",
+            description = "网易云嗨动模式：干脆击打、低频厚重不拖沓、人声有质感、整体氛围感强",
+            bassGain = 1.35f,  // 低频增强：厚重有体积，但不过度
+            vocalGain = 1.15f,  // 人声稍增：歌词情绪传递
+            textureGain = 1.1f,  // 纹理适中：吉他/钢琴泛音可感知
+            beatThreshold = 1.1f,  // 更敏感的节拍检测：不漏击
+            transientThreshold = 1.15f,  // 瞬态更敏感：鼓点清晰
+            impactBias = 1.4f,  // 强击打偏置：每一下都有力
+            pulseBias = 1.1f,  // 脉冲跟随：持续低频律动
+            textureBias = 1.0f,  // 纹理平衡
+            waveBias = 0.85f,  // 波浪略减：避免过度平滑
+            gamma = 0.42f,  // 更低 gamma：动态范围大，强弱对比明显
+            impactDurationMin = 8,
+            impactDurationMax = 24,  // 更短击打：干脆利落，不拖泥带水
+            pulsePeriodMin = 20,
+            pulsePeriodMax = 65,  // 更快脉冲：律动感强
+            textureDurationMin = 60,
+            textureDurationMax = 350,  // 纹理不拖沓
+            waveDurationMin = 40,
+            waveDurationMax = 500  // 波浪适中
+        )
+
         val ALL: List<MusicPersona> = listOf(
-            EDM, POP, VOCAL, CLASSICAL, GAME_OST
+            EDM, POP, VOCAL, CLASSICAL, GAME_OST, NETEASE
         )
 
         val DEFAULT: MusicPersona = POP

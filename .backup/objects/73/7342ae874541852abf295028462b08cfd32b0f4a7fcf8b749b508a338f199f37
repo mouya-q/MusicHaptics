@@ -1,0 +1,78 @@
+# MusicHapticsX
+
+> 让音乐"触手可及" —— 基于节奏感知的沉浸式振动引擎
+>
+> **Feel the Beat** — An immersive haptic engine powered by rhythm-aware vibration.
+
+## 这是什么？ / What is this?
+
+**中文：**
+MusicHapticsX 是一个基于 LSPosed 的 Android 音乐触觉引擎，通过 Native DSP、节奏识别、Haptic Composer 以及设备级 LRA 建模，让 Android 设备实现智能化音乐震动反馈。
+
+**English:**
+MusicHapticsX is an LSPosed-based Android music haptic engine that delivers intelligent music vibration feedback through Native DSP, rhythm recognition, Haptic Composer, and device-level LRA modeling.
+
+简单说：**你的音乐在振动，但这次是跟着拍子来的。**
+
+In short: **Your music vibrates, but this time it's on beat.**
+
+## 特性 / Features
+
+- **节奏感知振动** — 每一次振动都落在拍子上
+- **Rhythm-Aware Vibration** — Every haptic hit lands on the beat
+
+- **强弱弱强模式** — 根据 BPM 动态判断强拍
+- **Strong-Weak Pattern** — Dynamic beat emphasis based on BPM
+
+- **三频段音色分析** — 区分 KICK/SNARE/TICK
+- **Three-Band Timbre Analysis** — KICK/SNARE/TICK classification
+
+- **动态强度映射** — 强弱变化真实自然
+- **Dynamic Intensity Mapping** — Natural dynamics via peak follower
+
+- **自适应阈值** — 适应不同曲风
+- **Adaptive Threshold** — Adapts to different genres
+
+- **全局节拍门控** — 振动最少间隔 195ms
+- **Global Beat Gate** — Minimum 195ms interval
+
+- **立体振动** — 双马达设备空间振动（联想拯救者Y700等）
+- **Stereo Haptics** — Spatial vibration for dual-motor devices
+
+## 技术细节 / Technical Details
+
+```kotlin
+// 跟踪攻击量（delta），而不是 RMS 电平
+// Track attack delta, not RMS level
+peakLow = max(peakLow, rmsLow) * (1 - peakDecay)
+peakDelta = rmsLow - peakLow
+rel = peakDelta / (peakLow + 0.01f)
+```
+
+## 使用方式 / Usage
+
+1. 安装 APK / Install APK
+2. 在目标音乐播放器中启用模块 / Enable module in target music player
+3. 感受节奏感振动 / Enjoy rhythm-synced haptics
+
+## 版本历史 / Version History
+
+- **v4.12.7** (2026-08-26) — SNARE/TICK 动态范围修复 / SNARE/TICK dynamic range fix
+- **v4.12.6** (2026-08-26) — 立体振动支持 / Stereo haptics support
+- **v4.12.5** (2026-08-26) — 音频分析大修 / Audio analysis overhaul
+- **v4.12.2** (2026-08-26) — 修复 SNARE/TICK 动态，快歌间隔优化 / Fixed SNARE/TICK dynamics, fast song interval
+- **v4.12.1** (2026-08-26) — UI 清理，波形修复，移除内置字体 / UI cleanup, waveform fix, font removal
+- **v4.12.0** (2026-08-25) — 节奏感知引擎 v9.1，峰值跟随器修复 / Rhythm engine v9.1, peak follower fix
+- **v4.11.0** (2026-08-20) — 初始版本 / Initial release
+
+## 已知问题 / Known Issues
+
+- SNARE/TICK 的强度动态范围仍需优化
+- SNARE/TICK intensity dynamic range needs further optimization
+
+- 某些曲风（如电子舞曲）的振动密度可以进一步优化
+- Vibration density for certain genres (e.g., EDM) can be further improved
+
+## License
+
+MIT License

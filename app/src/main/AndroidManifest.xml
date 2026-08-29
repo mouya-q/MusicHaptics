@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.VIBRATE"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="com.mouya.musichaptics.permission.CONFIG_SYNC"/>
 
     <!-- Visible-package declaration for the scoped-app list; no broad package query. -->
@@ -30,6 +31,8 @@
         <meta-data android:name="xposeddescription" android:value="音乐音频拦截与振动协同模块" />
         <meta-data android:name="xposedminversion" android:value="82" />
         <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
+        <!-- 强制启用 LSPosed 动态注入（API），使设置变更可即时下发到被 Hook 的应用进程 -->
+        <meta-data android:name="xposed.dynamic.support" android:value="true" />
 
         <provider android:name="com.itsaky.androidide.logsender.utils.LogSenderInstaller" tools:node="remove" />
         <service android:name="com.itsaky.androidide.logsender.LogSenderService" tools:node="remove" />

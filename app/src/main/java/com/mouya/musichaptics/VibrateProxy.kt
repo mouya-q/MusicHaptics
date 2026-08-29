@@ -23,7 +23,7 @@ class VibrateProxy(private val context: Context) {
     @Volatile private var useProxy = false
     private var directVibrator: Vibrator? = null
     private var hasDirectVibrator = false
-    // v4.12.5: Stereo haptics support for dual-motor devices
+    
     private var secondaryVibrator: Vibrator? = null
     private var hasSecondaryVibrator = false
 
@@ -49,7 +49,7 @@ class VibrateProxy(private val context: Context) {
         private set
     @Volatile var primitiveSlowRiseSupported = false
         private set
-    // v3.10.20: Vendor-specific haptic API capability
+    
     @Volatile var colorOSHapticAvailable = false
         private set
     @Volatile var hyperOSHapticAvailable = false
@@ -64,24 +64,17 @@ class VibrateProxy(private val context: Context) {
     @Volatile var hasAmplitudeControl = false
         private set
 
-    // v4.8: Custom ROM flag — set when device reports hasAmplitudeControl=true
-    // but actual HAL amplitude scaling is broken (e.g. Xiaomi 10 custom ROM).
-    // When true, always use DEFAULT_AMPLITUDE for full motor drive.
+    
+    
+    
     @Volatile var forceDefaultAmplitude = false
         private set
 
-    /** v4.10: true when the Xiaomi-10-style HAL quirk was auto-detected on this device. */
+    
     @Volatile var forceDefaultAutoDetected = false
         private set
 
-    /**
-     * v4.10: User-facing "强制满驱动" toggle (pref `force_default_amplitude`).
-     *
-     * Some devices report hasAmplitudeControl=true while the HAL silently ignores the
-     * amplitude parameter, so every custom amplitude comes out equally weak. Auto-detecting
-     * that is not reliable across ROMs, so the toggle stays manual; the Xiaomi 10 series
-     * (umi/cmi/thyme), where the quirk is confirmed, defaults it on.
-     */
+    
     fun setForceDefaultAmplitude(enabled: Boolean) {
         if (forceDefaultAmplitude == enabled) return
         forceDefaultAmplitude = enabled
@@ -114,14 +107,14 @@ class VibrateProxy(private val context: Context) {
             }
             hasDirectVibrator = directVibrator?.hasVibrator() ?: false
 
-            // v4.12.5: Detect secondary vibrator for stereo haptics
+            
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 try {
                     val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
                     if (vm != null) {
                         val vibratorIds = vm.vibratorIds
                         if (vibratorIds.size >= 2) {
-                            // First is default, second is the secondary motor
+                            
                             secondaryVibrator = vm.getVibrator(vibratorIds[1])
                             hasSecondaryVibrator = secondaryVibrator?.hasVibrator() ?: false
                             Log.i(TAG, "Stereo haptics: found ${vibratorIds.size} vibrators, secondary=${hasSecondaryVibrator}")
@@ -166,14 +159,14 @@ class VibrateProxy(private val context: Context) {
                 } catch (_: Exception) {}
             }
 
-            // v3.10.20: Detect vendor-specific haptic platforms
+            
             val mfr = Build.MANUFACTURER.lowercase()
             colorOSHapticAvailable = mfr == "oneplus" || mfr == "oppo"
             hyperOSHapticAvailable = mfr == "xiaomi"
             val isLenovoHaptic = mfr == "lenovo"
 
-            // v4.8: Detect Xiaomi 10 series — custom ROM reports hasAmplitudeControl=true
-            // but the HAL doesn't actually scale amplitude. Force DEFAULT_AMPLITUDE.
+            
+            
             val device = Build.DEVICE.lowercase(Locale.ROOT)
             if (mfr == "xiaomi" && (device.contains("umi") || device.contains("cmi") || device.contains("thyme"))) {
                 forceDefaultAmplitude = true
@@ -181,8 +174,8 @@ class VibrateProxy(private val context: Context) {
                 Log.w(TAG, "v4.8: Xiaomi 10 series detected — forcing DEFAULT_AMPLITUDE (known custom ROM amp scaling issue)")
             }
 
-            // v4.10: The UI toggle wins over auto-detection in both directions, so a user
-            // on any device can opt into full-drive mode (or opt a Xiaomi 10 back out).
+            
+            
             try {
                 val cfg = context.getSharedPreferences("haptics_config", Context.MODE_PRIVATE)
                 if (cfg.contains("force_default_amplitude")) {
@@ -207,8 +200,8 @@ class VibrateProxy(private val context: Context) {
             return hasDirectVibrator
         } else {
             useProxy = true
-            // proxy 模式：尝试从服务端获取振幅控制能力（通过 IPC 探测远端 vibrator）
-            hasAmplitudeControl = false // 默认保守；实际设备支持需远端探测
+            
+            hasAmplitudeControl = false 
             primitiveClickSupported = false
             primitiveHeavyClickSupported = false
             primitiveTickSupported = false
@@ -321,7 +314,7 @@ class VibrateProxy(private val context: Context) {
             return
         }
 
-        // If no amplitude control, fall back to primitive composition or single strong click
+        
         if (!hasAmplitudeControl) {
             Log.w(TAG, "performWaveform: no amplitude control, fallback path, proxy=$useProxy hasAmpCtrl=$hasAmplitudeControl, primitives CLICK=$primitiveClickSupported THUD=$primitiveHeavyClickSupported")
             val maxAmp = amplitudes.maxOrNull() ?: 0
@@ -330,7 +323,7 @@ class VibrateProxy(private val context: Context) {
             } else if (primitiveClickSupported) {
                 performComposition(listOf(Triple(VibrationEffect.Composition.PRIMITIVE_CLICK, (maxAmp / 255f).coerceIn(0f, 1f), 0)))
             } else {
-                // Last resort: one-shot at default amplitude
+                
                 val totalDuration = timings.sum()
                 Log.i(TAG, "performWaveform: no amp ctrl, no primitives → performOneShot($totalDuration, DEFAULT)")
                 performOneShot(totalDuration.coerceAtMost(100L), VibrationEffect.DEFAULT_AMPLITUDE)
@@ -375,10 +368,10 @@ class VibrateProxy(private val context: Context) {
             android.util.Log.w(TAG, "performOneShot SKIPPED: paused=true")
             return
         }
-        // v4.8: When forceDefaultAmplitude=true (Xiaomi 10 custom ROM), amplitude param
-        // is IGNORED by the HAL — all custom amplitudes vibrate weakly.
-        // Use DEFAULT_AMPLITUDE for full motor drive; duration is the differentiator.
-        // Other devices keep original amplitude-controlled path.
+        
+        
+        
+        
         if (forceDefaultAmplitude && directVibrator != null && hasDirectVibrator) {
             try {
                 val dur = durationMs.coerceAtLeast(1L)
@@ -423,14 +416,7 @@ class VibrateProxy(private val context: Context) {
         }
     }
 
-    /**
-     * v4.12.5: Stereo haptic envelope — drives primary and secondary motors independently.
-     * For dual-motor devices like Lenovo Legion Y700, this creates spatial haptic effects.
-     *
-     * @param primarySegments  (durationMs, amplitude) pairs for the primary motor
-     * @param secondarySegments (durationMs, amplitude) pairs for the secondary motor
-     * @param delayMs delay before triggering secondary motor (for staggered effects)
-     */
+    
     fun performStereoEnvelope(
         primarySegments: List<Pair<Long, Int>>,
         secondarySegments: List<Pair<Long, Int>> = emptyList(),
@@ -442,7 +428,7 @@ class VibrateProxy(private val context: Context) {
         }
         if (primarySegments.isEmpty()) return
 
-        // If no secondary motor, fall back to primary only
+        
         if (!hasSecondaryVibrator) {
             performEnvelope(primarySegments)
             return
@@ -451,7 +437,7 @@ class VibrateProxy(private val context: Context) {
         val forceDef = forceDefaultAmplitude
         val useAmpCtrl = hasAmplitudeControl && !forceDef
 
-        // Build and fire primary motor waveform
+        
         val pTimings = LongArray(primarySegments.size) { primarySegments[it].first }
         val pAmps = IntArray(primarySegments.size) {
             if (useAmpCtrl) primarySegments[it].second else VibrationEffect.DEFAULT_AMPLITUDE
@@ -462,10 +448,10 @@ class VibrateProxy(private val context: Context) {
             Log.e(TAG, "Stereo primary FAILED: ${e.message}")
         }
 
-        // Build and fire secondary motor waveform (optionally delayed)
+        
         if (secondarySegments.isNotEmpty()) {
             if (delayMs > 0) {
-                // Add silent delay segment at the start of secondary
+                
                 val sTimings = longArrayOf(delayMs) + LongArray(secondarySegments.size) { secondarySegments[it].first }
                 val sAmps = intArrayOf(0) + IntArray(secondarySegments.size) {
                     if (useAmpCtrl) secondarySegments[it].second else VibrationEffect.DEFAULT_AMPLITUDE
@@ -491,19 +477,7 @@ class VibrateProxy(private val context: Context) {
 
     val hasStereoVibrator: Boolean get() = hasSecondaryVibrator
 
-    /**
-     * v4.9: Envelope waveform — submit an attack-sustain-release envelope as a single
-     * VibrationEffect.createWaveform call. This avoids CANCELLED_SUPERSEDED issues where
-     * consecutive performOneShot calls cancel each other mid-vibration.
-     *
-     * For forceDefault devices (Xiaomi 10): amplitude values are ignored by HAL,
-     * but timing segments create duration-based layering. We use DEFAULT_AMPLITUDE (-1).
-     * For normal devices: amplitude envelope creates intensity layering within a single
-     * vibration request that won't be interrupted.
-     *
-     * @param segments List of (durationMs, amplitude) pairs defining the envelope.
-     *                 amplitude: 1-255 for controlled, or -1 for DEFAULT_AMPLITUDE.
-     */
+    
     fun performEnvelope(segments: List<Pair<Long, Int>>) {
         if (paused) {
             android.util.Log.w(TAG, "performEnvelope SKIPPED: paused=true")
@@ -515,8 +489,8 @@ class VibrateProxy(private val context: Context) {
         val useAmpCtrl = hasAmplitudeControl && !forceDef
 
         if (forceDef && directVibrator != null && hasDirectVibrator) {
-            // Xiaomi 10: createWaveform with timings + DEFAULT_AMPLITUDE for all segments.
-            // Duration-based layering only (amplitude ignored by HAL).
+            
+            
             try {
                 val timings = LongArray(segments.size) { segments[it].first.coerceAtLeast(1L) }
                 val amplitudes = IntArray(segments.size) { VibrationEffect.DEFAULT_AMPLITUDE }
@@ -529,7 +503,7 @@ class VibrateProxy(private val context: Context) {
         }
 
         if (!useAmpCtrl) {
-            // No amplitude control: fall back to single one-shot with total duration.
+            
             val totalDur = segments.sumOf { it.first }.coerceAtMost(100L)
             val maxAmp = segments.maxOfOrNull { it.second } ?: VibrationEffect.DEFAULT_AMPLITUDE
             Log.i(TAG, "performEnvelope(noAmpCtrl): fallback oneShot(${totalDur}ms, amp=$maxAmp)")
@@ -537,7 +511,7 @@ class VibrateProxy(private val context: Context) {
             return
         }
 
-        // Normal path: amplitude-controlled waveform envelope.
+        
         if (useProxy) {
             val b = remoteBinder ?: return
             try {
@@ -565,7 +539,7 @@ class VibrateProxy(private val context: Context) {
                     vib.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
                 } catch (e: Exception) {
                     Log.e(TAG, "performEnvelope FAILED: ${e.message}", e)
-                    // Fallback to one-shot with total duration
+                    
                     val totalDur = segments.sumOf { it.first }.coerceAtMost(100L)
                     val maxAmp = segments.maxOfOrNull { it.second } ?: 200
                     performOneShot(totalDur, maxAmp)

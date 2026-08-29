@@ -537,22 +537,24 @@ public:
         if (onsetRefractoryFrames_[0] == 0) {
             // Spectral flux path ONLY (no absolute energy!)
             // bassFlux = max(0, bassBand - prevBassRms_) — already computed above
-            float bassFluxVal = std::clamp(bassFlux * 30.0f, 0.0f, 1.0f);  // lowered from 60.0f
-            float subFluxVal  = std::clamp(std::max(0.0f, subRms - prevSubRms_) * 30.0f, 0.0f, 1.0f);  // lowered from 60.0f
+            float bassFluxVal = std::clamp(bassFlux * 20.0f, 0.0f, 1.0f);  // lowered from 30.0f
+            float subFluxVal  = std::clamp(std::max(0.0f, subRms - prevSubRms_) * 20.0f, 0.0f, 1.0f);  // lowered from 30.0f
             // Combine: take the stronger transient
             kickOnset = std::max(bassFluxVal, subFluxVal);
-            // Dynamic threshold: require minimum change to avoid noise
-            if (kickOnset < 0.10f) kickOnset = 0.0f;  // raised from 0.05f
+            // v4.20: Much higher threshold to avoid "乱震" (random vibration)
+            if (kickOnset < 0.25f) kickOnset = 0.0f;  // raised from 0.10f
             if (kickOnset > 0.0f) onsetRefractoryFrames_[0] = ONSET_REFRACTORY_FRAMES;
         }
 
         // Snare: low-mid band + presence band
         float snareOnset = 0.0f;
         if (onsetRefractoryFrames_[1] == 0) {
-            float lowMidEnergy = std::clamp((lowMidBand - 0.008f) * 22.0f, 0.0f, 1.0f);
-            float lowMidFluxV  = std::clamp(lowMidFlux2 * 50.0f, 0.0f, 1.0f);
-            float presFluxVal  = std::clamp(presenceFlux2 * 40.0f, 0.0f, 1.0f);
+            float lowMidEnergy = std::clamp((lowMidBand - 0.015f) * 15.0f, 0.0f, 1.0f);  // lowered threshold, lowered gain
+            float lowMidFluxV  = std::clamp(lowMidFlux2 * 35.0f, 0.0f, 1.0f);  // lowered from 50.0f
+            float presFluxVal  = std::clamp(presenceFlux2 * 25.0f, 0.0f, 1.0f);  // lowered from 40.0f
             snareOnset = std::max({lowMidEnergy, lowMidFluxV, presFluxVal});
+            // v4.20: Require meaningful snare energy to avoid false triggers
+            if (snareOnset < 0.20f) snareOnset = 0.0f;  // raised from 0.0f
             if (snareOnset > 0.0f) onsetRefractoryFrames_[1] = ONSET_REFRACTORY_FRAMES;
         }
 

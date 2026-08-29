@@ -8,21 +8,6 @@ android {
     namespace = "com.mouya.musichaptics"
     compileSdk = 34
 
-    signingConfigs {
-        create("debug") {
-            storeFile = file(System.getenv("KEYSTORE_FILE") ?: "debug.keystore")
-            storePassword = System.getenv("STORE_PASS") ?: "android"
-            keyAlias = System.getenv("KEYALIAS") ?: "androiddebugkey"
-            keyPassword = System.getenv("KEY_PASS") ?: "android"
-        }
-        create("release") {
-            storeFile = file(System.getenv("KEYSTORE_FILE") ?: "debug.keystore")
-            storePassword = System.getenv("STORE_PASS") ?: "android"
-            keyAlias = System.getenv("KEYALIAS") ?: "androiddebugkey"
-            keyPassword = System.getenv("KEY_PASS") ?: "android"
-        }
-    }
-
     defaultConfig {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
@@ -43,10 +28,10 @@ android {
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs["debug"]
+            // 使用环境变量配置的签名密钥（GitHub Actions 提供）
+            // 如果环境变量不存在，则使用默认调试签名
         }
         release {
-            signingConfig = signingConfigs["release"]
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -86,7 +71,7 @@ android {
         }
     }
 
-    packagingOptions {
+    packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1,ASL2.0,NOTICE,LICENSE,LICENSE.txt,LICENSE.md,NOTICE.txt,NOTICE.md}"
         }

@@ -34,7 +34,6 @@ app/src/main/cpp/cmake_install.cmake
 app/src/main/cpp/Makefile
 
 # Local Maven repository (not needed in VCS)
-local-maven/
 
 # Build script (local)
 build.sh

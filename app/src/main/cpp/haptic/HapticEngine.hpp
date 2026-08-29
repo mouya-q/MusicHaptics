@@ -559,20 +559,24 @@ public:
         // Vocal: vocal band (500-3000Hz)
         float vocalOnset = 0.0f;
         if (onsetRefractoryFrames_[2] == 0) {
-            float vocalEnergy = std::clamp((vocalBand - 0.004f) * 30.0f, 0.0f, 1.0f);
-            float vocalFluxV  = std::clamp(vocalFlux * 40.0f, 0.0f, 1.0f);
+            float vocalEnergy = std::clamp((vocalBand - 0.008f) * 15.0f, 0.0f, 1.0f);  // lowered from 30.0f
+            float vocalFluxV  = std::clamp(vocalFlux * 20.0f, 0.0f, 1.0f);  // lowered from 40.0f
             vocalOnset = std::max(vocalEnergy, vocalFluxV);
             // v4.15: Mutual exclusion — if snare is strong, suppress vocal
-            if (snareOnset > 0.3f) vocalOnset *= 0.3f;
-            if (vocalOnset < 0.05f) vocalOnset = 0.0f;
+            if (snareOnset > 0.3f) vocalOnset *= 0.2f;  // stronger suppression
+            // v4.17: Hard cap vocal onset at 0.3 to avoid constant vibration
+            if (vocalOnset > 0.3f) vocalOnset = 0.3f;
+            if (vocalOnset < 0.08f) vocalOnset = 0.0f;  // raised threshold
             if (vocalOnset > 0.0f) onsetRefractoryFrames_[2] = ONSET_REFRACTORY_FRAMES;
         }
 
         // Body: sub-bass sustained energy (capped at 20% to avoid continuous rumble)
         float bodyOnset = 0.0f;
         if (onsetRefractoryFrames_[3] == 0) {
-            float rawBody = std::clamp((subRms - 0.006f) * 20.0f, 0.0f, 1.0f);
-            bodyOnset = std::min(rawBody, 0.20f);
+            float rawBody = std::clamp((subRms - 0.010f) * 15.0f, 0.0f, 1.0f);  // lowered from 20.0f
+            bodyOnset = std::min(rawBody, 0.15f);  // lowered from 0.20f
+            // v4.17: Only trigger body when there's significant sub-bass energy
+            if (bodyOnset < 0.08f) bodyOnset = 0.0f;
             if (bodyOnset > 0.0f) onsetRefractoryFrames_[3] = ONSET_REFRACTORY_FRAMES;
         }
 
@@ -665,24 +669,24 @@ public:
     //  for each instrumental track separately.
     // ═════════════════════════════════════════════════════════════════
     void composeHapticLayer(float subRms, float midRms, float textureRms,
-                            float pitch, float thermalGain, float userAmp, float dt) {
+                             float pitch, float thermalGain, float userAmp, float dt) {
         // 1. Kick Track: Fast attack, sharp exponential decay
-        float kickEnv = std::max(0.0f, subRms - prevSubRms_) * 8.0f * kickProbability_;
+        float kickEnv = std::max(0.0f, subRms - prevSubRms_) * 6.0f * kickProbability_;  // lowered from 8.0f
         kickEnv = std::clamp(kickEnv, 0.0f, 1.0f);
         
         // 2. Snare Track: Snap transient
-        float snareEnv = (midRms * 1.5f + textureRms * 2.0f) * snareProbability_;
+        float snareEnv = (midRms * 1.2f + textureRms * 1.0f) * snareProbability_;  // lowered texture weight
         snareEnv = std::clamp(snareEnv, 0.0f, 1.0f);
         
-        // 3. Vocal Track: Long-sustain low-pass envelope
-        float vocalTarget = (midRms * 0.8f + textureRms * 0.3f) * vocalProbability_;
-        vocalEnvelope_ += (vocalTarget - vocalEnvelope_) * 0.15f;
-        float vocalEnv = std::clamp(vocalEnvelope_, 0.0f, 1.0f);
+        // 3. Vocal Track: Long-sustain low-pass envelope (capped to avoid constant vibration)
+        float vocalTarget = (midRms * 0.5f + textureRms * 0.15f) * vocalProbability_;  // lowered weights
+        vocalEnvelope_ += (vocalTarget - vocalEnvelope_) * 0.10f;  // slower attack
+        float vocalEnv = std::clamp(vocalEnvelope_, 0.0f, 0.4f);  // hard cap at 40%
         
-        // 4. Body (Background Rumble)
-        float bodyTarget = (subRms * 0.5f + midRms * 0.2f) * bassSustainProbability_;
-        bassSmoothed_ += (bodyTarget - bassSmoothed_) * 0.2f;
-        float bodyEnv = std::clamp(bassSmoothed_, 0.0f, 1.0f);
+        // 4. Body (Background Rumble) - capped to avoid continuous rumble
+        float bodyTarget = (subRms * 0.3f + midRms * 0.1f) * bassSustainProbability_;  // lowered weights
+        bassSmoothed_ += (bodyTarget - bassSmoothed_) * 0.15f;  // slower attack
+        float bodyEnv = std::clamp(bassSmoothed_, 0.0f, 0.25f);  // hard cap at 25%
         
         // v3.15: TAIL-CATCHER — replaced hard cutoff with smooth attenuation.
         // Old: if (totalEnergy < 0.003f) → everything zeroed → "尾气" (fade tails) lost.

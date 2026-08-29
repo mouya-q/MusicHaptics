@@ -485,7 +485,13 @@ public:
         );
         float snareTarget = std::clamp(lowMidFlux * 18.0f + presenceFlux * 10.0f + highRatio * 0.35f - bassRatio * 0.25f, 0.0f, 1.0f);
         float hatTarget = std::clamp(airFlux * 28.0f + presenceFlux * 8.0f + zcr * 1.5f - bassRatio * 0.35f, 0.0f, 1.0f);
-        float vocalTarget = std::clamp(vocalRatio * 1.8f + pitchConfidence_ * 0.65f - highRatio * 0.45f - std::max(kickTarget, snareTarget) * 0.35f, 0.0f, 1.0f);
+        float vocalTarget = std::clamp(
+            vocalRatio * 1.2f  // reduced from 1.8f
+            + pitchConfidence_ * 0.35f  // reduced from 0.65f
+            - highRatio * 0.45f
+            - std::max(kickTarget, snareTarget) * 0.65f,  // increased from 0.35f (stronger suppression)
+            0.0f, 1.0f
+        );
         float pluckedTarget = std::clamp(lowMidFlux * 14.0f + presenceFlux * 5.0f + pitchConfidence_ * 0.35f - vocalTarget * 0.25f, 0.0f, 1.0f);
         float harmonicTarget = std::clamp(pitchConfidence_ * 0.65f + (lowMidBand + vocalBand) / totalBand * 0.55f - std::max({kickTarget, snareTarget, hatTarget}) * 0.3f, 0.0f, 1.0f);
         float bassSustainTarget = std::clamp(
@@ -536,7 +542,7 @@ public:
             // Combine: take the stronger transient
             kickOnset = std::max(bassFluxVal, subFluxVal);
             // Dynamic threshold: require minimum change to avoid noise
-            if (kickOnset < 0.08f) kickOnset = 0.0f;
+            if (kickOnset < 0.05f) kickOnset = 0.0f;  // lowered from 0.08f
             if (kickOnset > 0.0f) onsetRefractoryFrames_[0] = ONSET_REFRACTORY_FRAMES;
         }
 
@@ -556,6 +562,9 @@ public:
             float vocalEnergy = std::clamp((vocalBand - 0.004f) * 30.0f, 0.0f, 1.0f);
             float vocalFluxV  = std::clamp(vocalFlux * 40.0f, 0.0f, 1.0f);
             vocalOnset = std::max(vocalEnergy, vocalFluxV);
+            // v4.15: Mutual exclusion — if snare is strong, suppress vocal
+            if (snareOnset > 0.3f) vocalOnset *= 0.3f;
+            if (vocalOnset < 0.05f) vocalOnset = 0.0f;
             if (vocalOnset > 0.0f) onsetRefractoryFrames_[2] = ONSET_REFRACTORY_FRAMES;
         }
 

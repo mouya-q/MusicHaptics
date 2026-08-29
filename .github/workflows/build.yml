@@ -27,9 +27,9 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
       
-      - name: Install NDK
+      - name: Install NDK, Build-Tools and CMake
         run: |
-          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "ndk;26.1.10909125"
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.0.12077973" "build-tools;35.0.0" "cmake;3.22.1"
       
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
@@ -69,7 +69,7 @@ jobs:
       - name: Print Build Info
         if: success()
         run: |
-          echo "✅ Build Successful!"
+          echo "🎉 Build Successful!"
           echo "Debug APK: app/build/outputs/apk/debug/"
           echo "Release APK: app/build/outputs/apk/release/"
           ls -lah app/build/outputs/apk/debug/

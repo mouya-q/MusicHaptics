@@ -100,10 +100,10 @@ data class DeviceProfile(
         get() = dspSubMultOverride
             ?: (1.8f * (actuator.resonanceFreq / 200f).coerceIn(0.75f, 1.10f))
 
-    /** KICK band multiplier — same reasoning as SUB but a shallower tilt. */
+    /** KICK band multiplier — high-Q motors need lower kick gain (longer decay). */
     val dspKickMult: Float
         get() = dspKickMultOverride
-            ?: (1.0f * (actuator.resonanceFreq / 200f).coerceIn(0.85f, 1.10f))
+            ?: (0.8f * (10f / actuator.qFactor.coerceIn(8f, 20f)).coerceIn(0.50f, 1.00f))
 
     /** SNARE band multiplier — mid transients, mostly actuator-agnostic. */
     val dspSnareMult: Float
@@ -115,10 +115,10 @@ data class DeviceProfile(
         get() = dspTickMultOverride
             ?: (0.4f * (15f / actuator.qFactor.coerceIn(8f, 20f)).coerceIn(0.75f, 1.40f))
 
-    /** BODY band multiplier — slow motors would turn sustained parts into mush. */
+    /** BODY band multiplier — slow motors need more body, high-Q motors need less. */
     val dspBodyMult: Float
         get() = dspBodyMultOverride
-            ?: (1.5f * (actuator.responseTimeMs / 5.75f).coerceIn(0.90f, 1.35f))
+            ?: (1.2f * (10f / actuator.qFactor.coerceIn(8f, 20f)).coerceIn(0.60f, 1.20f))
 
     /** v4.10: Refractory scale — slow motors need longer gaps, fast ones can go denser. */
     val dspRefractoryScale: Float
@@ -203,6 +203,10 @@ data class DeviceProfile(
             fillerDurationMs = 6L,
             fillerAmplitude = 35,
             bassBoost = 1.2f,
+            // v4.18: Q=16 high-Q motor needs shorter decay and lower kick/body gain
+            // to avoid "constant vibration" feeling
+            dspKickMultOverride = 0.65f,  // Lower kick gain for crisp transient
+            dspBodyMultOverride = 0.80f,  // Lower body gain to avoid continuous rumble
             actuator = ActuatorProfile.XIAOMI_10_0809,
         )
 

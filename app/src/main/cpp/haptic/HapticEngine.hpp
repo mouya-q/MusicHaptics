@@ -452,6 +452,10 @@ public:
         float subRms = computeRmsNeon(subOutput_, size);
         float midRms = computeRmsNeon(midOutput_, size);
         float textureRms = computeRmsNeon(textureOutput_, size);
+        // v4.14: Cap texture channel at 15% to avoid motor noise floor pollution.
+        // iOS Taptic Engine keeps micro-texture very subtle; excessive texture
+        // makes the motor feel "fuzzy" and masks clean transient events.
+        textureRms = std::min(textureRms, 0.15f);
         const float invSize = 1.0f / static_cast<float>(size);
         float bassBand = std::sqrt(bassSq * invSize);
         float lowMidBand = std::sqrt(lowMidSq * invSize);
@@ -474,13 +478,21 @@ public:
         float pitchDelta = prevPitch_ > 0.0f ? std::abs(pitch - prevPitch_) / std::max(prevPitch_, 1.0f) : 1.0f;
         pitchConfidence_ += 0.18f * (((pitch >= 70.0f && pitch <= 300.0f) && pitchDelta < 0.18f ? 1.0f : 0.0f) - pitchConfidence_);
 
-        float kickTarget = std::clamp((bassRatio - 0.28f) * 2.2f + std::max(0.0f, subRms - prevSubRms_) * 12.0f - highRatio * 0.5f, 0.0f, 1.0f);
+        float kickTarget = std::clamp(
+            std::max(0.0f, subRms - prevSubRms_) * 15.0f  // transient ONLY
+            - highRatio * 0.3f,  // penalize high-frequency content
+            0.0f, 1.0f
+        );
         float snareTarget = std::clamp(lowMidFlux * 18.0f + presenceFlux * 10.0f + highRatio * 0.35f - bassRatio * 0.25f, 0.0f, 1.0f);
         float hatTarget = std::clamp(airFlux * 28.0f + presenceFlux * 8.0f + zcr * 1.5f - bassRatio * 0.35f, 0.0f, 1.0f);
         float vocalTarget = std::clamp(vocalRatio * 1.8f + pitchConfidence_ * 0.65f - highRatio * 0.45f - std::max(kickTarget, snareTarget) * 0.35f, 0.0f, 1.0f);
         float pluckedTarget = std::clamp(lowMidFlux * 14.0f + presenceFlux * 5.0f + pitchConfidence_ * 0.35f - vocalTarget * 0.25f, 0.0f, 1.0f);
         float harmonicTarget = std::clamp(pitchConfidence_ * 0.65f + (lowMidBand + vocalBand) / totalBand * 0.55f - std::max({kickTarget, snareTarget, hatTarget}) * 0.3f, 0.0f, 1.0f);
-        float bassSustainTarget = std::clamp(bassRatio * 1.35f - std::max(0.0f, subRms - prevSubRms_) * 5.0f, 0.0f, 1.0f);
+        float bassSustainTarget = std::clamp(
+            std::max(0.0f, subRms - prevSubRms_) * 8.0f  // transient-based sustain
+            + subRms * 0.3f,  // small continuous component
+            0.0f, 1.0f
+        );
 
         auto smoothProbability = [](float current, float target) {
             const float alpha = target > current ? 0.42f : 0.10f;
@@ -507,22 +519,24 @@ public:
             if (onsetRefractoryFrames_[i] > 0) onsetRefractoryFrames_[i]--;
         }
 
-        // ═══ v4.3: ABSOLUTE ENERGY-DRIVEN onset detection (final) ═══
-        // Two detection modes combined:
-        //   1. Absolute energy: bassBand/subRms above threshold → onset (catches sustained beats)
-        //   2. Spectral flux: bassBand - prevBassRms_ > threshold → onset (catches transients)
-        // Both use simple, reliable thresholds. No probability multiplication.
+        // ═══ v4.14: TRANSIENT-ONLY kick detection (iOS Taptic style) ═══
+        // Key insight: Kick = bass ATTACK (transient change), NOT bass LEVEL.
+        // Continuous bass (e.g. sustained 808) should NOT trigger kick.
+        // Only sudden changes in bass energy should trigger.
+        // Formula: kick = max(0, currentBass - lastBass) * gain
+        // This matches Apple's Taptic Engine behavior: sharp, short, event-driven.
 
-        // Kick: bass band + sub-bass
+        // Kick: bass band + sub-bass (TRANSIENT ONLY)
         float kickOnset = 0.0f;
         if (onsetRefractoryFrames_[0] == 0) {
-            // Absolute energy path
-            float bassEnergy  = std::clamp((bassBand - 0.008f) * 14.0f, 0.0f, 1.0f);
-            float subEnergy   = std::clamp((subRms   - 0.006f) * 18.0f, 0.0f, 1.0f);
-            // Spectral flux path (transient detection)
-            float bassFluxVal = std::clamp(bassFlux * 50.0f, 0.0f, 1.0f);
-            float subFluxVal  = std::clamp(std::max(0.0f, subRms - prevSubRms_) * 50.0f, 0.0f, 1.0f);
-            kickOnset = std::max({bassEnergy, subEnergy, bassFluxVal, subFluxVal});
+            // Spectral flux path ONLY (no absolute energy!)
+            // bassFlux = max(0, bassBand - prevBassRms_) — already computed above
+            float bassFluxVal = std::clamp(bassFlux * 60.0f, 0.0f, 1.0f);
+            float subFluxVal  = std::clamp(std::max(0.0f, subRms - prevSubRms_) * 60.0f, 0.0f, 1.0f);
+            // Combine: take the stronger transient
+            kickOnset = std::max(bassFluxVal, subFluxVal);
+            // Dynamic threshold: require minimum change to avoid noise
+            if (kickOnset < 0.08f) kickOnset = 0.0f;
             if (kickOnset > 0.0f) onsetRefractoryFrames_[0] = ONSET_REFRACTORY_FRAMES;
         }
 
@@ -545,10 +559,11 @@ public:
             if (vocalOnset > 0.0f) onsetRefractoryFrames_[2] = ONSET_REFRACTORY_FRAMES;
         }
 
-        // Body: sub-bass sustained energy
+        // Body: sub-bass sustained energy (capped at 20% to avoid continuous rumble)
         float bodyOnset = 0.0f;
         if (onsetRefractoryFrames_[3] == 0) {
-            bodyOnset = std::clamp((subRms - 0.006f) * 20.0f, 0.0f, 1.0f);
+            float rawBody = std::clamp((subRms - 0.006f) * 20.0f, 0.0f, 1.0f);
+            bodyOnset = std::min(rawBody, 0.20f);
             if (bodyOnset > 0.0f) onsetRefractoryFrames_[3] = ONSET_REFRACTORY_FRAMES;
         }
 

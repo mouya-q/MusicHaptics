@@ -17,6 +17,11 @@ android {
         ndkVersion = "27.0.12077973"
         // 云编译（GitHub Actions）环境下由 Gradle 直接驱动 CMake 编译 C++，
         // 使用 c++_static 静态链接 libc++，避免注入宿主进程时与旧版 libc++_shared.so 符号冲突。
+        // DSP 引擎使用 ARM NEON SIMD 指令，仅支持 ARM 架构（arm64-v8a / armeabi-v7a）。
+        // x86/x86_64 设备在现代 Android 生态中极少，且本项目目标设备（小米 10）为 arm64。
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     externalNativeBuild {

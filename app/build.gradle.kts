@@ -8,6 +8,21 @@ android {
     namespace = "com.mouya.musichaptics"
     compileSdk = 34
 
+    signingConfigs {
+        create("debug") {
+            storeFile = file(System.getenv("KEYSTORE_FILE") ?: "debug.keystore")
+            storePassword = System.getenv("STORE_PASS") ?: "android"
+            keyAlias = System.getenv("KEYALIAS") ?: "androiddebugkey"
+            keyPassword = System.getenv("KEY_PASS") ?: "android"
+        }
+        create("release") {
+            storeFile = file(System.getenv("KEYSTORE_FILE") ?: "debug.keystore")
+            storePassword = System.getenv("STORE_PASS") ?: "android"
+            keyAlias = System.getenv("KEYALIAS") ?: "androiddebugkey"
+            keyPassword = System.getenv("KEY_PASS") ?: "android"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
@@ -23,6 +38,20 @@ android {
             // Only arm64-v8a for modern devices (Xiaomi 10 is arm64)
             // This reduces APK size by ~50%
             abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig = signingConfigs["debug"]
+        }
+        release {
+            signingConfig = signingConfigs["release"]
+            isMinifyEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 

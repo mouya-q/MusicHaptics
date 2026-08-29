@@ -30,36 +30,45 @@ jobs:
       - name: Install NDK, Build-Tools and CMake
         run: |
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.0.12077973" "build-tools;35.0.0" "cmake;3.22.1"
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
       
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
       
-      - name: Fix local.properties sdk.dir to ANDROID_HOME
+      - name: Setup keystore for signing
         run: |
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          echo "--- local.properties ---"
-          cat local.properties
-          echo "--- aapt2 presence ---"
-          ls -la "$ANDROID_HOME/build-tools/35.0.0/aapt2" || echo "AAPT2_MISSING"
+          echo 'STORE_PASS=android' >> gradle.properties
+          echo 'KEYSTORE_FILE=app/debug.keystore' >> gradle.properties
+          echo 'KEYALIAS=androiddebugkey' >> gradle.properties
+          echo 'KEY_PASS=android' >> gradle.properties
+          cat gradle.properties
       
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
         env:
           GRADLE_OPTS: "-Xmx4096m"
+          STORE_PASS: android
+          KEYSTORE_FILE: app/debug.keystore
+          KEYALIAS: androiddebugkey
+          KEY_PASS: android
       
       - name: Build Release APK
         run: ./gradlew assembleRelease --stacktrace
         env:
           GRADLE_OPTS: "-Xmx4096m"
+          STORE_PASS: android
+          KEYSTORE_FILE: app/debug.keystore
+          KEYALIAS: androiddebugkey
+          KEY_PASS: android
       
-      - name: Upload Debug APK
+      - name: Upload Debug APK - with fixed signature
         uses: actions/upload-artifact@v4
         with:
           name: musichaptics-debug
           path: app/build/outputs/apk/debug/
           retention-days: 30
       
-      - name: Upload Release APK
+      - name: Upload Release APK - with fixed signature
         uses: actions/upload-artifact@v4
         with:
           name: musichaptics-release
@@ -77,7 +86,7 @@ jobs:
       - name: Print Build Info
         if: success()
         run: |
-          echo "🎉 Build Successful!"
+          echo "Build Successful!"
           echo "Debug APK: app/build/outputs/apk/debug/"
           echo "Release APK: app/build/outputs/apk/release/"
           ls -lah app/build/outputs/apk/debug/

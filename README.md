@@ -12,10 +12,6 @@ MusicHapticsX 是一个基于 LSPosed 的 Android 音乐触觉引擎，通过 Na
 **English:**
 MusicHapticsX is an LSPosed-based Android music haptic engine that delivers intelligent music vibration feedback through Native DSP, rhythm recognition, Haptic Composer, and device-level LRA modeling.
 
-简单说：**你的音乐在振动，但这次是跟着拍子来的。**
-
-In short: **Your music vibrates, but this time it's on beat.**
-
 ## 特性 / Features
 
 - **节奏感知振动** — 每一次振动都落在拍子上

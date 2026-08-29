@@ -547,14 +547,17 @@ public:
         }
 
         // Snare: low-mid band + presence band
+        // v4.22: Much higher threshold to avoid "乱震" (random vibration)
+        // Only true snare transients should trigger, not general mid-band content
         float snareOnset = 0.0f;
         if (onsetRefractoryFrames_[1] == 0) {
-            float lowMidEnergy = std::clamp((lowMidBand - 0.015f) * 15.0f, 0.0f, 1.0f);  // lowered threshold, lowered gain
-            float lowMidFluxV  = std::clamp(lowMidFlux2 * 35.0f, 0.0f, 1.0f);  // lowered from 50.0f
-            float presFluxVal  = std::clamp(presenceFlux2 * 25.0f, 0.0f, 1.0f);  // lowered from 40.0f
+            // Require meaningful low-mid energy (threshold raised from 0.015 to 0.08)
+            float lowMidEnergy = std::clamp((lowMidBand - 0.08f) * 6.0f, 0.0f, 1.0f);  // raised threshold, lowered gain
+            float lowMidFluxV  = std::clamp(lowMidFlux2 * 20.0f, 0.0f, 1.0f);  // lowered from 35.0f
+            float presFluxVal  = std::clamp(presenceFlux2 * 15.0f, 0.0f, 1.0f);  // lowered from 25.0f
             snareOnset = std::max({lowMidEnergy, lowMidFluxV, presFluxVal});
-            // v4.20: Require meaningful snare energy to avoid false triggers
-            if (snareOnset < 0.20f) snareOnset = 0.0f;  // raised from 0.0f
+            // v4.22: Higher threshold to avoid false triggers
+            if (snareOnset < 0.35f) snareOnset = 0.0f;  // raised from 0.20f
             if (snareOnset > 0.0f) onsetRefractoryFrames_[1] = ONSET_REFRACTORY_FRAMES;
         }
 

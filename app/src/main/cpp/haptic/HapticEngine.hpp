@@ -537,12 +537,12 @@ public:
         if (onsetRefractoryFrames_[0] == 0) {
             // Spectral flux path ONLY (no absolute energy!)
             // bassFlux = max(0, bassBand - prevBassRms_) — already computed above
-            float bassFluxVal = std::clamp(bassFlux * 60.0f, 0.0f, 1.0f);
-            float subFluxVal  = std::clamp(std::max(0.0f, subRms - prevSubRms_) * 60.0f, 0.0f, 1.0f);
+            float bassFluxVal = std::clamp(bassFlux * 30.0f, 0.0f, 1.0f);  // lowered from 60.0f
+            float subFluxVal  = std::clamp(std::max(0.0f, subRms - prevSubRms_) * 30.0f, 0.0f, 1.0f);  // lowered from 60.0f
             // Combine: take the stronger transient
             kickOnset = std::max(bassFluxVal, subFluxVal);
             // Dynamic threshold: require minimum change to avoid noise
-            if (kickOnset < 0.05f) kickOnset = 0.0f;  // lowered from 0.08f
+            if (kickOnset < 0.10f) kickOnset = 0.0f;  // raised from 0.05f
             if (kickOnset > 0.0f) onsetRefractoryFrames_[0] = ONSET_REFRACTORY_FRAMES;
         }
 

@@ -12,8 +12,8 @@ android {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
         targetSdk = 34
-        versionCode = 42200
-        versionName = "4.22.0"
+        versionCode = 42300
+        versionName = "4.23.0"
         ndkVersion = "27.0.12077973"
         // 云编译（GitHub Actions）环境下由 Gradle 直接驱动 CMake 编译 C++，
         // 使用 c++_static 静态链接 libc++，避免注入宿主进程时与旧版 libc++_shared.so 符号冲突。

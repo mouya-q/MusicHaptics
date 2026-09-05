@@ -264,7 +264,7 @@ private fun V5MasterSwitchCard(isOn: Boolean, onToggle: (Boolean) -> Unit) {
             Text("触觉引擎", color = Color.Black, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
             Text(if (isOn) "运行中" else "已暂停", color = if (isOn) V5Colors.green else V5Colors.gray, fontSize = 12.sp)
         }
-        V5Toggle(checked = isOn, onToggle = onToggle)
+        V5Toggle(checked = isOn, onToggle = { onToggle(!isOn) })
     }
 }
 

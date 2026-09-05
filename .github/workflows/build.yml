@@ -1,8 +1,7 @@
 name: Build Android APK
-
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, develop, refactor/v5-redesign ]
   pull_request:
     branches: [ main, develop ]
   workflow_dispatch:

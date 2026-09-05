@@ -525,64 +525,56 @@ public:
             if (onsetRefractoryFrames_[i] > 0) onsetRefractoryFrames_[i]--;
         }
 
-        // ═══ v4.14: TRANSIENT-ONLY kick detection (iOS Taptic style) ═══
-        // Key insight: Kick = bass ATTACK (transient change), NOT bass LEVEL.
-        // Continuous bass (e.g. sustained 808) should NOT trigger kick.
-        // Only sudden changes in bass energy should trigger.
-        // Formula: kick = max(0, currentBass - lastBass) * gain
-        // This matches Apple's Taptic Engine behavior: sharp, short, event-driven.
+        // ═══ v4.23: TRANSIENT-ONLY onset detection ═══
+        // Key insight: onset = ATTACK (transient change), NOT LEVEL.
+        // Only sudden energy changes should trigger — continuous content should NOT.
+        // This matches Apple's Taptic Engine: sharp, short, event-driven.
 
         // Kick: bass band + sub-bass (TRANSIENT ONLY)
         float kickOnset = 0.0f;
         if (onsetRefractoryFrames_[0] == 0) {
-            // Spectral flux path ONLY (no absolute energy!)
-            // bassFlux = max(0, bassBand - prevBassRms_) — already computed above
-            float bassFluxVal = std::clamp(bassFlux * 20.0f, 0.0f, 1.0f);  // lowered from 30.0f
-            float subFluxVal  = std::clamp(std::max(0.0f, subRms - prevSubRms_) * 20.0f, 0.0f, 1.0f);  // lowered from 30.0f
-            // Combine: take the stronger transient
+            float bassFluxVal = std::clamp(bassFlux * 15.0f, 0.0f, 1.0f);  // v4.23: lowered from 20.0f
+            float subFluxVal  = std::clamp(std::max(0.0f, subRms - prevSubRms_) * 15.0f, 0.0f, 1.0f);  // v4.23: lowered from 20.0f
             kickOnset = std::max(bassFluxVal, subFluxVal);
-            // v4.20: Much higher threshold to avoid "乱震" (random vibration)
-            if (kickOnset < 0.25f) kickOnset = 0.0f;  // raised from 0.10f
+            // v4.23: Higher threshold to avoid "乱震" — only strong transients
+            if (kickOnset < 0.40f) kickOnset = 0.0f;  // raised from 0.25f
             if (kickOnset > 0.0f) onsetRefractoryFrames_[0] = ONSET_REFRACTORY_FRAMES;
         }
 
-        // Snare: low-mid band + presence band
-        // v4.22: Much higher threshold to avoid "乱震" (random vibration)
-        // Only true snare transients should trigger, not general mid-band content
+        // Snare: low-mid band + presence band (TRANSIENT ONLY)
         float snareOnset = 0.0f;
         if (onsetRefractoryFrames_[1] == 0) {
-            // Require meaningful low-mid energy (threshold raised from 0.015 to 0.08)
-            float lowMidEnergy = std::clamp((lowMidBand - 0.08f) * 6.0f, 0.0f, 1.0f);  // raised threshold, lowered gain
-            float lowMidFluxV  = std::clamp(lowMidFlux2 * 20.0f, 0.0f, 1.0f);  // lowered from 35.0f
-            float presFluxVal  = std::clamp(presenceFlux2 * 15.0f, 0.0f, 1.0f);  // lowered from 25.0f
+            // v4.23: Require strong low-mid transient — general mid-band should NOT trigger
+            float lowMidEnergy = std::clamp((lowMidBand - 0.10f) * 4.0f, 0.0f, 1.0f);  // raised threshold from 0.08, lowered gain from 6.0
+            float lowMidFluxV  = std::clamp(lowMidFlux2 * 12.0f, 0.0f, 1.0f);  // v4.23: lowered from 20.0f
+            float presFluxVal  = std::clamp(presenceFlux2 * 10.0f, 0.0f, 1.0f);  // v4.23: lowered from 15.0f
             snareOnset = std::max({lowMidEnergy, lowMidFluxV, presFluxVal});
-            // v4.22: Higher threshold to avoid false triggers
-            if (snareOnset < 0.35f) snareOnset = 0.0f;  // raised from 0.20f
+            // v4.23: Higher threshold — only true snare hits
+            if (snareOnset < 0.50f) snareOnset = 0.0f;  // raised from 0.35f
             if (snareOnset > 0.0f) onsetRefractoryFrames_[1] = ONSET_REFRACTORY_FRAMES;
         }
 
-        // Vocal: vocal band (500-3000Hz)
+        // Vocal: vocal band (500-3000Hz) — only strong vocal attacks
         float vocalOnset = 0.0f;
         if (onsetRefractoryFrames_[2] == 0) {
-            float vocalEnergy = std::clamp((vocalBand - 0.025f) * 8.0f, 0.0f, 1.0f);  // raised threshold, lowered gain
-            float vocalFluxV  = std::clamp(vocalFlux * 10.0f, 0.0f, 1.0f);  // lowered from 20.0f
+            float vocalEnergy = std::clamp((vocalBand - 0.05f) * 5.0f, 0.0f, 1.0f);  // v4.23: raised threshold from 0.025, lowered gain from 8.0
+            float vocalFluxV  = std::clamp(vocalFlux * 8.0f, 0.0f, 1.0f);  // v4.23: lowered from 10.0f
             vocalOnset = std::max(vocalEnergy, vocalFluxV);
             // v4.15: Mutual exclusion — if snare is strong, suppress vocal
-            if (snareOnset > 0.3f) vocalOnset *= 0.2f;  // stronger suppression
-            // v4.20: Hard cap vocal onset at 0.15 to avoid constant vibration
-            if (vocalOnset > 0.15f) vocalOnset = 0.15f;
-            // v4.20: Much higher threshold to avoid constant triggering
-            if (vocalOnset < 0.20f) vocalOnset = 0.0f;  // raised from 0.08f
+            if (snareOnset > 0.3f) vocalOnset *= 0.2f;
+            // v4.23: Hard cap and higher threshold
+            if (vocalOnset > 0.10f) vocalOnset = 0.10f;
+            if (vocalOnset < 0.30f) vocalOnset = 0.0f;  // raised from 0.20f
             if (vocalOnset > 0.0f) onsetRefractoryFrames_[2] = ONSET_REFRACTORY_FRAMES;
         }
 
-        // Body: sub-bass sustained energy (capped at 15% to avoid continuous rumble)
+        // Body: sub-bass sustained energy (very subtle)
         float bodyOnset = 0.0f;
         if (onsetRefractoryFrames_[3] == 0) {
-            float rawBody = std::clamp((subRms - 0.030f) * 10.0f, 0.0f, 1.0f);  // raised threshold, lowered gain
-            bodyOnset = std::min(rawBody, 0.10f);  // lowered from 0.15f
-            // v4.20: Only trigger body when there's significant sub-bass energy
-            if (bodyOnset < 0.15f) bodyOnset = 0.0f;  // raised from 0.08f
+            float rawBody = std::clamp((subRms - 0.05f) * 6.0f, 0.0f, 1.0f);  // v4.23: raised threshold from 0.03, lowered gain from 10.0
+            bodyOnset = std::min(rawBody, 0.05f);  // v4.23: lowered cap from 0.10f
+            // v4.23: Higher threshold — only significant sub-bass
+            if (bodyOnset < 0.20f) bodyOnset = 0.0f;  // raised from 0.15f
             if (bodyOnset > 0.0f) onsetRefractoryFrames_[3] = ONSET_REFRACTORY_FRAMES;
         }
 

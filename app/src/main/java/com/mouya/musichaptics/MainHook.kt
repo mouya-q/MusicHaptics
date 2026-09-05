@@ -35,6 +35,20 @@ class MainHook : IXposedHookLoadPackage {
         private const val VISUALIZER_FALLBACK_DELAY_MS = 3000L
         private const val VISUALIZER_PRIORITY_WINDOW_MS = 500L
 
+        // v4.23: Whitelist manager instance (initialized lazily with context)
+        @Volatile private var whitelistManager: WhitelistManager? = null
+        private fun getWhitelistManager(context: Context): WhitelistManager {
+            if (whitelistManager == null) {
+                synchronized(this) {
+                    if (whitelistManager == null) {
+                        whitelistManager = WhitelistManager(context)
+                        whitelistManager?.initDefaultWhitelist()
+                    }
+                }
+            }
+            return whitelistManager!!
+        }
+
         
         private const val PHIRA_PACKAGE = "org.flos.phira"
 
@@ -488,8 +502,16 @@ class MainHook : IXposedHookLoadPackage {
             return
         }
 
+        // v4.23: Whitelist support — filter which apps trigger haptics
         if (pkg == "com.mouya.musichaptics") {
             Log.d(TAG, "Skipping self-package [$pkg] — no self-hook allowed.")
+            return
+        }
+
+        // v4.23: Check whitelist before hooking — skip non-whitelisted apps
+        val ctx = getContextFromActivityThread()
+        if (ctx != null && !getWhitelistManager(ctx).isPackageAllowed(pkg)) {
+            Log.i(TAG, "[Whitelist] Skipping non-whitelisted app: $pkg")
             return
         }
 

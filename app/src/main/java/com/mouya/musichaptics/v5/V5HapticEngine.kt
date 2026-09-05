@@ -133,7 +133,7 @@ class V5HapticEngine(private val context: Context) {
         driver.triggerPulse(amp, mode, boost)
         
         pulseCount.incrementAndGet()
-        if (pulseCount.get() <= 10 || pulseCount.get() % 25 == 0) {
+        if (pulseCount.get() <= 10 || pulseCount.get() % 25 == 0L) {
             Log.i(TAG, "[Pulse] amp=${"%.2f".format(amp)} mode=$mode count=${pulseCount.get()}")
         }
     }

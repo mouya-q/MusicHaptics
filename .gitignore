@@ -18,10 +18,6 @@ local.properties
 .DS_Store
 Thumbs.db
 
-# Gradle wrapper (keep if needed, ignore local)
-gradle/
-!gradle/wrapper/gradle-wrapper.jar
-
 # Native build artifacts
 .cxx/
 *.o
@@ -32,6 +28,8 @@ app/src/main/cpp/CMakeCache.txt
 app/src/main/cpp/CMakeFiles/
 app/src/main/cpp/cmake_install.cmake
 app/src/main/cpp/Makefile
+app/src/main/cpp/compile_commands.json
+app/src/main/cpp/cpp/
 
 # Local Maven repository (not needed in VCS)
 

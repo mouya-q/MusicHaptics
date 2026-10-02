@@ -10,6 +10,7 @@ import android.os.Parcel
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.Log
+import com.mouya.musichaptics.haptic.DeviceTuningRegistry
 import java.util.Locale
 
 class VibrateProxy(private val context: Context) {
@@ -26,6 +27,8 @@ class VibrateProxy(private val context: Context) {
     
     private var secondaryVibrator: Vibrator? = null
     private var hasSecondaryVibrator = false
+
+    @Volatile private var activeProfile: DeviceProfile = DeviceProfile.DEFAULT
 
     @Volatile var paused = false
         private set
@@ -78,10 +81,12 @@ class VibrateProxy(private val context: Context) {
     fun setForceDefaultAmplitude(enabled: Boolean) {
         if (forceDefaultAmplitude == enabled) return
         forceDefaultAmplitude = enabled
-        Log.i(TAG, "v4.10: forceDefaultAmplitude → $enabled (autoDetected=$forceDefaultAutoDetected)")
+        Log.i(TAG, "forceDefaultAmplitude → $enabled (autoDetected=$forceDefaultAutoDetected)")
     }
 
-    fun init(): Boolean {
+    fun init(profile: DeviceProfile = DeviceProfile.DEFAULT): Boolean {
+        activeProfile = profile
+        val profileTuning = DeviceTuningRegistry.current(profile)
         val pkgName = try { context.packageName } catch (e: Exception) { "unknown" }
         val hasPermission = try {
             context.checkSelfPermission("android.permission.VIBRATE") ==
@@ -89,7 +94,7 @@ class VibrateProxy(private val context: Context) {
         } catch (e: Exception) { false }
 
         Log.i(TAG, "═══ VIBRATE PROXY INIT ═══")
-        Log.i(TAG, "context.pkg=$pkgName hasVIBRATE=$hasPermission mfr=${Build.MANUFACTURER} model=${Build.MODEL} sdk=${Build.VERSION.SDK_INT}")
+        Log.i(TAG, "context.pkg=$pkgName hasVIBRATE=$hasPermission mfr=${Build.MANUFACTURER} model=${Build.MODEL} profile=${activeProfile.name} tuning=${profileTuning.profileId} sdk=${Build.VERSION.SDK_INT}")
 
         if (hasPermission) {
             useProxy = false
@@ -160,18 +165,20 @@ class VibrateProxy(private val context: Context) {
             }
 
             
-            val mfr = Build.MANUFACTURER.lowercase()
-            colorOSHapticAvailable = mfr == "oneplus" || mfr == "oppo"
-            hyperOSHapticAvailable = mfr == "xiaomi"
+            val mfr = Build.MANUFACTURER.lowercase(Locale.ROOT)
+            val brand = Build.BRAND.lowercase(Locale.ROOT)
+            colorOSHapticAvailable = mfr == "oneplus" || mfr == "oppo" || brand == "oneplus" || brand == "oppo"
+            hyperOSHapticAvailable = mfr == "xiaomi" || mfr == "redmi" || mfr == "poco" ||
+                brand == "xiaomi" || brand == "redmi" || brand == "poco"
             val isLenovoHaptic = mfr == "lenovo"
 
             
             
             val device = Build.DEVICE.lowercase(Locale.ROOT)
-            if (mfr == "xiaomi" && (device.contains("umi") || device.contains("cmi") || device.contains("thyme"))) {
+            if (profileTuning.preferDefaultAmplitude) {
                 forceDefaultAmplitude = true
                 forceDefaultAutoDetected = true
-                Log.w(TAG, "v4.8: Xiaomi 10 series detected — forcing DEFAULT_AMPLITUDE (known custom ROM amp scaling issue)")
+                Log.w(TAG, "Profile ${profileTuning.profileId} prefers DEFAULT_AMPLITUDE compatibility mode: ${profileTuning.reason}")
             }
 
             
@@ -182,11 +189,11 @@ class VibrateProxy(private val context: Context) {
                     val userChoice = cfg.getBoolean("force_default_amplitude", forceDefaultAmplitude)
                     if (userChoice != forceDefaultAmplitude) {
                         forceDefaultAmplitude = userChoice
-                        Log.i(TAG, "v4.10: force_default_amplitude pref overrides detection → $userChoice")
+                        Log.i(TAG, "force_default_amplitude pref overrides detection → $userChoice")
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "v4.10: force_default_amplitude pref read failed: ${e.message}")
+                Log.w(TAG, "force_default_amplitude pref read failed: ${e.message}")
             }
 
             Log.i(TAG, "Direct path: hasVibrator=$hasDirectVibrator hasAmpCtrl=$hasAmplitudeControl")

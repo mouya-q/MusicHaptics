@@ -12,16 +12,16 @@ android {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
         targetSdk = 34
-        versionCode = 42300
-        versionName = "4.23.0"
+        versionCode = 50100
+        versionName = "5.1.0"
         ndkVersion = "27.0.12077973"
         // 云编译（GitHub Actions）环境下由 Gradle 直接驱动 CMake 编译 C++，
         // 使用 c++_static 静态链接 libc++，避免注入宿主进程时与旧版 libc++_shared.so 符号冲突。
         // DSP 引擎使用 ARM NEON SIMD 指令，仅支持 ARM 架构（arm64-v8a / armeabi-v7a）。
         // x86/x86_64 设备在现代 Android 生态中极少，且本项目目标设备（小米 10）为 arm64。
         ndk {
-            // Only arm64-v8a for modern devices (Xiaomi 10 is arm64)
-            // This reduces APK size by ~50%
+            // Only arm64-v8a for the supported target-device set.
+            // This keeps the injected Native DSP binary small and matches the current profiles.
             abiFilters += listOf("arm64-v8a")
         }
     }
@@ -107,8 +107,7 @@ dependencies {
     implementation("androidx.interpolator:interpolator:1.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
-    implementation("androidx.graphics:graphics-core:1.0.0")
-    implementation("dev.chrisbanes.haze:haze:1.5.0")
+    implementation(project(":liquidglass"))
 
     configurations.all {
         resolutionStrategy.eachDependency {

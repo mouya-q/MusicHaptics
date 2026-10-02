@@ -1,11 +1,9 @@
-#include <mutex>
 #pragma once
 
 #include <arm_neon.h>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
-#include <vector>
 #include <atomic>
 #include <android/log.h>
 #define HMS_LOGI(...) __android_log_print(ANDROID_LOG_INFO, "HapticDSPCore", __VA_ARGS__)
@@ -132,7 +130,7 @@ struct HapticTelemetry {
     float onsetFlag;
     float beatIntervalMs;
     float beatConfidence;
-    // v4.1: Per-band onset strength for discrete event-driven haptics
+    // Per-band onset strength for discrete event-driven haptics
     float onsetKick;
     float onsetSnare;
     float onsetVocal;
@@ -154,20 +152,34 @@ struct HapticTelemetry {
 class HapticEngine {
 private:
     void pushSemanticFrame(float kick, float snare, float vocal, float body) {
-        SemanticHapticFrame frame;
-        frame.kickAmp = kick;
-        frame.snareAmp = snare;
-        frame.vocalAmp = vocal;
-        frame.bodyAmp = body;
-        std::lock_guard<std::mutex> lock(hapticBufferMutex_);
-        if (semanticHapticBuffer_.size() < 2048) {
-            semanticHapticBuffer_.push_back(frame);
-        }
+        const int write = semanticWriteIdx_.load(std::memory_order_relaxed);
+        const int next = (write + 1) % SEMANTIC_BUF_SIZE;
+        const int read = semanticReadIdx_.load(std::memory_order_acquire);
+        if (next == read) return;
+        semanticHapticBuffer_[write] = {kick, snare, vocal, body};
+        semanticWriteIdx_.store(next, std::memory_order_release);
     }
 
-    float sampleRate_ = 48000.0f;
+    std::atomic<float> sampleRate_{48000.0f};
+    std::atomic<float> pendingSampleRate_{48000.0f};
+    std::atomic<float> pendingLowCutoff_{60.0f};
+    std::atomic<float> pendingHighCutoff_{200.0f};
+    std::atomic<unsigned> pendingConfigRevision_{1};
+    unsigned appliedConfigRevision_ = 0;
+    std::atomic<bool> clearRequested_{false};
     std::atomic<float> userAmplitude_{2.0f};
     std::atomic<int> currentPresetId_{0};
+
+    // Profile-specific DSP controls. These are deliberately kept separate from
+    // user amplitude/preset state so a device profile can tune detection without
+    // changing the user's loudness preference.
+    std::atomic<float> profileDspFloor_{0.0040f};
+    std::atomic<float> profileSubMult_{1.80f};
+    std::atomic<float> profileKickMult_{0.80f};
+    std::atomic<float> profileSnareMult_{0.70f};
+    std::atomic<float> profileTickMult_{0.40f};
+    std::atomic<float> profileBodyMult_{1.20f};
+    std::atomic<float> profileRefractoryScale_{1.00f};
 
     LinkwitzRiley4th subLowPass_;
     LinkwitzRiley4th midHighPass_, midLowPass_;
@@ -189,9 +201,24 @@ private:
     float prevLowMidRms_ = 0.0f;
     float prevPresenceRms_ = 0.0f;
     float prevAirRms_ = 0.0f;
-    float vocalBandRms_ = 0.0f;  // v3.11: vocal band energy for instrument-aware composition
+    float vocalBandRms_ = 0.0f;  // vocal band energy for instrument-aware composition
     float prevPitch_ = 0.0f;
+    int pitchUpdateCounter_ = 0;
     float pitchConfidence_ = 0.0f;
+
+    // Lightweight 512-point radix-2 spectrum. Used for spectral flux and
+    // band-specific transient weighting; all buffers are fixed-size.
+    static constexpr int FFT_SIZE = 512;
+    static constexpr int FFT_BINS = FFT_SIZE / 2 + 1;
+    float spectrumHistory_[FFT_SIZE] = {};
+    float fftRe_[FFT_SIZE] = {};
+    float fftIm_[FFT_SIZE] = {};
+    float previousMagnitude_[FFT_BINS] = {};
+    int spectrumSamples_ = 0;
+    float spectralFlux_ = 0.0f;
+    float bassSpectralFlux_ = 0.0f;
+    float highSpectralFlux_ = 0.0f;
+    float spectralCentroidHz_ = 0.0f;
     float kickProbability_ = 0.0f;
     float snareProbability_ = 0.0f;
     float hatProbability_ = 0.0f;
@@ -203,12 +230,16 @@ private:
     SemanticHapticFrame historyBuffer_[2048] = {};
     float pitchHistory_[2048] = {};
 
-    // v3.8 Semantic multi-track output buffer
-    std::vector<SemanticHapticFrame> semanticHapticBuffer_;
-    std::mutex hapticBufferMutex_;
+    // Single-producer/single-consumer semantic ring. Audio processing writes;
+    // the native scheduler is the sole reader while the Kotlin path is used only
+    // when native scheduling is unavailable. No heap allocation or mutex in DSP.
+    static constexpr int SEMANTIC_BUF_SIZE = 2048;
+    SemanticHapticFrame semanticHapticBuffer_[SEMANTIC_BUF_SIZE] = {};
+    std::atomic<int> semanticWriteIdx_{0};
+    std::atomic<int> semanticReadIdx_{0};
 
-    public:
-    // v4.1: Onset ring buffer for event-driven haptics
+public:
+    // Onset ring buffer for event-driven haptics
     struct OnsetFrame {
         float kick = 0.0f;
         float snare = 0.0f;
@@ -219,33 +250,26 @@ private:
     OnsetFrame onsetBuf_[ONSET_BUF_SIZE] = {};
     std::atomic<int> onsetWriteIdx_{0};
     std::atomic<int> onsetReadIdx_{0};
-    std::atomic<int> onsetCount_{0};
 
     void pushOnsetFrame(float kick, float snare, float vocal, float body) {
-        int writeIdx = onsetWriteIdx_.load(std::memory_order_relaxed);
-        int count = onsetCount_.load(std::memory_order_relaxed);
-        if (count < ONSET_BUF_SIZE) {
-            onsetBuf_[writeIdx] = {kick, snare, vocal, body};
-            onsetWriteIdx_.store((writeIdx + 1) % ONSET_BUF_SIZE, std::memory_order_relaxed);
-            onsetCount_.store(count + 1, std::memory_order_relaxed);
-        } else {
-            // Buffer full - overwrite oldest
-            onsetBuf_[writeIdx] = {kick, snare, vocal, body};
-            onsetWriteIdx_.store((writeIdx + 1) % ONSET_BUF_SIZE, std::memory_order_relaxed);
-            int readIdx = onsetReadIdx_.load(std::memory_order_relaxed);
-            onsetReadIdx_.store((readIdx + 1) % ONSET_BUF_SIZE, std::memory_order_relaxed);
-        }
+        const int write = onsetWriteIdx_.load(std::memory_order_relaxed);
+        const int next = (write + 1) % ONSET_BUF_SIZE;
+        const int read = onsetReadIdx_.load(std::memory_order_acquire);
+        if (next == read) return; // drop newest; keep event order intact
+        onsetBuf_[write] = {kick, snare, vocal, body};
+        onsetWriteIdx_.store(next, std::memory_order_release);
     }
 
     int getOnsetFrames(OnsetFrame* outFrames, int maxFrames) {
-        int count = std::min(onsetCount_.load(std::memory_order_relaxed), maxFrames);
-        int readIdx = onsetReadIdx_.load(std::memory_order_relaxed);
-        for (int i = 0; i < count; ++i) {
-            outFrames[i] = onsetBuf_[readIdx];
-            readIdx = (readIdx + 1) % ONSET_BUF_SIZE;
+        if (!outFrames || maxFrames <= 0) return 0;
+        int read = onsetReadIdx_.load(std::memory_order_relaxed);
+        const int write = onsetWriteIdx_.load(std::memory_order_acquire);
+        int count = 0;
+        while (read != write && count < maxFrames) {
+            outFrames[count++] = onsetBuf_[read];
+            read = (read + 1) % ONSET_BUF_SIZE;
         }
-        onsetReadIdx_.store(readIdx, std::memory_order_relaxed);
-        onsetCount_.fetch_sub(count, std::memory_order_relaxed);
+        onsetReadIdx_.store(read, std::memory_order_release);
         return count;
     }
 
@@ -267,7 +291,7 @@ private:
     float beatConfidence_ = 0.0f;
     bool onsetThisFrame_ = false;
 
-    // v3.7.3: Beat sustain hold — REMOVED in v3.11
+    // Beat sustain hold — REMOVED in v3.11
     // Was causing unconditional "底震" (background rumble).
     // Bass sustain is now content-aware via bassSustainProbability_.
 
@@ -282,24 +306,6 @@ private:
     // ── Layer 3: Melody ──
     float melodySmoothed_ = 0.0f;
 
-    // ── Ring Buffer ──
-    static constexpr int HAPTIC_BUF_SIZE = 2048;
-    float hapticBuf_[HAPTIC_BUF_SIZE] = {};
-    std::atomic<int> hapticWriteIdx_{0};
-    std::atomic<int> hapticReadIdx_{0};
-    std::atomic<int> hapticCount_{0};
-
-    // v3.7.3: Removed phase accumulator — push one sample per
-    // processAudioBlock call. The Kotlin/native scheduler polls at
-    // 10ms intervals; as long as audio blocks arrive at ~5ms each
-    // (256 samples / 48kHz ≈ 5.3ms), the ring buffer stays filled
-    // and the scheduler never starves.
-    // If audio blocks arrive slower (e.g. 44100Hz), we still push
-    // one sample per block — the scheduler will simply pull 0 when
-    // the buffer is momentarily empty, then pull 2+ when it refills.
-    // This is much smoother than the old phase-accumulator which
-    // could skip pushing on some blocks, creating gaps.
-
     float lastComposedAmp_ = 0.0f;
     float lastComposite_ = 0.0f;
     float lastBeatLayer_ = 0.0f;
@@ -308,14 +314,14 @@ private:
 
     ValueNoise1D textureNoise_;
 
-    // v3.7.3: Track whether we've seen audio recently (for floor)
+    // Track whether we've seen audio recently (for floor)
     int blocksSinceAudio_ = 1000;
 
-    // v4.1: Onset detector state (per-band spectral flux + energy diff)
+    // Onset detector state (per-band spectral flux + energy diff)
     float prevBassRms_ = 0.0f;
     float prevVocalRms_ = 0.0f;
     int onsetRefractoryFrames_[4] = {0, 0, 0, 0}; // kick, snare, vocal, body
-    static constexpr int ONSET_REFRACTORY_FRAMES = 2; // v4.13: 20ms (was 60ms) - 降低C++层refractory，让Kotlin层minGap主导
+    static constexpr int ONSET_REFRACTORY_FRAMES = 2; // Base frame count; profile scale adjusts it at runtime
 
 public:
     HapticEngine() {
@@ -323,13 +329,55 @@ public:
     }
 
     void configure(float sampleRate, float lowCutoff, float highCutoff, float amplitude, int presetId) {
-        sampleRate_ = sampleRate;
+        pendingSampleRate_.store(sampleRate, std::memory_order_relaxed);
+        pendingLowCutoff_.store(lowCutoff, std::memory_order_relaxed);
+        pendingHighCutoff_.store(highCutoff, std::memory_order_relaxed);
         userAmplitude_.store(amplitude, std::memory_order_relaxed);
         currentPresetId_.store(presetId, std::memory_order_relaxed);
-        subLowPass_.setLowPass(sampleRate, lowCutoff);
-        midHighPass_.setHighPass(sampleRate, lowCutoff);
-        midLowPass_.setLowPass(sampleRate, highCutoff);
-        textureHighPass_.setHighPass(sampleRate, highCutoff);
+        pendingConfigRevision_.fetch_add(1, std::memory_order_release);
+    }
+
+    void configureProfile(float dspFloor, float subMult, float kickMult, float snareMult,
+                          float tickMult, float bodyMult, float refractoryScale) {
+        profileDspFloor_.store(std::clamp(dspFloor, 0.0010f, 0.0200f), std::memory_order_relaxed);
+        profileSubMult_.store(std::clamp(subMult, 0.50f, 3.00f), std::memory_order_relaxed);
+        profileKickMult_.store(std::clamp(kickMult, 0.20f, 2.00f), std::memory_order_relaxed);
+        profileSnareMult_.store(std::clamp(snareMult, 0.20f, 2.00f), std::memory_order_relaxed);
+        profileTickMult_.store(std::clamp(tickMult, 0.20f, 2.00f), std::memory_order_relaxed);
+        profileBodyMult_.store(std::clamp(bodyMult, 0.20f, 2.00f), std::memory_order_relaxed);
+        profileRefractoryScale_.store(std::clamp(refractoryScale, 0.50f, 2.00f), std::memory_order_relaxed);
+        HMS_LOGI("[DSP-PROFILE] floor=%.5f sub=%.3f kick=%.3f snare=%.3f tick=%.3f body=%.3f refractory=%.2f",
+                  dspFloor, subMult, kickMult, snareMult, tickMult, bodyMult, refractoryScale);
+    }
+
+private:
+    void applyPendingConfig() {
+        const unsigned revision = pendingConfigRevision_.load(std::memory_order_acquire);
+        if (revision == appliedConfigRevision_) return;
+
+        const float sampleRate = std::clamp(pendingSampleRate_.load(std::memory_order_relaxed), 8000.0f, 384000.0f);
+        const float nyquistGuard = sampleRate * 0.45f;
+        const float lowCut = std::clamp(pendingLowCutoff_.load(std::memory_order_relaxed), 10.0f, nyquistGuard);
+        const float highCut = std::clamp(pendingHighCutoff_.load(std::memory_order_relaxed), 20.0f, nyquistGuard);
+
+        sampleRate_.store(sampleRate, std::memory_order_release);
+        subLowPass_.reset();
+        midHighPass_.reset();
+        midLowPass_.reset();
+        textureHighPass_.reset();
+        bassHp_.reset();
+        bassLp_.reset();
+        lowMidHp_.reset();
+        lowMidLp_.reset();
+        vocalHp_.reset();
+        vocalLp_.reset();
+        presenceHp_.reset();
+        presenceLp_.reset();
+        airHp_.reset();
+        subLowPass_.setLowPass(sampleRate, lowCut);
+        midHighPass_.setHighPass(sampleRate, lowCut);
+        midLowPass_.setLowPass(sampleRate, std::max(highCut, lowCut + 10.0f));
+        textureHighPass_.setHighPass(sampleRate, std::max(highCut, lowCut + 10.0f));
 
         bassHp_.setHighPass(sampleRate, 80.0f);
         bassLp_.setLowPass(sampleRate, 180.0f);
@@ -340,7 +388,52 @@ public:
         presenceHp_.setHighPass(sampleRate, 3000.0f);
         presenceLp_.setLowPass(sampleRate, 8000.0f);
         airHp_.setHighPass(sampleRate, 8000.0f);
+        appliedConfigRevision_ = revision;
     }
+
+    void clearAnalysisState() {
+        beatEnvelope_ = 0.0f;
+        onsetRefractoryCounter_ = 1000;
+        bassSmoothed_ = 0.0f;
+        melodySmoothed_ = 0.0f;
+        energyHistoryIdx_ = 0;
+        std::memset(energyHistory_, 0, sizeof(energyHistory_));
+        std::memset(previousMagnitude_, 0, sizeof(previousMagnitude_));
+        std::memset(spectrumHistory_, 0, sizeof(spectrumHistory_));
+        std::memset(pitchHistory_, 0, sizeof(pitchHistory_));
+        frameCounter_ = 0;
+        lastOnsetFrame_ = -1000;
+        beatIntervalFrames_ = 0.0f;
+        beatConfidence_ = 0.0f;
+        onsetThisFrame_ = false;
+        blocksSinceAudio_ = 1000;
+        textureNoise_.reset();
+        spectrumSamples_ = 0;
+        pitchUpdateCounter_ = 0;
+        spectralFlux_ = bassSpectralFlux_ = highSpectralFlux_ = spectralCentroidHz_ = 0.0f;
+        kickProbability_ = snareProbability_ = hatProbability_ = 0.0f;
+        vocalProbability_ = pluckedProbability_ = harmonicProbability_ = 0.0f;
+        bassSustainProbability_ = pitchConfidence_ = 0.0f;
+        vocalEnvelope_ = harmonicEnvelope_ = smoothedAmp_ = 0.0f;
+        prevSubRms_ = prevLowMidRms_ = prevPresenceRms_ = prevAirRms_ = prevVocalRms_ = 0.0f;
+        prevPitch_ = 0.0f;
+        coilTemp_ = 25.0f;
+        magnetTemp_ = 25.0f;
+        lastComposedAmp_ = 0.0f;
+        lastComposite_ = 0.0f;
+        lastBeatLayer_ = 0.0f;
+        lastBassLayer_ = 0.0f;
+        lastMelodyLayer_ = 0.0f;
+    }
+
+public:
+    void clearHapticBuffer() {
+        semanticReadIdx_.store(semanticWriteIdx_.load(std::memory_order_acquire), std::memory_order_release);
+        onsetReadIdx_.store(onsetWriteIdx_.load(std::memory_order_acquire), std::memory_order_release);
+        clearRequested_.store(true, std::memory_order_release);
+    }
+
+private:
 
     // Portable horizontal sum of a float32x4_t.
     // vaddvq_f32 is aarch64-only; on armeabi-v7a use pairwise add (vpadd).
@@ -370,12 +463,82 @@ public:
         return std::isnan(rms) ? 0.0f : rms;
     }
 
+    void updateSpectrum(const float* signal, int size) {
+        if (!signal || size <= 0) return;
+        size = std::min(size, FFT_SIZE);
+        if (size < FFT_SIZE) {
+            std::memmove(spectrumHistory_, spectrumHistory_ + size, (FFT_SIZE - size) * sizeof(float));
+        }
+        std::memcpy(spectrumHistory_ + (FFT_SIZE - size), signal, size * sizeof(float));
+        spectrumSamples_ = std::min(FFT_SIZE, spectrumSamples_ + size);
+        if (spectrumSamples_ < FFT_SIZE) return;
+
+        for (int i = 0; i < FFT_SIZE; ++i) {
+            const float phase = 2.0f * static_cast<float>(M_PI) * static_cast<float>(i) / static_cast<float>(FFT_SIZE);
+            const float window = 0.5f - 0.5f * cosf(phase);
+            fftRe_[i] = spectrumHistory_[i] * window;
+            fftIm_[i] = 0.0f;
+        }
+        for (int i = 1, j = 0; i < FFT_SIZE; ++i) {
+            int bit = FFT_SIZE >> 1;
+            for (; j & bit; bit >>= 1) j ^= bit;
+            j ^= bit;
+            if (i < j) {
+                std::swap(fftRe_[i], fftRe_[j]);
+                std::swap(fftIm_[i], fftIm_[j]);
+            }
+        }
+        for (int len = 2; len <= FFT_SIZE; len <<= 1) {
+            const float angle = -2.0f * static_cast<float>(M_PI) / static_cast<float>(len);
+            const float wLenRe = cosf(angle);
+            const float wLenIm = sinf(angle);
+            for (int i = 0; i < FFT_SIZE; i += len) {
+                float wRe = 1.0f, wIm = 0.0f;
+                const int half = len >> 1;
+                for (int j = 0; j < half; ++j) {
+                    const int even = i + j;
+                    const int odd = even + half;
+                    const float tRe = wRe * fftRe_[odd] - wIm * fftIm_[odd];
+                    const float tIm = wRe * fftIm_[odd] + wIm * fftRe_[odd];
+                    const float uRe = fftRe_[even];
+                    const float uIm = fftIm_[even];
+                    fftRe_[even] = uRe + tRe;
+                    fftIm_[even] = uIm + tIm;
+                    fftRe_[odd] = uRe - tRe;
+                    fftIm_[odd] = uIm - tIm;
+                    const float nextWRe = wRe * wLenRe - wIm * wLenIm;
+                    wIm = wRe * wLenIm + wIm * wLenRe;
+                    wRe = nextWRe;
+                }
+            }
+        }
+
+        const float binHz = sampleRate_.load(std::memory_order_relaxed) / static_cast<float>(FFT_SIZE);
+        float total = 1.0e-9f;
+        float flux = 0.0f, bassFlux = 0.0f, highFlux = 0.0f, weightedHz = 0.0f;
+        for (int k = 0; k < FFT_BINS; ++k) {
+            const float mag = sqrtf(fftRe_[k] * fftRe_[k] + fftIm_[k] * fftIm_[k]);
+            const float positiveDelta = std::max(0.0f, mag - previousMagnitude_[k]);
+            previousMagnitude_[k] = mag;
+            total += mag;
+            flux += positiveDelta;
+            const float freq = static_cast<float>(k) * binHz;
+            weightedHz += mag * freq;
+            if (freq >= 35.0f && freq <= 180.0f) bassFlux += positiveDelta;
+            if (freq >= 2500.0f && freq <= 12000.0f) highFlux += positiveDelta;
+        }
+        spectralFlux_ = std::clamp((flux / total) * 7.5f, 0.0f, 1.0f);
+        bassSpectralFlux_ = std::clamp((bassFlux / total) * 12.0f, 0.0f, 1.0f);
+        highSpectralFlux_ = std::clamp((highFlux / total) * 10.0f, 0.0f, 1.0f);
+        spectralCentroidHz_ = std::clamp(weightedHz / total, 0.0f, sampleRate_.load(std::memory_order_relaxed) * 0.5f);
+    }
+
     float estimatePitch(const float* signal, int size) {
         std::memmove(pitchHistory_, pitchHistory_ + size, (2048 - size) * sizeof(float));
         std::memcpy(pitchHistory_ + (2048 - size), signal, size * sizeof(float));
 
-        int minLag = static_cast<int>(sampleRate_ / 300.0f);
-        int maxLag = static_cast<int>(sampleRate_ / 35.0f);
+        int minLag = static_cast<int>(sampleRate_.load(std::memory_order_relaxed) / 300.0f);
+        int maxLag = static_cast<int>(sampleRate_.load(std::memory_order_relaxed) / 35.0f);
         if (maxLag > 1500) maxLag = 1500;
 
         int bestLag = -1;
@@ -404,7 +567,7 @@ public:
         }
 
         if (bestLag == -1 || maxCorr <= 0.001f) return 150.0f;
-        float freq = sampleRate_ / static_cast<float>(bestLag);
+        float freq = sampleRate_.load(std::memory_order_relaxed) / static_cast<float>(bestLag);
         return std::clamp(freq, 35.0f, 300.0f);
     }
 
@@ -413,6 +576,11 @@ public:
     // ══════════════════════════════════════════════
     void processAudioBlock(const float* input, int size, float* outTelemetry) {
         if (size > 256) size = 256;
+        if (!input || !outTelemetry || size <= 0) return;
+        applyPendingConfig();
+        if (clearRequested_.exchange(false, std::memory_order_acq_rel)) {
+            clearAnalysisState();
+        }
 
         onsetThisFrame_ = false;
         blocksSinceAudio_ = 0;
@@ -452,10 +620,12 @@ public:
         float subRms = computeRmsNeon(subOutput_, size);
         float midRms = computeRmsNeon(midOutput_, size);
         float textureRms = computeRmsNeon(textureOutput_, size);
-        // v4.21: Lowered cap from 0.15f to 0.05f to avoid "一直震" (constant vibration).
+        // Lowered cap from 0.15f to 0.05f to avoid "一直震" (constant vibration).
         // texture channel contains most music content (200Hz+), so it's always high.
         // It should only add micro-texture, not drive volume envelope.
         textureRms = std::min(textureRms, 0.05f);
+        const float subProfileGain = 1.0f + (profileSubMult_.load(std::memory_order_relaxed) - 1.0f) * 0.25f;
+        subRms *= std::clamp(subProfileGain, 0.75f, 1.50f);
         const float invSize = 1.0f / static_cast<float>(size);
         float bassBand = std::sqrt(bassSq * invSize);
         float lowMidBand = std::sqrt(lowMidSq * invSize);
@@ -463,6 +633,7 @@ public:
         float presenceBand = std::sqrt(presenceSq * invSize);
         float airBand = std::sqrt(airSq * invSize);
         float zcr = static_cast<float>(zeroCrossings) * invSize;
+        updateSpectrum(input, size);
         float totalBand = bassBand + lowMidBand + vocalBand + presenceBand + airBand + 1.0e-6f;
         float highRatio = (presenceBand + airBand) / totalBand;
         float vocalRatio = vocalBand / totalBand;
@@ -471,20 +642,29 @@ public:
         float presenceFlux = std::max(0.0f, presenceBand - prevPresenceRms_);
         float airFlux = std::max(0.0f, airBand - prevAirRms_);
 
-        // 3. Pitch and periodicity. Stable periodic mid-band content is a useful
-        // low-cost voice/harmonic cue; it is deliberately exposed as probability,
-        // not claimed as source separation.
-        float pitch = estimatePitch(input, size);
+        // 3. Pitch and periodicity. Autocorrelation is intentionally throttled;
+        // spectral analysis runs every block while pitch updates every 8 blocks.
+        float pitch = prevPitch_;
+        if (pitchUpdateCounter_++ % 8 == 0) pitch = estimatePitch(input, size);
+        if (pitch <= 0.0f) pitch = 150.0f;
         float pitchDelta = prevPitch_ > 0.0f ? std::abs(pitch - prevPitch_) / std::max(prevPitch_, 1.0f) : 1.0f;
         pitchConfidence_ += 0.18f * (((pitch >= 70.0f && pitch <= 300.0f) && pitchDelta < 0.18f ? 1.0f : 0.0f) - pitchConfidence_);
 
         float kickTarget = std::clamp(
-            std::max(0.0f, subRms - prevSubRms_) * 15.0f  // transient ONLY
-            - highRatio * 0.3f,  // penalize high-frequency content
+            std::max(0.0f, subRms - prevSubRms_) * 12.0f
+            + bassSpectralFlux_ * 0.85f
+            - highRatio * 0.30f,
             0.0f, 1.0f
         );
-        float snareTarget = std::clamp(lowMidFlux * 18.0f + presenceFlux * 10.0f + highRatio * 0.35f - bassRatio * 0.25f, 0.0f, 1.0f);
-        float hatTarget = std::clamp(airFlux * 28.0f + presenceFlux * 8.0f + zcr * 1.5f - bassRatio * 0.35f, 0.0f, 1.0f);
+        float snareTarget = std::clamp(
+            lowMidFlux * 15.0f + presenceFlux * 7.0f + spectralFlux_ * 0.30f
+            + highRatio * 0.28f - bassRatio * 0.25f,
+            0.0f, 1.0f);
+        float hatTarget = std::clamp(
+            highSpectralFlux_ * (0.75f * profileTickMult_.load(std::memory_order_relaxed))
+            + airFlux * 22.0f + presenceFlux * 6.0f
+            + zcr * 1.4f - bassRatio * 0.35f,
+            0.0f, 1.0f);
         float vocalTarget = std::clamp(
             vocalRatio * 1.2f  // reduced from 1.8f
             + pitchConfidence_ * 0.35f  // reduced from 0.65f
@@ -512,7 +692,7 @@ public:
         harmonicProbability_ = smoothProbability(harmonicProbability_, harmonicTarget);
         bassSustainProbability_ = smoothProbability(bassSustainProbability_, bassSustainTarget);
 
-        // v4.1: Onset detection via spectral flux + energy differential
+        // Onset detection via spectral flux + energy differential
         // Each band: flux = max(0, current - previous), onset = flux * probability * gain
         float bassFlux = std::max(0.0f, bassBand - prevBassRms_);
         float lowMidFlux2 = std::max(0.0f, lowMidBand - prevLowMidRms_);
@@ -533,49 +713,60 @@ public:
         // Kick: bass band + sub-bass (TRANSIENT ONLY)
         float kickOnset = 0.0f;
         if (onsetRefractoryFrames_[0] == 0) {
-            float bassFluxVal = std::clamp(bassFlux * 15.0f, 0.0f, 1.0f);  // v4.23: lowered from 20.0f
-            float subFluxVal  = std::clamp(std::max(0.0f, subRms - prevSubRms_) * 15.0f, 0.0f, 1.0f);  // v4.23: lowered from 20.0f
-            kickOnset = std::max(bassFluxVal, subFluxVal);
-            // v4.23: Higher threshold to avoid "乱震" — only strong transients
-            if (kickOnset < 0.40f) kickOnset = 0.0f;  // raised from 0.25f
-            if (kickOnset > 0.0f) onsetRefractoryFrames_[0] = ONSET_REFRACTORY_FRAMES;
+            float bassFluxVal = std::clamp(bassFlux * 15.0f, 0.0f, 1.0f);
+            float subFluxVal  = std::clamp(std::max(0.0f, subRms - prevSubRms_) * 15.0f, 0.0f, 1.0f);
+            float spectralBassVal = bassSpectralFlux_ * 0.95f;
+            kickOnset = std::max({bassFluxVal, subFluxVal, spectralBassVal});
+            kickOnset *= profileKickMult_.load(std::memory_order_relaxed);
+            // Profile floor is a device-aware sensitivity hint. Higher floor = stricter onset gate.
+            const float floorRatio = std::clamp(profileDspFloor_.load(std::memory_order_relaxed) / 0.0040f, 0.55f, 2.00f);
+            const float kickThreshold = std::clamp(0.40f * std::sqrt(floorRatio), 0.28f, 0.58f);
+            if (kickOnset < kickThreshold) kickOnset = 0.0f;  // raised from 0.25f
+            if (kickOnset > 0.0f) onsetRefractoryFrames_[0] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
         }
 
         // Snare: low-mid band + presence band (TRANSIENT ONLY)
         float snareOnset = 0.0f;
         if (onsetRefractoryFrames_[1] == 0) {
-            // v4.23: Require strong low-mid transient — general mid-band should NOT trigger
+            // Require strong low-mid transient — general mid-band should NOT trigger
             float lowMidEnergy = std::clamp((lowMidBand - 0.10f) * 4.0f, 0.0f, 1.0f);  // raised threshold from 0.08, lowered gain from 6.0
-            float lowMidFluxV  = std::clamp(lowMidFlux2 * 12.0f, 0.0f, 1.0f);  // v4.23: lowered from 20.0f
-            float presFluxVal  = std::clamp(presenceFlux2 * 10.0f, 0.0f, 1.0f);  // v4.23: lowered from 15.0f
+            float lowMidFluxV  = std::clamp(lowMidFlux2 * 12.0f, 0.0f, 1.0f);  // lowered from 20.0f
+            float presFluxVal  = std::clamp(presenceFlux2 * 10.0f, 0.0f, 1.0f);  // lowered from 15.0f
             snareOnset = std::max({lowMidEnergy, lowMidFluxV, presFluxVal});
-            // v4.23: Higher threshold — only true snare hits
-            if (snareOnset < 0.50f) snareOnset = 0.0f;  // raised from 0.35f
-            if (snareOnset > 0.0f) onsetRefractoryFrames_[1] = ONSET_REFRACTORY_FRAMES;
+            snareOnset *= profileSnareMult_.load(std::memory_order_relaxed);
+            const float floorRatio = std::clamp(profileDspFloor_.load(std::memory_order_relaxed) / 0.0040f, 0.55f, 2.00f);
+            const float snareThreshold = std::clamp(0.50f * std::sqrt(floorRatio), 0.34f, 0.68f);
+            if (snareOnset < snareThreshold) snareOnset = 0.0f;  // raised from 0.35f
+            if (snareOnset > 0.0f) onsetRefractoryFrames_[1] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
         }
 
         // Vocal: vocal band (500-3000Hz) — only strong vocal attacks
         float vocalOnset = 0.0f;
         if (onsetRefractoryFrames_[2] == 0) {
-            float vocalEnergy = std::clamp((vocalBand - 0.05f) * 5.0f, 0.0f, 1.0f);  // v4.23: raised threshold from 0.025, lowered gain from 8.0
-            float vocalFluxV  = std::clamp(vocalFlux * 8.0f, 0.0f, 1.0f);  // v4.23: lowered from 10.0f
-            vocalOnset = std::max(vocalEnergy, vocalFluxV);
-            // v4.15: Mutual exclusion — if snare is strong, suppress vocal
-            if (snareOnset > 0.3f) vocalOnset *= 0.2f;
-            // v4.23: Hard cap and higher threshold
-            if (vocalOnset > 0.10f) vocalOnset = 0.10f;
-            if (vocalOnset < 0.30f) vocalOnset = 0.0f;  // raised from 0.20f
-            if (vocalOnset > 0.0f) onsetRefractoryFrames_[2] = ONSET_REFRACTORY_FRAMES;
+            float vocalEnergy = std::clamp((vocalBand - 0.05f) * 5.0f, 0.0f, 1.0f);
+            float vocalFluxV  = std::clamp(vocalFlux * 8.0f, 0.0f, 1.0f);
+            float vocalStrength = std::max(vocalEnergy, vocalFluxV);
+            // Mutual exclusion — if snare is strong, suppress vocal
+            if (snareOnset > 0.3f) vocalStrength *= 0.2f;
+            // Threshold the normalized detector first, then map to the small
+            // output range consumed by the Kotlin event scheduler.
+            if (vocalStrength >= 0.30f) {
+                vocalOnset = std::clamp((vocalStrength - 0.30f) * 0.18f, 0.0f, 0.10f);
+            }
+            if (vocalOnset > 0.0f) onsetRefractoryFrames_[2] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
         }
 
-        // Body: sub-bass sustained energy (very subtle)
+        // Body: sub-bass sustained energy (very subtle).
+        // Do not apply the final 0.05 cap before thresholding: doing so made the
+        // old `bodyOnset < 0.20` gate mathematically impossible to pass.
         float bodyOnset = 0.0f;
         if (onsetRefractoryFrames_[3] == 0) {
-            float rawBody = std::clamp((subRms - 0.05f) * 6.0f, 0.0f, 1.0f);  // v4.23: raised threshold from 0.03, lowered gain from 10.0
-            bodyOnset = std::min(rawBody, 0.05f);  // v4.23: lowered cap from 0.10f
-            // v4.23: Higher threshold — only significant sub-bass
-            if (bodyOnset < 0.20f) bodyOnset = 0.0f;  // raised from 0.15f
-            if (bodyOnset > 0.0f) onsetRefractoryFrames_[3] = ONSET_REFRACTORY_FRAMES;
+            const float rawBody = std::clamp((subRms - profileDspFloor_.load(std::memory_order_relaxed) * 8.0f) * 6.0f, 0.0f, 1.0f);
+            const float bodyStrength = rawBody * profileBodyMult_.load(std::memory_order_relaxed);
+            if (bodyStrength >= 0.65f) {
+                bodyOnset = std::clamp((bodyStrength - 0.65f) * 0.14f, 0.0f, 0.05f);
+            }
+            if (bodyOnset > 0.0f) onsetRefractoryFrames_[3] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
         }
 
         // DEBUG: Log band energies and onset values periodically
@@ -602,7 +793,7 @@ public:
 
         // 5. Thermal model
         float powerSum = (subRms * subRms) + (midRms * midRms * 0.4f);
-        float dt = static_cast<float>(size) / sampleRate_;
+        float dt = static_cast<float>(size) / sampleRate_.load(std::memory_order_relaxed);
         float heatFlow = (coilTemp_ - magnetTemp_) / 25.0f;
         coilTemp_ += (powerSum - heatFlow) * dt / 0.8f;
         magnetTemp_ += (heatFlow - (magnetTemp_ - 25.0f) / 15.0f) * dt / 4.0f;
@@ -630,7 +821,7 @@ public:
         float frameDurationMs = dt * 1000.0f;
         outTelemetry[8] = beatIntervalFrames_ * frameDurationMs;
         outTelemetry[9] = beatConfidence_;
-        // v3.8 semantic probabilities (heuristic confidence, 0..1)
+        // Semantic probabilities (heuristic confidence, 0..1)
         outTelemetry[10] = kickProbability_;
         outTelemetry[11] = snareProbability_;
         outTelemetry[12] = hatProbability_;
@@ -641,11 +832,15 @@ public:
         outTelemetry[17] = pitchConfidence_;
         outTelemetry[18] = vocalBand;
         outTelemetry[19] = presenceBand + airBand;
-        // v4.1: Per-band onset strength for discrete event-driven haptics
+        // Per-band onset strength for discrete event-driven haptics
         outTelemetry[20] = kickOnset;
         outTelemetry[21] = snareOnset;
         outTelemetry[22] = vocalOnset;
         outTelemetry[23] = bodyOnset;
+        outTelemetry[24] = spectralFlux_;
+        outTelemetry[25] = bassSpectralFlux_;
+        outTelemetry[26] = highSpectralFlux_;
+        outTelemetry[27] = spectralCentroidHz_;
 
         // Push to onset ring buffer for Kotlin event-driven consumption
         // Only push when at least one onset is non-zero (avoid filling buffer with zeros)
@@ -662,7 +857,7 @@ public:
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  v3.8: Multi-Track Compose
+    //  Multi-Track Compose
     //  Instead of squashing everything into one amplitude, we render envelopes
     //  for each instrumental track separately.
     // ═════════════════════════════════════════════════════════════════
@@ -673,26 +868,26 @@ public:
         kickEnv = std::clamp(kickEnv, 0.0f, 1.0f);
         
         // 2. Snare Track: Snap transient (NO texture component to avoid constant vibration)
-        // v4.21: Lowered snare gain to avoid "一直震"
+        // Lowered snare gain to avoid "一直震"
         float snareEnv = midRms * 0.5f * snareProbability_;  // added 0.5f gain reduction
         snareEnv = std::clamp(snareEnv, 0.0f, 0.60f);  // hard cap at 60%
         
         // 3. Vocal Track: Long-sustain low-pass envelope (capped to avoid constant vibration)
-        // v4.20.1: Removed textureRms component to avoid "一直震" (constant vibration)
-        // v4.21: Further lowered vocal gain
+        // Removed textureRms component to avoid "一直震" (constant vibration)
+        // Further lowered vocal gain
         float vocalTarget = midRms * 0.15f * vocalProbability_;  // lowered from 0.3f to 0.15f
         vocalEnvelope_ += (vocalTarget - vocalEnvelope_) * 0.20f;  // slower attack (was 0.25f)
         float vocalEnv = std::clamp(vocalEnvelope_, 0.0f, 0.10f);  // lowered cap from 0.20f to 0.10f
         
         // 4. Body (Background Rumble) - capped to avoid continuous rumble
-        // v4.21: Lowered body gain further
+        // Lowered body gain further
         float bodyTarget = subRms * 0.08f * bassSustainProbability_;  // lowered from 0.15f to 0.08f
         bassSmoothed_ += (bodyTarget - bassSmoothed_) * 0.20f;  // slower attack (was 0.25f)
         float bodyEnv = std::clamp(bassSmoothed_, 0.0f, 0.05f);  // lowered cap from 0.10f to 0.05f
         
-        // v4.20: Volume envelope modulation — scale all layers by overall music volume
+        // Volume envelope modulation — scale all layers by overall music volume
         // This ensures haptic amplitude follows the music's dynamic range
-        // v4.21: Removed textureRms from overallVolume calculation to avoid "一直震"
+        // Removed textureRms from overallVolume calculation to avoid "一直震"
         float overallVolume = std::clamp((subRms + midRms) / 2.0f, 0.0f, 1.0f);
         // Apply sqrt curve to preserve relative dynamics at micro-levels
         float volumeMod = std::sqrt(overallVolume);
@@ -701,7 +896,7 @@ public:
         vocalEnv *= volumeMod;
         bodyEnv *= volumeMod;
         
-        // v3.15: TAIL-CATCHER — replaced hard cutoff with smooth attenuation.
+        // TAIL-CATCHER — replaced hard cutoff with smooth attenuation.
         // Old: if (totalEnergy < 0.003f) → everything zeroed → "尾气" (fade tails) lost.
         // New: Below 0.002f, apply progressive gain reduction instead of hard zero.
         //      0.002→1.0x, 0.001→0.5x, 0.0005→0.25x, approaching 0→0x.
@@ -721,78 +916,31 @@ public:
         float scale = 255.0f * userAmp * thermalGain;
         pushSemanticFrame(kickEnv * scale, snareEnv * scale, vocalEnv * scale, bodyEnv * scale);
         
-        // Legacy single-channel state tracking (for Kotlin fallback if needed)
         float composite = kickEnv + snareEnv + vocalEnv + bodyEnv;
         lastComposedAmp_ = std::clamp(composite * scale, 0.0f, 255.0f);
-        pushHapticSample(lastComposedAmp_);
         lastBeatLayer_ = kickEnv;
         lastBassLayer_ = bodyEnv;
         lastMelodyLayer_ = vocalEnv;
     }
-    void pushHapticSample(float amplitude) {
-        int writeIdx = hapticWriteIdx_.load(std::memory_order_relaxed);
-        int count = hapticCount_.load(std::memory_order_relaxed);
-        if (count < HAPTIC_BUF_SIZE) {
-            hapticBuf_[writeIdx] = amplitude;
-            hapticWriteIdx_.store((writeIdx + 1) % HAPTIC_BUF_SIZE, std::memory_order_relaxed);
-            hapticCount_.store(count + 1, std::memory_order_relaxed);
-        } else {
-            // Buffer full — overwrite oldest (drop-read)
-            hapticBuf_[writeIdx] = amplitude;
-            hapticWriteIdx_.store((writeIdx + 1) % HAPTIC_BUF_SIZE, std::memory_order_relaxed);
-            int readIdx = hapticReadIdx_.load(std::memory_order_relaxed);
-            hapticReadIdx_.store((readIdx + 1) % HAPTIC_BUF_SIZE, std::memory_order_relaxed);
-        }
-    }
-
-    int getHapticFrame(float* outAmplitudes, int maxCount) {
-        int count = std::min(hapticCount_.load(std::memory_order_relaxed), maxCount);
-        int readIdx = hapticReadIdx_.load(std::memory_order_relaxed);
-        for (int i = 0; i < count; ++i) {
-            outAmplitudes[i] = hapticBuf_[readIdx];
-            readIdx = (readIdx + 1) % HAPTIC_BUF_SIZE;
-        }
-        hapticReadIdx_.store(readIdx, std::memory_order_relaxed);
-        hapticCount_.fetch_sub(count, std::memory_order_relaxed);
-        return count;
-    }
-
-    void clearHapticBuffer() {
-        hapticWriteIdx_.store(0, std::memory_order_relaxed);
-        hapticReadIdx_.store(0, std::memory_order_relaxed);
-        hapticCount_.store(0, std::memory_order_relaxed);
-        beatEnvelope_ = 0.0f;
-        onsetRefractoryCounter_ = 1000;
-        bassSmoothed_ = 0.0f;
-        melodySmoothed_ = 0.0f;
-        std::memset(energyHistory_, 0, sizeof(energyHistory_));
-        lastComposedAmp_ = 0.0f;
-        lastComposite_ = 0.0f;
-        frameCounter_ = 0;
-        lastOnsetFrame_ = -1000;
-        beatIntervalFrames_ = 0.0f;
-        beatConfidence_ = 0.0f;
-        onsetThisFrame_ = false;
-        blocksSinceAudio_ = 1000;
-        textureNoise_.reset();
-    }
-
     float getLastComposedAmp() const { return lastComposedAmp_; }
     float getLastBeatLayer() const { return lastBeatLayer_; }
     float getLastBassLayer() const { return lastBassLayer_; }
     float getLastMelodyLayer() const { return lastMelodyLayer_; }
     float getLastComposite() const { return lastComposite_; }
     float getBeatEnvelope() const { return beatEnvelope_; }
-    float getBeatIntervalMs() const { return beatIntervalFrames_ * (256.0f / sampleRate_) * 1000.0f; }
+    float getBeatIntervalMs() const { return beatIntervalFrames_ * (256.0f / sampleRate_.load(std::memory_order_relaxed)) * 1000.0f; }
     float getBeatConfidence() const { return beatConfidence_; }
 
     int getSemanticFrames(SemanticHapticFrame* outFrames, int maxFrames) {
-        std::lock_guard<std::mutex> lock(hapticBufferMutex_);
-        int count = std::min(maxFrames, static_cast<int>(semanticHapticBuffer_.size()));
-        if (count > 0) {
-            std::memcpy(outFrames, semanticHapticBuffer_.data(), count * sizeof(SemanticHapticFrame));
-            semanticHapticBuffer_.erase(semanticHapticBuffer_.begin(), semanticHapticBuffer_.begin() + count);
+        if (!outFrames || maxFrames <= 0) return 0;
+        int read = semanticReadIdx_.load(std::memory_order_relaxed);
+        const int write = semanticWriteIdx_.load(std::memory_order_acquire);
+        int count = 0;
+        while (read != write && count < maxFrames) {
+            outFrames[count++] = semanticHapticBuffer_[read];
+            read = (read + 1) % SEMANTIC_BUF_SIZE;
         }
+        semanticReadIdx_.store(read, std::memory_order_release);
         return count;
     }
 };

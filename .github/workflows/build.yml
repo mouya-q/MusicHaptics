@@ -32,15 +32,11 @@ jobs:
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.0.12077973" "build-tools;35.0.0" "cmake;3.22.1"
           echo "sdk.dir=$ANDROID_HOME" > local.properties
       
+      - name: Repository checks
+        run: python3 scripts/repo_check.py
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
-      
-      - name: Setup fixed debug keystore for consistent signing
-        run: |
-          mkdir -p ~/.android
-          cp app/debug.keystore ~/.android/debug.keystore
-          echo "Fixed debug.keystore copied to ~/.android/"
-          ls -la ~/.android/debug.keystore
       
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace

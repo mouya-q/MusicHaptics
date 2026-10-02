@@ -64,7 +64,7 @@ fun IOSConsole(
 ) {
     val chevronRotation by animateFloatAsState(
         targetValue = if (isExpanded) 90f else 0f,
-        animationSpec = PhysicsSpring.uiFast(),  // v3.14: critically-damped, ~150ms
+        animationSpec = PhysicsSpring.uiFast(),  // critically-damped, ~150ms
         label = "ChevronRotation"
     )
 
@@ -81,7 +81,7 @@ fun IOSConsole(
         border = BorderStroke(0.5.dp, if (isDark()) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f)),
         shadowElevation = 0.dp
     ) {
-        Column(modifier = Modifier.fillMaxWidth().animateContentSize(tween(250, easing = LinearOutSlowInEasing))) {  // v3.14: ease-out for enter
+        Column(modifier = Modifier.fillMaxWidth().animateContentSize(tween(250, easing = LinearOutSlowInEasing))) {  // ease-out for enter
             Row(
                 modifier = Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 16.dp).clickable(
                     interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onToggle
@@ -99,8 +99,8 @@ fun IOSConsole(
 
             AnimatedVisibility(
                 visible = isExpanded,
-                enter = expandVertically(tween(250, easing = LinearOutSlowInEasing), Alignment.Top) + fadeIn(tween(200)),  // v3.14: ease-out
-                exit = shrinkVertically(tween(250, easing = FastOutLinearInEasing), Alignment.Top) + fadeOut(tween(180))  // v3.14: ease-in for exit
+                enter = expandVertically(tween(250, easing = LinearOutSlowInEasing), Alignment.Top) + fadeIn(tween(200)),  // ease-out
+                exit = shrinkVertically(tween(250, easing = FastOutLinearInEasing), Alignment.Top) + fadeOut(tween(180))  // ease-in for exit
             ) {
                 Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
                     HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)

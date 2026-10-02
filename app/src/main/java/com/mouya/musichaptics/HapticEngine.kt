@@ -6,16 +6,12 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import com.mouya.musichaptics.BuildConfig
-import android.os.VibrationEffect
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.FloatBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.*
@@ -23,6 +19,9 @@ import kotlin.math.*
 import com.mouya.musichaptics.LinkHealthMonitor
 import com.mouya.musichaptics.LogBroadcaster
 import com.mouya.musichaptics.NativeBridge
+import com.mouya.musichaptics.audio.AudioIngress
+import com.mouya.musichaptics.haptic.HapticImpactPolicy
+import com.mouya.musichaptics.haptic.DeviceTuningRegistry
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import java.net.DatagramSocket
@@ -158,15 +157,10 @@ class HapticEngine(
     }
 
     private val nativeBridge = NativeBridge()
+    private lateinit var audioIngress: AudioIngress
+    private val impactPolicy = HapticImpactPolicy()
 
     private val vibrateProxy = VibrateProxy(context)
-
-    // C++ 核心重构：PCM 直接送入 nativeBridge.processAudioDirect()
-    private val directPcmBuffer: ByteBuffer = ByteBuffer.allocateDirect(FRAME_BLOCK_SIZE * 4).apply {
-        order(ByteOrder.nativeOrder())
-    }
-    private val floatPcmView: FloatBuffer = directPcmBuffer.asFloatBuffer()
-    private val nativeTelemetryResult = FloatArray(32)
 
     private val deviceProfile = detectDeviceProfile(
         context = context,
@@ -175,10 +169,6 @@ class HapticEngine(
     val hapticEventGenerator = HapticEventGenerator(context, deviceProfile)
 
     private val hapticSynthesizer = HapticSynthesizer(deviceProfile)
-
-    private val hapticTimeline = HapticTimelineScheduler().also {
-        it.adaptToActuatorQ(deviceProfile.actuator.qFactor)
-    }
 
     private val musicStructureAnalyzer = MusicStructureAnalyzer()
     @Volatile private var currentMusicStructure = MusicStructureAnalyzer.Snapshot()
@@ -215,35 +205,11 @@ class HapticEngine(
     @Volatile private var rootPipeGainIsHex = false
     private val rootPipeLock = Any()
     @Volatile private var hapticPaused = false
+    private val lifecycleJob = SupervisorJob()
+    private val lifecycleScope = CoroutineScope(lifecycleJob + Dispatchers.Default)
 
     @Volatile private var pcmFallbackAmplitude = 0
     @Volatile private var pcmFallbackAtMs = 0L
-
-    // RichTap: 仅 Xiaomi/Redmi/POCO (MIUI/HyperOS) 设备可用，其他设备完全禁用
-    private val isRichTapDevice: Boolean by lazy {
-        val mfr = Build.MANUFACTURER.lowercase()
-        val brand = Build.BRAND.lowercase()
-        val model = Build.MODEL.lowercase()
-        val device = Build.DEVICE.lowercase()
-        
-        val isXiaomiFamily = mfr == "xiaomi" || mfr == "redmi" || mfr == "poco" ||
-                            brand == "xiaomi" || brand == "redmi" || brand == "poco"
-        
-        // 检测是否 HyperOS/MIUI 系统
-        val isMiuiSystem = try {
-            val cl = Class.forName("android.os.SystemProperties")
-            val get = cl.getMethod("get", String::class.java, String::class.java)
-            val miuiVersion = get.invoke(null, "ro.miui.ui.version.name", "") as String
-            val miuiCode = get.invoke(null, "ro.miui.ui.version.code", "") as String
-            miuiVersion.isNotEmpty() || miuiCode.isNotEmpty()
-        } catch (e: Exception) { false }
-        
-        val result = isXiaomiFamily && isMiuiSystem
-        if (!result) {
-            Log.i(TAG, "[RichTap] Not a Xiaomi MIUI device, RichTap disabled: mfr=$mfr brand=$brand device=$device")
-        }
-        result
-    }
 
     @Volatile private var lastVibrationMs = AtomicLong(0L)
     @Volatile private var lastBeatEvent = ""
@@ -256,19 +222,28 @@ class HapticEngine(
     @Volatile private var pendingSemanticLabel: String = "NONE"
     @Volatile private var pendingPrimitiveTime: Long = 0L
     private var lastSemanticImpactTime = 0L
-    private val semanticImpactRefractoryMs = 30L  
+    private val semanticImpactRefractoryMs: Long
+        get() = DeviceTuningRegistry.current(deviceProfile).minIntervalMs.coerceIn(24L, 72L)
 
     val telemetryData = TelemetryMonitor()
 
 
     init {
+        audioIngress = AudioIngress(nativeBridge, ::onNativeTelemetry)
 
-        val probeResult = RootHardwareProbe.probeAndPersist(context)
-        Log.i(TAG, "RootHardwareProbe: rootGranted=${probeResult.rootGranted} profileId=${probeResult.profileId}")
-        LogBroadcaster.sendLog(context, "[DirectDrive] RootProbe: granted=${probeResult.rootGranted} profile=${probeResult.profileId}")
+        // Do not spawn `su` or recursively scan /sys from every injected target process.
+        // Root probing is a module-side operation; hooked apps only consume cached/known nodes.
+        val configuredProfile = prefs.getString(RootHardwareProbe.PREF_PROFILE, "DEFAULT") ?: "DEFAULT"
+        val configuredNodes = prefs.getString(RootHardwareProbe.PREF_DIRECT_DRIVE_NODES, null)
+        Log.i(TAG, "Hardware profile=$configuredProfile; configuredNodes=${configuredNodes?.isNotBlank() == true}")
+        LogBroadcaster.sendLog(context, "[DirectDrive] profile=$configuredProfile; cachedNodes=${configuredNodes?.isNotBlank() == true}")
         
+        if (!configuredNodes.isNullOrBlank()) {
+            runCatching { nativeBridge.setDirectDriveNodes(configuredNodes) }
+                .onFailure { Log.w(TAG, "Configured direct-drive nodes rejected", it) }
+        }
         
-        RootHardwareProbe.getDirectDriveNodesAsync(context) { nodes ->
+        RootHardwareProbe.getDirectDriveNodesAsync(context, allowRootProbe = false) { nodes ->
             Log.i(TAG, "DirectDriveNodes received: '$nodes'")
             LogBroadcaster.sendLog(context, "[DirectDrive] Nodes received: '$nodes'")
             if (nodes.isNotBlank()) {
@@ -291,26 +266,13 @@ class HapticEngine(
 
         synchronizeParameters()
 
-        val proxyReady = vibrateProxy.init()
-        RichTapAdapter.init(context)
+        val proxyReady = vibrateProxy.init(deviceProfile)
         Log.i(TAG, "VibrateProxy initialized: ready=$proxyReady path=${if (vibrateProxy.isProxyActive) "IPC_PROXY" else "DIRECT"}")
         Log.i(TAG, "App haptic calibration: package=$targetPackage outputGain=${outputGainForPackage(targetPackage)}")
-        Log.i(TAG, "[Device Profile] name=${hapticEventGenerator.profile.name} actuator.f0=${hapticEventGenerator.profile.actuator.resonanceFreq}Hz maxAmp=${hapticEventGenerator.profile.actuator.maxAmplitude} damping=${hapticEventGenerator.profile.actuator.dampingRatio} q=${hapticEventGenerator.profile.actuator.qFactor}")
+        val deviceTuning = com.mouya.musichaptics.haptic.DeviceTuningRegistry.current(deviceProfile)
+        Log.i(TAG, "[Device Profile] name=${hapticEventGenerator.profile.name} id=${deviceTuning.profileId} actuator.f0=${hapticEventGenerator.profile.actuator.resonanceFreq}Hz maxAmp=${hapticEventGenerator.profile.actuator.maxAmplitude} damping=${hapticEventGenerator.profile.actuator.dampingRatio} q=${hapticEventGenerator.profile.actuator.qFactor} tuning=${deviceTuning.reason}")
         Log.i(TAG, "[Vibrator Capability] hasAmpCtrl=${vibrateProxy.hasAmplitudeControl} primitives: CLICK=${vibrateProxy.primitiveClickSupported} TICK=${vibrateProxy.primitiveTickSupported} THUD=${vibrateProxy.primitiveHeavyClickSupported}")
         if (nativeBridge.isLoaded) {
-            nativeBridge.onFrameCallback = { samples, count ->
-                
-                if (nativeBridge.beatTriggerCallback == null &&
-                    !hapticPaused && vibrateProxy.hasVibrator && samples.size >= count && count > 0) {
-                    
-                    val timings = LongArray(count) { 5L } 
-                    val amplitudes = IntArray(count) { i ->
-                        (samples[i].coerceIn(0f, 1f) * 255f).toInt().coerceIn(0, 255)
-                    }
-                    vibrateProxy.performWaveform(timings, amplitudes)
-                }
-            }
-
             
             
             
@@ -349,8 +311,8 @@ class HapticEngine(
         engineScope.launch {
             runSemanticFrameLoop()
         }
-        Log.i(TAG, "Native scheduler: 10ms frame timing; Haptics: EVENT-DRIVEN onset strikes (piano-key feel)")
-        val readyMsg = "[System Ready] v${BuildConfig.VERSION_NAME} C++ Direct Drive Renderer: ${if (nativeBridge.isLoaded) "NATIVE ACTIVE" else "FALLBACK"} | Device: ${hapticEventGenerator.profile.name} | Actuator: ${hapticEventGenerator.profile.actuator.resonanceFreq.toInt()}Hz Q=${hapticEventGenerator.profile.actuator.qFactor} rise=${hapticEventGenerator.profile.actuator.riseTimeMs.toInt()}ms fall=${hapticEventGenerator.profile.actuator.fallTimeMs.toInt()}ms | C++ 5-Channel: Percussion+Bass+Vocal+Harmonic+Texture | Onset Detection: KICK/SNARE/VOCAL/BODY | 200Hz LRA Physics Model: ON | Scheduler: ${if (nativeSchedulerActive) "NATIVE DIRECT (5ms)" else "COROUTINE (100ms)"}"
+        Log.i(TAG, "Native scheduler: low-latency event timing; Haptics: transient-first onset strikes")
+        val readyMsg = "[System Ready] v${BuildConfig.VERSION_NAME} C++ Direct Drive Renderer: ${if (nativeBridge.isLoaded) "NATIVE ACTIVE" else "FALLBACK"} | Device: ${hapticEventGenerator.profile.name} | Actuator: ${hapticEventGenerator.profile.actuator.resonanceFreq.toInt()}Hz Q=${hapticEventGenerator.profile.actuator.qFactor} rise=${hapticEventGenerator.profile.actuator.riseTimeMs.toInt()}ms fall=${hapticEventGenerator.profile.actuator.fallTimeMs.toInt()}ms | C++ 5-Channel: Percussion+Bass+Vocal+Harmonic+Texture | Onset Detection: KICK/SNARE/VOCAL/BODY | 200Hz LRA Physics Model: ON | Scheduler: ${if (nativeSchedulerActive) "NATIVE DIRECT" else "COROUTINE (16ms)"}"
         Log.i(TAG, readyMsg)
         logCallback?.onLog(readyMsg)
         LogBroadcaster.sendLog(context, readyMsg)
@@ -534,25 +496,8 @@ class HapticEngine(
 
     
     fun onKotlinBeatDetected(event: String, intensity: Int, rms: Float) {
-        // 非 Xiaomi/MIUI 设备：直接走原有 triggerBeatVibration
-        if (!isRichTapDevice) {
-            val msg = "[KL-BEAT] TRIGGER event=$event intensity=$intensity rms=${"%.5f".format(rms)} path=STD"
-            Log.i(TAG, msg)
-            LogBroadcaster.sendLog(context, msg)
-            triggerBeatVibration(event, intensity)
-            return
-        }
-
-        // Xiaomi/MIUI 设备：RichTap 直通（绕过多重波形合成，直接 oneShot，连贯性最好）
-        val msg = "[KL-BEAT] TRIGGER event=$event intensity=$intensity rms=${"%.5f".format(rms)} path=RICHTAP"
-        Log.i(TAG, msg)
-        LogBroadcaster.sendLog(context, msg)
-        RichTapAdapter.triggerPulse(event, intensity)
-    }
-
-    // RichTap 路径判断已上移至 onKotlinBeatDetected；保留旧调用兼容（已无其它调用方）
-    private fun tryRichTapDirect(event: String, intensity: Int): Boolean {
-        return isRichTapDevice && RichTapAdapter.triggerPulse(event, intensity)
+        Log.d(TAG, "[BEAT] event=$event intensity=$intensity rms=${"%.5f".format(rms)}")
+        triggerBeatVibration(event, intensity)
     }
 
     
@@ -560,90 +505,47 @@ class HapticEngine(
 
     
     private fun triggerBeatVibration(event: String, intensity: Int) {
-        if (!vibrateProxy.hasVibrator || hapticPaused) {
-            LogBroadcaster.sendLog(context, "[Beat] SKIPPED event=$event intensity=$intensity hasVibrator=${vibrateProxy.hasVibrator} hapticPaused=$hapticPaused")
-            return
-        }
-
+        if (!vibrateProxy.hasVibrator || hapticPaused) return
         val now = SystemClock.elapsedRealtime()
+        val plan = impactPolicy.plan(
+            event = event,
+            intensity = intensity,
+            profile = hapticEventGenerator.profile,
+            amplitudeControl = vibrateProxy.hasAmplitudeControl,
+            forceDefaultAmplitude = vibrateProxy.forceDefaultAmplitude
+        ) ?: return
 
-        val act = deviceProfile.actuator
-        val ampCtrl = vibrateProxy.hasAmplitudeControl
-        val forceDefault = vibrateProxy.forceDefaultAmplitude
+        val previous = lastVibrationMs.get()
+        if (now - previous < plan.cooldownMs) return
+        if (!lastVibrationMs.compareAndSet(previous, now)) return
 
-        val shape = BEAT_SHAPES[event.uppercase()] ?: run {
-            LogBroadcaster.sendLog(context, "[Beat] UNKNOWN event=$event — ignored")
-            return
+        val timings = LongArray(plan.segments.size)
+        val amplitudes = IntArray(plan.segments.size)
+        plan.segments.forEachIndexed { index, segment ->
+            timings[index] = segment.durationMs
+            amplitudes[index] = segment.amplitude
         }
 
-        val timing = when {
-            forceDefault || !ampCtrl -> shape.force
-            else -> shape.ampCtrl
-        }
-        val totalDur = (act.riseTimeMs * timing.mul).toLong().coerceIn(timing.min, timing.max)
-
-            
-            
         try {
-            val maxAmp = deviceProfile.maxAmplitude
-            val normalized = (intensity.toFloat() / 255f).coerceIn(0.05f, 1.0f)
-            val msg = "[Beat] TRIGGER event=$event intensity=$intensity (${(normalized * 100).toInt()}%) ampCtrl=$ampCtrl forceDefault=$forceDefault maxAmp=$maxAmp riseMs=${act.riseTimeMs} totalDur=${totalDur}ms"
-            Log.i(TAG, msg)
-            LogBroadcaster.sendLog(context, msg)
-
-            val amp = (normalized * shape.ampBase * shape.weight(deviceProfile)).toInt().coerceIn(1, maxAmp)
-
-            val qShape = (16f / act.qFactor.coerceIn(8f, 22f)).coerceIn(0.70f, 1.35f)
-            val baseDecayFrac = (1f - shape.attackFrac - shape.sustainFrac).coerceAtLeast(0.05f)
-            val decayFrac = (baseDecayFrac * qShape).coerceIn(0.05f, 0.70f)
-            val attackFrac = if (shape.hasSustain) shape.attackFrac
-                             else (1f - decayFrac).coerceAtLeast(0.20f)
-            val sustainFrac = if (shape.hasSustain)
-                                  (1f - attackFrac - decayFrac).coerceAtLeast(0.05f)
-                              else 0f
-
-            val attack = (totalDur * attackFrac).toLong().coerceAtLeast(1L)
-            val sustain = if (shape.hasSustain) (totalDur * sustainFrac).toLong().coerceAtLeast(1L) else 0L
-            val decay = (totalDur - attack - sustain).coerceAtLeast(1L)
-
-            val segments = if (forceDefault) {
-                buildList {
-                    add(attack to VibrationEffect.DEFAULT_AMPLITUDE)
-                    if (shape.hasSustain) add(sustain to VibrationEffect.DEFAULT_AMPLITUDE)
-                    add(decay to VibrationEffect.DEFAULT_AMPLITUDE)
-                }
-            } else {
-                buildList {
-                    add(attack to (amp * shape.attackAmpFrac).toInt().coerceIn(1, maxAmp))
-                    if (shape.hasSustain) add(sustain to (amp * shape.sustainAmpFrac).toInt().coerceIn(1, maxAmp))
-                    add(decay to (amp * shape.decayAmpFrac).toInt().coerceIn(1, maxAmp))
-                }
-            }
-
-            LogBroadcaster.sendLog(context,
-                "[Beat] $event → performEnvelope${segments.size}seg total=${totalDur}ms " +
-                "a/s/d=$attack/$sustain/$decay amp=$amp q=${act.qFactor} qShape=${"%.2f".format(qShape)} " +
-                "forceDefault=$forceDefault")
-            vibrateProxy.performEnvelope(segments)
-
-            lastBeatEvent = event
-        } catch (e: Exception) {
-            Log.w(TAG, "[Beat] triggerBeatVibration failed: ${e.message}")
-            LogBroadcaster.sendLog(context, "[Beat] triggerBeatVibration FAILED: ${e.message}")
+            vibrateProxy.performWaveform(timings, amplitudes)
+            lastBeatEvent = plan.event
+            Log.d(TAG, "[HAPTIC] ${plan.event} intensity=$intensity duration=${plan.totalDurationMs}ms cooldown=${plan.cooldownMs}ms")
+        } catch (t: Throwable) {
+            Log.w(TAG, "[HAPTIC] output failed: ${t.message}")
         }
     }
 
-    
-    
     private suspend fun runSemanticFrameLoop() {
-        val pullIntervalMs = 100L  
+        val pullIntervalMs = 16L
         var frameCounter = 0L
+        val semanticFrameBuffer = FloatArray(64 * 4)
+        val onsetBuffer = FloatArray(64 * 4)
         var lastAudioInputTime = 0L
         val silenceTimeoutMs = 2500L
 
         // C++ 核心重构：onset 帧触发振动
         var lastBeatMs = 0L
-        val beatRefractoryMs = 38L  // 最小节拍间隔
+        val beatRefractoryMs = DeviceTuningRegistry.current(deviceProfile).minIntervalMs.coerceIn(24L, 72L)
 
         while (true) {
             val frameStartTime = SystemClock.elapsedRealtime()
@@ -654,19 +556,13 @@ class HapticEngine(
                     continue
                 }
 
-                // 1. 语义帧 → hapticTimeline（连续波形渲染）
-                val semanticFrameBuffer = FloatArray(64)
-                val semanticFrameCount = if (nativeBridge.isLoaded) {
+                // 1. Low-rate semantic telemetry is consumed only when the native scheduler is unavailable.
+                val semanticFrameCount = if (nativeBridge.isLoaded && !nativeSchedulerActive) {
                     nativeBridge.getSemanticFrames(semanticFrameBuffer, 64)
                 } else 0
 
-                if (semanticFrameCount > 0) {
-                    hapticTimeline.applyMultiTrackFrames(semanticFrameBuffer, semanticFrameCount)
-                }
-
                 // 2. Onset 帧 → 事件驱动振动（C++ onsetBuf_ 读取）
-                val onsetBuffer = FloatArray(64)
-                val onsetFrameCount = if (nativeBridge.isLoaded) {
+                val onsetFrameCount = if (nativeBridge.isLoaded && !nativeSchedulerActive) {
                     nativeBridge.getOnsetFrames(onsetBuffer, 64)
                 } else 0
 
@@ -691,13 +587,7 @@ class HapticEngine(
                             else -> "BODY"
                         }
                         val intensity = (maxVal * 255f).toInt().coerceIn(15, 255)
-
-                        // RichTap 路径判断
-                        if (isRichTapDevice) {
-                            RichTapAdapter.triggerPulse(beatType, intensity)
-                        } else {
-                            triggerBeatVibration(beatType, intensity)
-                        }
+                        triggerBeatVibration(beatType, intensity)
 
                         lastBeatMs = now
                         Log.i(TAG, "[C++-ONSET] $beatType intensity=$intensity k=${"%.3f".format(k)} s=${"%.3f".format(s)} v=${"%.3f".format(v)} b=${"%.3f".format(b)}")
@@ -726,7 +616,6 @@ class HapticEngine(
                         val prim = semanticPrim!!
                         val timeSinceSemantic = frameStartTime - lastSemanticImpactTime
                         if (timeSinceSemantic >= semanticImpactRefractoryMs) {
-                            hapticTimeline.offerPrimitive(prim, frameStartTime)
                             lastSemanticImpactTime = frameStartTime
                             pendingPrimitive = null
                         }
@@ -759,6 +648,9 @@ class HapticEngine(
     }
 
     fun synchronizeParameters() {
+        if (prefs is com.mouya.musichaptics.hook.HookConfigPreferences) {
+            prefs.refresh()
+        }
         val masterState = try { prefs.getBoolean("master_switch", true) } catch (e: Exception) { true }
         isEngineEnabled.set(masterState)
 
@@ -784,6 +676,9 @@ class HapticEngine(
             amplitude = outputAmp,
             presetId = presetId
         )
+
+        // DeviceProfile is now a live DSP input, not only a renderer hint.
+        nativeBridge.configureProfile(deviceProfile)
 
         telemetryData.lowPassCutoffHz = lowCutoffFreq
         telemetryData.highPassCutoffHz = highCutoffFreq
@@ -818,10 +713,14 @@ class HapticEngine(
             LogBroadcaster.sendLog(context, msg)
         }
 
+        val deviceTuning = DeviceTuningRegistry.current(deviceProfile)
+        val actuator = deviceProfile.actuator
         val synthConfig = HapticSynthesizer.SynthConfig(
             synthesisRateHz = try { prefs.getInt("synth_rate_hz", HapticSynthesizer.SYNTHESIS_RATE_HZ) } catch (e: Exception) { HapticSynthesizer.SYNTHESIS_RATE_HZ },
-            lraF0 = try { prefs.getFloat("synth_lra_f0", HapticSynthesizer.LRA_F0) } catch (e: Exception) { HapticSynthesizer.LRA_F0 },
-            lraQ = try { prefs.getFloat("synth_lra_q", HapticSynthesizer.LRA_Q) } catch (e: Exception) { HapticSynthesizer.LRA_Q },
+            // Device-specific physical defaults are used only when the user has
+            // not overridden the synthesizer controls in preferences.
+            lraF0 = try { prefs.getFloat("synth_lra_f0", actuator.resonanceFreq) } catch (e: Exception) { actuator.resonanceFreq },
+            lraQ = try { prefs.getFloat("synth_lra_q", actuator.qFactor) } catch (e: Exception) { actuator.qFactor },
             attackTauImpact = try { prefs.getFloat("synth_attack_impact", HapticSynthesizer.ATTACK_TAU_IMPACT) } catch (e: Exception) { HapticSynthesizer.ATTACK_TAU_IMPACT },
             decayTauImpact = try { prefs.getFloat("synth_decay_impact", HapticSynthesizer.DECAY_TAU_IMPACT) } catch (e: Exception) { HapticSynthesizer.DECAY_TAU_IMPACT },
             attackTauContinuous = try { prefs.getFloat("synth_attack_continuous", HapticSynthesizer.ATTACK_TAU_CONTINUOUS) } catch (e: Exception) { HapticSynthesizer.ATTACK_TAU_CONTINUOUS },
@@ -830,23 +729,17 @@ class HapticEngine(
             sustainLevel = try { prefs.getFloat("synth_sustain", HapticSynthesizer.SUSTAIN_LEVEL) } catch (e: Exception) { HapticSynthesizer.SUSTAIN_LEVEL },
             thermalWarn = try { prefs.getFloat("synth_thermal_warn", HapticSynthesizer.THERMAL_WARN) } catch (e: Exception) { HapticSynthesizer.THERMAL_WARN },
             thermalCrit = try { prefs.getFloat("synth_thermal_crit", HapticSynthesizer.THERMAL_CRIT) } catch (e: Exception) { HapticSynthesizer.THERMAL_CRIT },
-            thermalRth = try { prefs.getFloat("synth_thermal_rth", HapticSynthesizer.THERMAL_RTH) } catch (e: Exception) { HapticSynthesizer.THERMAL_RTH },
-            thermalCth = try { prefs.getFloat("synth_thermal_cth", HapticSynthesizer.THERMAL_CTH) } catch (e: Exception) { HapticSynthesizer.THERMAL_CTH },
-            impactGain = try { prefs.getFloat("synth_impact_gain", 1.0f) } catch (e: Exception) { 1.0f },
+            thermalRth = try { prefs.getFloat("synth_thermal_rth", actuator.thermalResistance) } catch (e: Exception) { actuator.thermalResistance },
+            thermalCth = try { prefs.getFloat("synth_thermal_cth", actuator.thermalCapacitance) } catch (e: Exception) { actuator.thermalCapacitance },
+            impactGain = try { prefs.getFloat("synth_impact_gain", deviceTuning.impactGain) } catch (e: Exception) { deviceTuning.impactGain },
             continuousGain = try { prefs.getFloat("synth_continuous_gain", 1.0f) } catch (e: Exception) { 1.0f },
-            textureGain = try { prefs.getFloat("synth_texture_gain", 1.0f) } catch (e: Exception) { 1.0f },
+            textureGain = try { prefs.getFloat("synth_texture_gain", deviceTuning.textureGainScale) } catch (e: Exception) { deviceTuning.textureGainScale },
             masterGain = try { prefs.getFloat("synth_master_gain", 1.0f) } catch (e: Exception) { 1.0f },
         )
         hapticSynthesizer.updateParameters(synthConfig)
 
-        // C++ 核心重构：参数直接传给 nativeBridge
-        nativeBridge.configure(
-            sampleRate = sampleRate.toFloat(),
-            lowCut = lowCutoffFreq,
-            highCut = highCutoffFreq,
-            amplitude = outputAmp,
-            presetId = presetId
-        )
+        // Profile configuration is applied above together with the live native DSP parameters.
+        Log.i(TAG, "[Device Adaptation] profile=${deviceTuning.profileId} dspFloor=${"%.4f".format(deviceProfile.dspEnergyFloor)} sub=${"%.2f".format(deviceProfile.dspSubMult)} kick=${"%.2f".format(deviceProfile.dspKickMult)} snare=${"%.2f".format(deviceProfile.dspSnareMult)} tick=${"%.2f".format(deviceProfile.dspTickMult)} body=${"%.2f".format(deviceProfile.dspBodyMult)} refractory=${"%.2f".format(deviceProfile.dspRefractoryScale)}")
     }
 
     fun refreshSettings() {
@@ -857,6 +750,13 @@ class HapticEngine(
     }
 
     // dspWorkerLock moved to class declaration
+
+    internal fun visualizerFallbackEnabled(): Boolean =
+        prefs.getBoolean("visualizer_fallback_enabled", true)
+
+    internal fun onPlaybackStarted() {
+        resumeFromHook()
+    }
 
     fun reconfigure(newSampleRate: Int, newChannels: Int) {
         if (newSampleRate <= 0 || newChannels <= 0 || newChannels > MAXIMUM_CHANNELS) {
@@ -890,12 +790,13 @@ class HapticEngine(
     private fun markCandidateStopped() {
         val lastPcmMs = pcmFallbackAtMs
         
-        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+        lifecycleScope.launch {
             kotlinx.coroutines.delay(200)
             if (pcmFallbackAtMs - lastPcmMs <= 50) { 
                 Log.i(TAG, "[PLAYBACK TRULY PAUSED] No PCM received for 200ms. Forcing immediate haptic decay")
                 LogBroadcaster.sendLog(context, "[PLAYBACK TRULY PAUSED] Forcing immediate haptic decay")
                 hapticPaused = true
+                pcmFallbackAtMs = 0L
                 vibrateProxy.setPaused()
                 nativeBridge.clearHapticBuffer()
                 directDriveSmoothAmp = 0f
@@ -951,82 +852,64 @@ class HapticEngine(
     }
 fun processAudioFrame(pcmData: ShortArray?) {
         if (pcmData == null || pcmData.isEmpty() || !isEngineEnabled.get()) {
-            if (!isEngineEnabled.get()) {
-                vibrateProxy.cancel()
-            }
+            if (!isEngineEnabled.get()) vibrateProxy.cancel()
             return
         }
+        resumeFromHook()
+        audioIngress.processPcm16(pcmData, 0, pcmData.size, channels)
+    }
 
+    internal fun markHookAudioArrival(atMs: Long = SystemClock.elapsedRealtime()) {
+        pcmFallbackAtMs = atMs
+        nativeLastAudioTime = atMs
+    }
+
+    internal fun processPcm16FromHook(data: ShortArray, offset: Int, sampleCount: Int, channelCount: Int) {
+        if (!isEngineEnabled.get()) return
+        ensureIngressFormat(channelCount)
+        resumeFromHook()
+        markHookAudioArrival()
+        audioIngress.processPcm16(data, offset, sampleCount, channelCount)
+    }
+
+    internal fun processPcmFloatFromHook(data: FloatArray, offset: Int, frameCount: Int, channelCount: Int) {
+        if (!isEngineEnabled.get()) return
+        ensureIngressFormat(channelCount)
+        resumeFromHook()
+        markHookAudioArrival()
+        audioIngress.processFloatPcm(data, offset, frameCount, channelCount)
+    }
+
+    internal fun processPcmBytesFromHook(data: ByteArray, offset: Int, byteCount: Int, channelCount: Int) {
+        if (!isEngineEnabled.get()) return
+        ensureIngressFormat(channelCount)
+        resumeFromHook()
+        markHookAudioArrival()
+        audioIngress.processPcm16Bytes(data, offset, byteCount, channelCount)
+    }
+
+    internal fun processPcmBufferFromHook(data: java.nio.ByteBuffer, startPosition: Int, byteCount: Int, channelCount: Int) {
+        if (!isEngineEnabled.get()) return
+        ensureIngressFormat(channelCount)
+        resumeFromHook()
+        markHookAudioArrival()
+        audioIngress.processPcm16Buffer(data, startPosition, byteCount, channelCount)
+    }
+
+    private fun ensureIngressFormat(channelCount: Int) {
+        channels = channelCount.coerceIn(1, MAXIMUM_CHANNELS)
+    }
+
+    private fun resumeFromHook() {
+        if (!isEngineEnabled.get()) return
         if (hapticPaused) {
             hapticPaused = false
             vibrateProxy.setResumed()
             nativeBridge.clearHapticBuffer()
-            Log.i(TAG, "[PLAYBACK RESUMED] hapticPaused cleared, native callbacks re-enabled")
         }
-
+        isVisualizerSource = false
         LinkHealthMonitor.setPlayingState(true)
         LinkHealthMonitor.heartbeatAudioInput()
-
-        val sampleLength = pcmData.size
-        val targetMonoSamples = sampleLength / channels
-        if (targetMonoSamples <= 0) return
-
-        // C++ 核心重构：直接送入 nativeBridge.processAudioDirect()
-        // 不再经过 PcmFifo → DspWorkerThread 路径
-        if (!nativeBridge.isLoaded) {
-            Log.w(TAG, "[DSP] SKIP: nativeBridge not loaded, isLoaded=false")
-            return
-        }
-
-        val chunkSize = 256
-        var totalWritten = 0
-
-        try {
-            // 逐块处理：short[] → float[] → direct ByteBuffer → C++
-            var srcOffset = 0
-            while (srcOffset < sampleLength - channels + 1) {
-                val chunk = minOf(chunkSize, (sampleLength - srcOffset) / channels)
-                if (chunk <= 0) break
-
-                floatPcmView.clear()
-                when (channels) {
-                    1 -> {
-                        for (i in 0 until chunk) {
-                            floatPcmView.put(pcmData[srcOffset + i].toFloat() / 32768.0f)
-                        }
-                    }
-                    2 -> {
-                        for (i in 0 until chunk) {
-                            val idx = srcOffset + i * 2
-                            floatPcmView.put((pcmData[idx].toFloat() + pcmData[idx + 1].toFloat()) / 65536.0f)
-                        }
-                    }
-                    else -> {
-                        for (i in 0 until chunk) {
-                            val idx = srcOffset + i * channels
-                            var sum = 0.0f
-                            for (c in 0 until channels) sum += pcmData[idx + c].toFloat()
-                            floatPcmView.put(sum / (channels * 32768.0f))
-                        }
-                    }
-                }
-                floatPcmView.flip()
-
-                val monoSamples = chunk
-                nativeBridge.processAudioDirect(directPcmBuffer, monoSamples, nativeTelemetryResult)
-                totalWritten += monoSamples
-                srcOffset += chunk * channels
-
-                // 更新 telemetry
-                onNativeTelemetry(nativeTelemetryResult, monoSamples)
-            }
-            // 调试：每处理100个chunk打印一次
-            if (totalWritten > 0 && (++processFrameCount % 100L == 0L)) {
-                Log.i(TAG, "[DSP] processAudioFrame: totalWritten=$totalWritten isLoaded=${nativeBridge.isLoaded} enabled=${isEngineEnabled.get()}")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "[DSP] processAudioFrame crashed: ${e.message}", e)
-        }
     }
 
     fun release() {
@@ -1056,6 +939,8 @@ fun processAudioFrame(pcmData: ShortArray?) {
         hapticEventGenerator.release()
         hapticSynthesizer.reset()
         engineJob.cancel()
+        lifecycleJob.cancel()
+        runCatching { audioIngress.shutdown() }
         nativeBridge.release()
         vibrateProxy.setPaused()
         vibrateProxy.unbind()  

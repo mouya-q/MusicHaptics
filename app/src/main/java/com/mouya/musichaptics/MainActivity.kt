@@ -22,7 +22,7 @@ class MainActivity : ComponentActivity() {
 
     private val telemetryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            // v3.13: Unpack the packed telemetry format
+            // Unpack the packed telemetry format
             val floats = intent.getFloatArrayExtra("floats")
             val longs = intent.getLongArrayExtra("longs")
             val ints = intent.getIntArrayExtra("ints")
@@ -92,7 +92,7 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        // v4.6: Launch dashboard immediately for visible startup animation,
+        // Launch dashboard immediately for visible startup animation,
         // then perform heavy initialization in background.
         // Previously all init was synchronous, causing ~1s blank screen.
         Thread {

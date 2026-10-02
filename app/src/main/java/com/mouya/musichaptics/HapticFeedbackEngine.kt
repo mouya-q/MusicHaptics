@@ -52,13 +52,13 @@ enum class HapticStyle {
           SUCCESS,
           WARNING,
           CRESCENDO,
-          CONTINUOUS_HUM,  // v3.14: 滑块拖拽连续触感
-          SOFT_TAP,  // v3.14: 减弱动态模式
-          NONE  // v3.14: 无触觉
+          CONTINUOUS_HUM,  // Continuous touch for slider drag.
+          SOFT_TAP,  // Reduced-motion soft response.
+          NONE  // No haptic.
       }
 
     fun perform(style: HapticStyle) {
-        // v3.14: NONE style — no-op
+        // NONE style is intentionally a no-op.
         if (style == HapticStyle.NONE) return
 
         val vib = vibrator ?: return

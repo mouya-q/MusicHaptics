@@ -78,7 +78,7 @@ class HapticSynthesizer(
     private val pendingImpacts = mutableListOf<PendingImpact>()
     private val pendingTextures = mutableListOf<PendingTexture>()
 
-    private var continuousFreq = 0f  // v1.9: init from actuator in init block
+    private var continuousFreq = 0f  // Initialize from the selected actuator profile.
     private var continuousAmp = 0f
     private var continuousTargetAmp = 0f
 

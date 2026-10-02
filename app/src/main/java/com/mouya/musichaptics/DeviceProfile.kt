@@ -49,11 +49,11 @@ data class DeviceProfile(
     val actuator: ActuatorProfile = ActuatorProfile.DEFAULT,
 
     // ═══════════════════════════════════════════════════════════════════
-    // v4.10: DSP-domain thresholds (separate quantity from energyThreshold!)
+    // DSP-domain thresholds (separate quantity from energyThreshold!)
     //
     // `energyThreshold` above lives in the HapticEventGenerator domain — it is
     // compared against *accumulated* energy over many frames (values 0.003-0.09).
-    // DspWorkerThread instead compares against a *single-frame* RMS (typical
+    // the DSP path instead compares against a *single-frame* RMS (typical
     // real values on music: rmsLow ≈ 0.02-0.05, rmsHigh ≈ 0.003-0.01), so it
     // needs its own, far smaller floor. Feeding energyThreshold into the DSP
     // path is what made every non-Xiaomi-10 device silent: e.g. OnePlus 13's
@@ -71,7 +71,7 @@ data class DeviceProfile(
     val dspBodyMultOverride: Float? = null,
 ) {
     /**
-     * v4.10: Single-frame RMS floor for DspWorkerThread beat detection.
+     * Single-frame RMS floor for native beat detection.
      *
      * Reference point (measured on real logs): Xiaomi 10 / 0809 LRA —
      * responseTime 5.75 ms, maxDisplacement 0.95, Q 16 → 0.0040.
@@ -120,7 +120,7 @@ data class DeviceProfile(
         get() = dspBodyMultOverride
             ?: (1.2f * (10f / actuator.qFactor.coerceIn(8f, 20f)).coerceIn(0.60f, 1.20f))
 
-    /** v4.10: Refractory scale — slow motors need longer gaps, fast ones can go denser. */
+    /** Refractory scale — slow motors need longer gaps, fast ones can go denser. */
     val dspRefractoryScale: Float
         get() = (actuator.responseTimeMs / 5.75f).coerceIn(0.50f, 2.00f)
 
@@ -203,7 +203,7 @@ data class DeviceProfile(
             fillerDurationMs = 6L,
             fillerAmplitude = 35,
             bassBoost = 1.2f,
-            // v4.18: Q=16 high-Q motor needs shorter decay and lower kick/body gain
+            // Q=16 high-Q motor needs shorter decay and lower kick/body gain
             // to avoid "constant vibration" feeling
             dspKickMultOverride = 0.65f,  // Lower kick gain for crisp transient
             dspBodyMultOverride = 0.80f,  // Lower body gain to avoid continuous rumble
@@ -330,7 +330,7 @@ data class DeviceProfile(
             actuator = ActuatorProfile.ONEPLUS_15,
         )
 
-        // v3.10.20: OnePlus 全系 + 拯救者Y700 + 澎湃Ultra 适配
+        // OnePlus 全系 + 拯救者Y700 + 澎湃Ultra 适配
 
         val ONEPLUS_11 = DeviceProfile(
             name = "OnePlus 11 · CSA0916 X-axis LRA",
@@ -541,7 +541,7 @@ data class DeviceProfile(
             actuator = ActuatorProfile.SAMSUNG_S25,
         )
 
-        // v3.11: Xiaomi 11/12/14 series + Redmi K70U 新增适配
+        // Xiaomi 11/12/14 series + Redmi K70U 新增适配
 
         val XIAOMI11 = DeviceProfile(
             name = "Xiaomi 11 Series · X-axis LRA",
@@ -711,7 +711,7 @@ data class DeviceProfile(
             actuator = ActuatorProfile.VIVO_FLAGSHIP,
         )
 
-        // v3.13: 全机型适配扩展 — 小米/红米/一加全系
+        // 全机型适配扩展 — 小米/红米/一加全系
 
         val XIAOMI_13PRO = DeviceProfile(
             name = "Xiaomi 13 Pro · ESA1016 CyberEngine",
@@ -967,12 +967,15 @@ fun detectDeviceProfile(
         "FLAGSHIP_XAXIS" -> return DeviceProfile.FLAGSHIP_XAXIS
     }
 
-    val model = Build.MODEL.uppercase().replace(" ", "")
-    val manufacturer = Build.MANUFACTURER.lowercase()
+    val model = Build.MODEL.uppercase(Locale.ROOT).replace(" ", "")
+    val manufacturer = Build.MANUFACTURER.lowercase(Locale.ROOT)
+    val brand = Build.BRAND.lowercase(Locale.ROOT)
     val device = Build.DEVICE.lowercase(Locale.ROOT)
     val board = (Build.BOARD ?: "").lowercase(Locale.ROOT)
+    val xiaomiFamily = manufacturer in setOf("xiaomi", "redmi", "poco") ||
+        brand in setOf("xiaomi", "redmi", "poco")
 
-    if (manufacturer == "xiaomi") {
+    if (xiaomiFamily) {
         if (device.contains("umi") || device.contains("cmi") || device.contains("thyme")) {
             return DeviceProfile.XIAOMI10_XAXIS
         }
@@ -992,18 +995,43 @@ fun detectDeviceProfile(
             return DeviceProfile.XIAOMI13_XAXIS
         }
 
-        if (device.contains("houji") || device.contains("aurora") ||
-            model.contains("23127PN") && !model.contains("23127PN0")) {
+        if (device.contains("rothko") || model.contains("24013RK") ||
+            model.contains("K70ULTRA") || model.contains("K70U")) {
+            return DeviceProfile.REDMI_K70U
+        }
+
+        if (device.contains("k80") || model.contains("K80")) {
+            return DeviceProfile.REDMI_K80U_0809
+        }
+
+        if ((model.startsWith("XIAOMI") && model.contains("ULTRA")) ||
+            device.contains("eiffel") || device.contains("ishtar") ||
+            model.contains("2304FPN6") || model.contains("24030PN") ||
+            model.contains("24031PN") || model.contains("25019PN") || model.contains("25042PN")) {
+            return DeviceProfile.XIAOMI_ULTRA
+        }
+
+        // Xiaomi 14 family: houji (14), shennong (14 Pro).
+        // Xiaomi 14 Ultra is handled by the dedicated rich-feel branch above;
+        // 14/14 Pro share the XIAOMI14 actuator profile but keep distinct codenames.
+        if (device.contains("houji") || device.contains("shennong") ||
+            model.contains("23127PN") || model.contains("23116PN")) {
             return DeviceProfile.XIAOMI14
         }
 
-        if (device.contains("haotai") || device.contains("shenni") ||
-            model.contains("24129PN")) {
-            if (device.contains("shenni")) return DeviceProfile.XIAOMI_15PRO
+        // Xiaomi 15 / 15 Pro: current upstream codenames are haotai / haotian.
+        // Keep shenni as a legacy ROM alias because older ports used it.
+        if (device.contains("haotian") || device.contains("shenni") ||
+            model.contains("2410DPN6")) {
+            return DeviceProfile.XIAOMI_15PRO
+        }
+        if (device.contains("haotai") || device.contains("dada") ||
+            model.contains("24129PN74")) {
             return DeviceProfile.XIAOMI_15
         }
 
-        if (device.contains("zijin") || model.contains("25081PN") || model.contains("25091PN") ||
+        if (device.contains("zijin") || device.contains("pandora") ||
+            model.contains("25081PN") || model.contains("25091PN") || model.contains("25098PN5") ||
             model.contains("XIAOMI17PRO") || model.contains("17PRO")) {
             return DeviceProfile.XIAOMI_17_PRO
         }
@@ -1012,12 +1040,6 @@ fun detectDeviceProfile(
             model.contains("MIXFOLD3") || model.contains("MIXFOLD4") ||
             model.contains("2317BP") || model.contains("2405CP")) {
             return DeviceProfile.XIAOMI_MIX_FOLD
-        }
-
-        if (model.contains("24031PN") || model.contains("25042PN") ||  // 14U / 15U
-            device.contains("eiffel") ||
-            model.contains("ULTRA")) {
-            return DeviceProfile.XIAOMI_ULTRA
         }
 
         if (device.contains("rubens") || model.contains("K50GAMING") ||
@@ -1040,16 +1062,9 @@ fun detectDeviceProfile(
             return DeviceProfile.REDMI_K70
         }
 
-        // v3.11: Redmi K70 Ultra: codename "rothko"
-        if (device.contains("rothko") || model.contains("24013RK") ||
-            model.contains("K70ULTRA") || model.contains("K70U")) {
-            return DeviceProfile.REDMI_K70U
-        }
-
-        if (device.contains("k80") || model.contains("K80")) {
-            return DeviceProfile.REDMI_K80U_0809
-        }
-
+        // Redmi/POCO often report a different manufacturer string but retain the
+        // same Xiaomi actuator family; use the generic flagship profile only after
+        // all known named profiles have been exhausted.
         if (device.contains("houbi") || Build.VERSION.SDK_INT >= 33) {
             return DeviceProfile.FLAGSHIP_XAXIS
         }
@@ -1058,7 +1073,7 @@ fun detectDeviceProfile(
     if (manufacturer.contains("lenovo")) {
         val m = model.lowercase()
         val d = device.lowercase()
-        // v3.11: Y700 Gen2/Gen3 — multiple model variants
+        // Y700 Gen2/Gen3 — multiple model variants
         if (m.contains("tb320") || m.contains("tb321") ||
             d.contains("tb320") || d.contains("tb321") ||
             m.contains("y700_2023") || m.contains("y700_2024") ||

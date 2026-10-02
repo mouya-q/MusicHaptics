@@ -1,35 +1,32 @@
 package com.mouya.musichaptics
 
-import android.content.Context
-import android.os.Build
 import android.util.Log
-import java.io.BufferedReader
 import java.io.File
-import java.io.FileReader
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * v4.23: WhitelistManager — 白名单管理
- * 
- * 参考 14PRO MusicHaptic 架构：系统级守护进程通过白名单控制哪些应用触发振动。
- * 配置文件路径：/data/adb/musichaptics/whitelist
- * 
- * 白名单文件格式（每行一个包名，# 开头为注释）：
- *   com.tencent.qqmusic
+ * Runtime application filter. Injection is controlled by LSPosed scope; this
+ * file is the second gate that decides whether the hooked process is active.
+ *
+ * Format:
+ *   mode=whitelist
  *   com.netease.cloudmusic
- *   # com.example.banned
+ *   com.tencent.qqmusic
+ *
+ * Set mode=all to accept every injected package. An empty whitelist never
+ * means "allow all"; it means no application is enabled in whitelist mode.
  */
-class WhitelistManager(private val context: Context) {
-    
+class WhitelistManager {
     companion object {
-        private const val TAG = "MusicHapticsX"
-        
-        // 白名单文件路径（与 14PRO 同目录结构）
-        const val WHITELIST_PATH = "/data/adb/musichaptics/whitelist"
+        private const val TAG = "MusicHapticsX-Whitelist"
         const val CONFIG_DIR = "/data/adb/musichaptics"
-        
-        // 默认白名单（主流音乐/视频应用）
-        private val DEFAULT_WHITELIST = setOf(
+        const val WHITELIST_PATH = "$CONFIG_DIR/whitelist.conf"
+
+        private const val MODE_KEY = "mode"
+        const val MODE_WHITELIST = "whitelist"
+        const val MODE_ALL = "all"
+
+        val DEFAULT_WHITELIST: Set<String> = linkedSetOf(
             "com.miui.player",
             "com.android.music",
             "com.tencent.qqmusic",
@@ -41,107 +38,110 @@ class WhitelistManager(private val context: Context) {
             "com.kugou.android",
             "com.kugou.android.lite"
         )
+
+        private val PACKAGE_RE = Regex("^[a-zA-Z0-9_]+(\\.[a-zA-Z0-9_]+)+$")
     }
-    
-    private val whitelist = ConcurrentHashMap.newKeySet<String>()
-    @Volatile private var whitelistLoaded = false
-    private var lastFileModified = 0L
-    private var lastFileLength = 0L
-    
-    /**
-     * 检查是否启用白名单模式
-     * 如果白名单文件存在且非空，则启用白名单过滤
-     */
-    fun isWhitelistEnabled(): Boolean {
-        val file = File(WHITELIST_PATH)
-        return file.exists() && file.length() > 0
+
+    data class Snapshot(
+        val mode: String,
+        val packages: Set<String>,
+        val lastModified: Long,
+        val length: Long
+    ) {
+        val whitelistEnabled: Boolean get() = mode == MODE_WHITELIST
     }
-    
-    /**
-     * 加载/重新加载白名单（支持热更新）
-     */
-    fun reloadWhitelist() {
+
+    private val cache = AtomicReference<Snapshot?>(null)
+    private val writeLock = Any()
+
+    fun snapshot(): Snapshot {
         val file = File(WHITELIST_PATH)
-        
+        val lm = file.lastModified()
+        val len = file.length()
+        cache.get()?.takeIf { it.lastModified == lm && it.length == len }?.let { return it }
+
+        val parsed = parse(file)
+        cache.set(parsed)
+        return parsed
+    }
+
+    fun isWhitelistEnabled(): Boolean = snapshot().whitelistEnabled
+
+    fun isPackageAllowed(packageName: String): Boolean {
+        if (!PACKAGE_RE.matches(packageName)) return false
+        val state = snapshot()
+        return state.mode == MODE_ALL || packageName in state.packages
+    }
+
+    fun getWhitelist(): Set<String> = snapshot().packages
+
+    fun getMode(): String = snapshot().mode
+
+    fun setMode(mode: String) {
+        val normalized = when (mode.lowercase()) {
+            MODE_ALL -> MODE_ALL
+            else -> MODE_WHITELIST
+        }
+        val current = snapshot()
+        writeConfig(normalized, current.packages)
+    }
+
+    fun setPackageAllowed(packageName: String, allowed: Boolean) {
+        if (!PACKAGE_RE.matches(packageName)) return
+        val next = LinkedHashSet(snapshot().packages)
+        if (allowed) next += packageName else next -= packageName
+        writeConfig(MODE_WHITELIST, next)
+    }
+
+    fun replacePackages(packages: Set<String>) {
+        val safe = packages.filterTo(LinkedHashSet(), PACKAGE_RE::matches)
+        writeConfig(MODE_WHITELIST, safe)
+    }
+
+    private fun parse(file: File): Snapshot {
         if (!file.exists()) {
-            // 使用默认白名单
-            if (whitelist.isEmpty()) {
-                whitelist.addAll(DEFAULT_WHITELIST)
-                Log.i(TAG, "[Whitelist] 使用默认白名单 (${whitelist.size} 个应用)")
-            }
-            whitelistLoaded = true
-            return
+            return Snapshot(MODE_WHITELIST, DEFAULT_WHITELIST, 0L, 0L)
         }
-        
-        // 检查文件是否修改
-        val currentModified = file.lastModified()
-        val currentLength = file.length()
-        if (currentModified == lastFileModified && currentLength == lastFileLength && whitelistLoaded) {
-            return // 未修改，跳过
-        }
-        
-        lastFileModified = currentModified
-        lastFileLength = currentLength
-        
-        val newWhitelist = HashSet<String>()
-        try {
-            BufferedReader(FileReader(file)).use { reader ->
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    val trimmed = line!!.trim()
-                    if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
-                        newWhitelist.add(trimmed)
+        return runCatching {
+            var mode = MODE_WHITELIST
+            val packages = LinkedHashSet<String>()
+            file.forEachLine { raw ->
+                val line = raw.trim()
+                if (line.isEmpty() || line.startsWith('#')) return@forEachLine
+                when {
+                    line.startsWith("$MODE_KEY=") -> {
+                        mode = line.substringAfter('=').trim().lowercase().let { if (it == MODE_ALL) MODE_ALL else MODE_WHITELIST }
                     }
+                    PACKAGE_RE.matches(line) -> packages += line
                 }
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "[Whitelist] 读取失败: ${e.message}")
+            Snapshot(mode, packages, file.lastModified(), file.length())
+        }.getOrElse {
+            Log.w(TAG, "Failed to read whitelist: ${it.message}")
+            Snapshot(MODE_WHITELIST, DEFAULT_WHITELIST, file.lastModified(), file.length())
         }
-        
-        if (newWhitelist.isEmpty()) {
-            Log.i(TAG, "[Whitelist] 白名单为空，允许所有应用")
-        } else {
-            whitelist.clear()
-            whitelist.addAll(newWhitelist)
-            Log.i(TAG, "[Whitelist] 已加载 ${whitelist.size} 个应用: ${whitelist.joinToString(", ")}")
+    }
+
+    private fun writeConfig(mode: String, packages: Set<String>) {
+        val content = buildString {
+            appendLine("# MusicHapticsX application filter")
+            appendLine("# mode=whitelist: only listed packages are processed")
+            appendLine("# mode=all: every LSPosed-injected package is processed")
+            appendLine("$MODE_KEY=$mode")
+            packages.asSequence().filter(PACKAGE_RE::matches).sorted().forEach(::appendLine)
         }
-        
-        whitelistLoaded = true
-    }
-    
-    /**
-     * 检查包名是否在白名单中
-     * @return true 表示允许触发振动
-     */
-    fun isPackageAllowed(packageName: String): Boolean {
-        if (!isWhitelistEnabled()) {
-            return true // 白名单未启用，允许所有应用
-        }
-        reloadWhitelist()
-        return whitelist.contains(packageName)
-    }
-    
-    /**
-     * 获取当前白名单（用于 UI 显示）
-     */
-    fun getWhitelist(): Set<String> {
-        reloadWhitelist()
-        return HashSet(whitelist)
-    }
-    
-    /**
-     * 初始化白名单文件（首次运行时创建默认白名单）
-     */
-    fun initDefaultWhitelist() {
-        val file = File(WHITELIST_PATH)
-        if (file.exists()) return
-        
-        try {
-            file.parentFile?.mkdirs()
-            file.writeText(DEFAULT_WHITELIST.joinToString("\n") + "\n")
-            Log.i(TAG, "[Whitelist] 已创建默认白名单: $WHITELIST_PATH")
-        } catch (e: Exception) {
-            Log.w(TAG, "[Whitelist] 创建默认白名单失败: ${e.message}")
+        synchronized(writeLock) {
+            runCatching {
+                val encoded = android.util.Base64.encodeToString(content.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+                val script = "mkdir -p '$CONFIG_DIR' && umask 022 && echo '$encoded' | base64 -d > '$WHITELIST_PATH.tmp' && mv '$WHITELIST_PATH.tmp' '$WHITELIST_PATH'"
+                val p = ProcessBuilder("su", "-c", script).redirectErrorStream(true).start()
+                val exit = p.waitFor()
+                if (exit != 0) throw IllegalStateException("su exit=$exit")
+                cache.set(null)
+                Log.i(TAG, "Whitelist updated: mode=$mode packages=${packages.size}")
+            }.onFailure {
+                Log.w(TAG, "Failed to update whitelist with root shell: ${it.message}")
+            }
         }
     }
 }

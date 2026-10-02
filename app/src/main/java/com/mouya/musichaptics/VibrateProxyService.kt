@@ -20,7 +20,7 @@ class VibrateProxyService : Service() {
         const val CODE_PERFORM_ONESHOT = 3
         const val CODE_CANCEL = 4
         const val CODE_HAS_VIBRATOR = 5
-        // v3.10.20: Composition API support
+        // Support composition-based vibration effects.
         const val CODE_PERFORM_COMPOSITION = 6
     }
 

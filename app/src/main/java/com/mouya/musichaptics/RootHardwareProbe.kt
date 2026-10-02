@@ -50,7 +50,7 @@ object RootHardwareProbe {
         }
     } catch (_: Exception) { null }
 
-    fun getDirectDriveNodesAsync(context: Context, callback: (String) -> Unit) {
+    fun getDirectDriveNodesAsync(context: Context, allowRootProbe: Boolean = true, callback: (String) -> Unit) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val cached = prefs.getString(PREF_DIRECT_DRIVE_NODES, null)
         if (cached != null && cached.isNotBlank()) {
@@ -67,7 +67,7 @@ object RootHardwareProbe {
         }
         // Run detection in background thread
         Thread(Runnable {
-            val nodes = getDirectDriveNodesBlocking()
+            val nodes = getDirectDriveNodesBlocking(allowRootProbe)
             if (nodes.isNotBlank()) {
                 prefs.edit().putString(PREF_DIRECT_DRIVE_NODES, nodes).apply()
                 Log.i(TAG, "Detected and cached direct drive nodes: $nodes")
@@ -77,7 +77,7 @@ object RootHardwareProbe {
         }).start()
     }
 
-    private fun getDirectDriveNodesBlocking(): String {
+    private fun getDirectDriveNodesBlocking(allowRootProbe: Boolean): String {
         val nodes = mutableListOf<String>()
 
         // ═══ Known hardware-specific vibrator control nodes ═══
@@ -98,8 +98,9 @@ object RootHardwareProbe {
             "/sys/class/timed_output/vibrator/enable",
             // LED vibrator (generic)
             "/sys/class/leds/vibrator/activate",
-            // Qualcomm haptics
-            "/sys/class/qcom-haptics/enable"
+            // Qualcomm haptics / AW86224 family (common on newer Xiaomi flagships)
+            "/sys/class/qcom-haptics/enable",
+            "/sys/class/qcom_haptic/enable"
         )
 
         // Phase 1: Check known paths WITHOUT root (java.io.File.exists)
@@ -112,10 +113,11 @@ object RootHardwareProbe {
             }
         }
 
-        // Phase 2: If no known path matched, try root-based auto-detection
-        if (nodes.isEmpty()) {
+        // Phase 2 is optional. Hooked target processes stay root-free by default;
+        // the module UI can request the expensive scan explicitly.
+        if (nodes.isEmpty() && allowRootProbe) {
             Log.i(TAG, "No known paths found via File.exists, trying root auto-detection...")
-            val awResult = runRoot("find /sys/devices -name 'activate' -path '*aw8697*' 2>/dev/null | head -3")
+            val awResult = runRoot("find /sys/devices /sys/bus/i2c/drivers -type f \\( \\( -name 'activate' -o -name 'enable' \\) \\) \\( -path '*aw8697*' -o -path '*aw86224*' -o -path '*qcom*haptic*' \\) 2>/dev/null | head -6")
             if (awResult != null && awResult.isNotBlank()) {
                 awResult.trim().lines().forEach { line ->
                     val trimmed = line.trim()
@@ -126,7 +128,7 @@ object RootHardwareProbe {
                 }
             }
             if (nodes.isEmpty()) {
-                val genResult = runRoot("find /sys -name 'activate' -path '*vibrator*' -o -name 'enable' -path '*vibrator*' -o -name 'enable' -path '*haptic*' 2>/dev/null | head -5")
+                val genResult = runRoot("find /sys -type f \\( -name 'activate' -o -name 'enable' \\) \\( -path '*vibrator*' -o -path '*haptic*' -o -path '*qpnp*' \\) 2>/dev/null | head -8")
                 if (genResult != null && genResult.isNotBlank()) {
                     genResult.trim().lines().forEach { line ->
                         val trimmed = line.trim()
@@ -143,41 +145,58 @@ object RootHardwareProbe {
         return nodes.joinToString(",")
     }
 
-    private fun profileForFingerprint(fp: String): String = when {
-        // ── Xiaomi 数字系列 ──
-        fp.contains("fuxi") -> "XIAOMI13_XAXIS"
-        fp.contains("nuwa") -> "XIAOMI_13PRO"
-        fp.contains("venus") || fp.contains("star") || fp.contains("mars") -> "XIAOMI11"
-        fp.contains("cupid") || fp.contains("zeus") || fp.contains("psyche") -> "XIAOMI12"
-        fp.contains("houji") || fp.contains("aurora") -> "XIAOMI14"
-        fp.contains("haotai") -> "XIAOMI15"
-        fp.contains("shenni") -> "XIAOMI_15PRO"
-        fp.contains("zijin") -> "XIAOMI_17_PRO"
-        fp.contains("umi") || fp.contains("cmi") || fp.contains("thyme") -> "XIAOMI10_XAXIS"
-        fp.contains("babylon") || fp.contains("goku") -> "XIAOMI_MIX_FOLD"
-        // ── Redmi K系列 ──
-        fp.contains("rubens") -> "REDMI_K50_GAMING"
-        fp.contains("alioth") || fp.contains("munch") || fp.contains("diting") -> "REDMI_K40"
-        fp.contains("mondrian") || fp.contains("invenio") || fp.contains("corot") -> "REDMI_K60"
-        fp.contains("vermeer") || fp.contains("manet") -> "REDMI_K70"
-        fp.contains("rothko") -> "REDMI_K70U"
-        fp.contains("k80") || (fp.contains("aw8697") && fp.contains("zaxis")) -> "REDMI_K80U_0809"
-        // ── Lenovo ──
-        fp.contains("tb320fc") || fp.contains("tb321fc") || fp.contains("y700") -> "LENOVO_Y700_GEN2"
-        // ── OPPO ──
-        fp.contains("reno8pro") -> "OPPO_RENO8_PRO"
-        // ── OnePlus ──
-        fp.contains("aston") -> "ONEPLUS_13T"
-        fp.contains("plk") -> "ONEPLUS_15"
-        fp.contains("opus") -> "ONEPLUS_13"
-        fp.contains("waffle") -> "ONEPLUS_12"
-        fp.contains("salami") -> "ONEPLUS_11"
-        fp.contains("ovaltine") -> "ONEPLUS_10PRO"
-        fp.contains("lemonade") -> "ONEPLUS_9"
-        // ── Samsung ──
-        fp.contains("s5e8855") || fp.contains("e1q") -> "SAMSUNG_S25"
-        // ── vivo ──
-        fp.contains("pd24") || fp.contains("pd23") -> "VIVO_FLAGSHIP"
-        else -> "DEFAULT"
+    private fun profileForFingerprint(fp: String): String {
+        val xiaomi = fp.contains("xiaomi") || fp.contains("redmi") || fp.contains("poco")
+        if (xiaomi) {
+            // Most specific model families first so e.g. "Xiaomi 14 Ultra" cannot
+            // be swallowed by the generic Xiaomi 14 branch.
+            when {
+                fp.contains("rothko") || fp.contains("k70 ultra") || fp.contains("k70u") -> return "REDMI_K70U"
+                fp.contains("k80") -> return "REDMI_K80U_0809"
+                // Xiaomi 14 / 14 Pro are separate device codenames but use the
+                // same project-level actuator/rendering family.
+                fp.contains("shennong") || fp.contains("23116pn") ||
+                    fp.contains("houji") || fp.contains("23127pn") -> return "XIAOMI14"
+                fp.contains("aurora") || fp.contains("ishtar") || fp.contains("2304fpn6") ||
+                    fp.contains("24030pn") || fp.contains("24031pn") || fp.contains("25019pn") || fp.contains("25042pn") ||
+                    (fp.contains("product_model=xiaomi") && fp.contains("ultra")) || fp.contains("eiffel") -> return "XIAOMI_ULTRA"
+                fp.contains("zijin") || fp.contains("pandora") || fp.contains("25081pn") || fp.contains("25091pn") ||
+                    fp.contains("25098pn5") || fp.contains("17 pro") -> return "XIAOMI_17_PRO"
+                // haotian is the Xiaomi 15 Pro codename; shenni is retained as a
+                // compatibility alias for older ports.
+                fp.contains("haotian") || fp.contains("shenni") || fp.contains("2410dpn6") ||
+                    (fp.contains("24129pn") && fp.contains("pro")) -> return "XIAOMI_15PRO"
+                fp.contains("haotai") || fp.contains("dada") || fp.contains("24129pn74") -> return "XIAOMI_15"
+                fp.contains("fuxi") -> return "XIAOMI13_XAXIS"
+                fp.contains("nuwa") -> return "XIAOMI_13PRO"
+                fp.contains("cupid") || fp.contains("zeus") || fp.contains("psyche") -> return "XIAOMI12"
+                fp.contains("venus") || fp.contains("star") || fp.contains("mars") -> return "XIAOMI11"
+                fp.contains("umi") || fp.contains("cmi") || fp.contains("thyme") -> return "XIAOMI10_XAXIS"
+                fp.contains("babylon") || fp.contains("goku") || fp.contains("mix fold") || fp.contains("mixfold") -> return "XIAOMI_MIX_FOLD"
+                fp.contains("rubens") -> return "REDMI_K50_GAMING"
+                fp.contains("alioth") || fp.contains("munch") || fp.contains("diting") -> return "REDMI_K40"
+                fp.contains("mondrian") || fp.contains("invenio") || fp.contains("corot") -> return "REDMI_K60"
+                fp.contains("vermeer") || fp.contains("manet") -> return "REDMI_K70"
+            }
+        }
+
+        when {
+            fp.contains("tb320fc") || fp.contains("tb321fc") || fp.contains("y700 2023") || fp.contains("y700 2024") || fp.contains("y700pro") -> return "LENOVO_Y700_GEN2"
+            fp.contains("y700") || fp.contains("tb9707") -> return "LENOVO_Y700_GEN1"
+            fp.contains("reno8pro") -> return "OPPO_RENO8_PRO"
+            fp.contains("aston") -> return "ONEPLUS_13T"
+            fp.contains("plk") -> return "ONEPLUS_15"
+            fp.contains("opus") -> return "ONEPLUS_13"
+            fp.contains("waffle") -> return "ONEPLUS_12"
+            fp.contains("salami") -> return "ONEPLUS_11"
+            fp.contains("ovaltine") -> return "ONEPLUS_10PRO"
+            fp.contains("lemonade") -> return "ONEPLUS_9"
+            fp.contains("ace3pro") -> return "ONEPLUS_ACE3PRO"
+            fp.contains("ace5") || fp.contains("ace3") -> return "ONEPLUS_ACE_MID"
+            fp.contains("s5e8855") || fp.contains("e1q") || fp.contains("sm-s93") || fp.contains("sm-s92") -> return "SAMSUNG_S25"
+            fp.contains("pd24") || fp.contains("pd23") -> return "VIVO_FLAGSHIP"
+        }
+
+        return "DEFAULT"
     }
 }

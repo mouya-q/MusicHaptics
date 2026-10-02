@@ -6,7 +6,7 @@ import com.mouya.musichaptics.DeviceProfile
  * 谱面 note 列表 → 马达真正能放出来的振动时间轴。
  *
  * 谱面是"标准答案"，但答案不能照抄：谱师一秒能塞 38 个 note，线性马达一秒
- * 放不出 38 次可分辨的冲击。硬发的结果是 v4.9 踩过的
+ * 放不出 38 次可分辨的冲击。硬发的结果是 踩过的
  * `CANCELLED_SUPERSEDED`（前一发被后一发取消，最后什么都感觉不到）外加马达发烫。
  *
  * 所以要按马达物理能力"编译"一遍。四步都在 7 张真谱 + 1 张 PEC 上标定过
@@ -56,7 +56,7 @@ object PhiraHapticTimeline {
     /**
      * 按机型马达推出编译参数。
      *
-     * minGap 沿用 v4.10 DSP refractory 的同一套逻辑：以小米10 0809
+     * minGap 沿用 DSP refractory 的同一套逻辑：以小米10 0809
      * （responseTime=5.75ms）为基准 42ms，其余机型按 responseTime 线性缩放。
      * 实测三档：ESA1016(3.25ms)→24ms、0809(5.75ms)→42ms、K80U(12.5ms)→90ms。
      */

@@ -1,4 +1,3 @@
-#include <vector>
 #include <jni.h>
 #include <cmath>
 #include <pthread.h>
@@ -13,6 +12,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <cstring>
+#include <cctype>
 
 #define TAG "MHX-NDK"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
@@ -36,6 +36,13 @@ static pthread_t g_scheduler_thread{};
 static std::atomic<int> g_direct_drive_fd{-1};
 static std::string g_direct_drive_path = "";
 static std::string g_direct_amplitude_path = "";
+
+enum class DirectDriverKind : int {
+    Unknown = 0,
+    Continuous = 1,
+    StrikeOnly = 2,
+};
+static std::atomic<int> g_direct_driver_kind{static_cast<int>(DirectDriverKind::Unknown)};
 static std::atomic<int> g_direct_amplitude_fd{-1};
 
 // Root Shell Pipe State — used when direct open() fails due to SELinux
@@ -67,6 +74,16 @@ struct HapticUdpPacket {
 
 static constexpr uint32_t MHX_UDP_MAGIC = 0x3148584D; // "MHX1" little-endian
 static constexpr uint16_t MHX_UDP_VERSION = 1;
+
+static bool is_safe_node_path(const std::string& path) {
+    if (path.size() < 6 || path.size() > 255) return false;
+    if (!(path.rfind("/sys/", 0) == 0 || path.rfind("/dev/", 0) == 0)) return false;
+    for (unsigned char c : path) {
+        if (std::isalnum(c) || c == '/' || c == '_' || c == '-' || c == '.') continue;
+        return false;
+    }
+    return true;
+}
 
 static bool init_haptic_udp(int port) {
     // Seccomp blocks socket() in untrusted_app. Use init_haptic_udp_from_fd instead.
@@ -165,12 +182,21 @@ bool init_direct_drive(const std::string& nodes) {
         // Strip trailing newline/CR if any
         while (!path.empty() && (path.back() == '\n' || path.back() == '\r' || path.back() == ' '))
             path.pop_back();
-        if (path.empty()) continue;
+        if (path.empty() || !is_safe_node_path(path)) {
+            LOGW("[DD] rejecting unsafe node path: %s", path.c_str());
+            continue;
+        }
 
         // ═══ KEY FIX: open the file path DIRECTLY, not path + "/enable" ═══
         int fd = open(path.c_str(), O_WRONLY | O_NONBLOCK);
         if (fd >= 0) {
             g_direct_drive_path = path;
+            const bool strikeOnly = path.find("activate") != std::string::npos ||
+                                     path.find("aw8697") != std::string::npos ||
+                                     path.find("aw86224") != std::string::npos;
+            g_direct_driver_kind.store(
+                static_cast<int>(strikeOnly ? DirectDriverKind::StrikeOnly : DirectDriverKind::Continuous),
+                std::memory_order_release);
             g_direct_drive_fd.store(fd, std::memory_order_release);
 
             // Try to find amplitude/gain node in the same directory
@@ -202,62 +228,7 @@ bool init_direct_drive(const std::string& nodes) {
         }
     }
 
-    LOGE("[DD] init_direct_drive: no usable node found among provided paths (SELinux may block untrusted_app)");
-    // Fallback: try root shell pipe mode
-    size_t s2 = 0;
-    while (s2 < nodes.length()) {
-        size_t e2 = nodes.find(',', s2);
-        if (e2 == std::string::npos) e2 = nodes.length();
-        std::string p2 = nodes.substr(s2, e2 - s2);
-        s2 = e2 + 1;
-        while (!p2.empty() && (p2.back() == '\n' || p2.back() == '\r' || p2.back() == ' '))
-            p2.pop_back();
-        if (p2.empty()) continue;
-
-        // Test if su is available and can write to this path
-        char testCmd[512];
-        snprintf(testCmd, sizeof(testCmd), "echo 0 > %s 2>/dev/null && echo DD_OK", p2.c_str());
-        FILE* suTest = popen(testCmd, "r");
-        if (suTest) {
-            char buf[32];
-            if (fgets(buf, sizeof(buf), suTest) && strstr(buf, "DD_OK")) {
-                pclose(suTest);
-                // su works! Open persistent root shell pipe
-                FILE* suPipe = popen("su", "w");
-                if (suPipe) {
-                    int pipeFd = fileno(suPipe);
-                    if (pipeFd >= 0) {
-                        g_direct_drive_path = p2;
-                        g_root_shell_fd.store(pipeFd, std::memory_order_release);
-                        g_use_root_shell.store(true, std::memory_order_release);
-
-                        // Find amplitude node path
-                        size_t ls = p2.rfind('/');
-                        std::string dp = (ls != std::string::npos) ? p2.substr(0, ls) : p2;
-                        const char* ampNames[] = {"amplitude", "gain", "index_value", nullptr};
-                        for (int ai = 0; ampNames[ai]; ++ai) {
-                            std::string ap = dp + "/" + ampNames[ai];
-                            // Check existence via access()
-                            if (access(ap.c_str(), F_OK) == 0) {
-                                g_direct_amplitude_path = ap;
-                                break;
-                            }
-                        }
-
-                        LOGI("[DD] ROOT SHELL MODE INIT SUCCESS");
-                        LOGI("[DD] enable path=%s", p2.c_str());
-                        LOGI("[DD] amplitude path=%s", g_direct_amplitude_path.c_str());
-                        return true;
-                    }
-                    pclose(suPipe);
-                }
-            } else {
-                pclose(suTest);
-            }
-        }
-    }
-
-    LOGE("[DD] root shell fallback also failed");
+    LOGE("[DD] no usable node found; root-assisted transport will be handled by Kotlin");
     return false;
 }
 
@@ -274,8 +245,9 @@ bool init_root_pipe(int pipe_fd, const std::string& enable_path, const std::stri
         LOGI("[DD] root pipe already initialized, fd=%d", g_root_shell_fd.load());
         return true;
     }
-    if (pipe_fd < 0) {
-        LOGE("[DD] init_root_pipe: invalid pipe_fd");
+    if (pipe_fd < 0 || !is_safe_node_path(enable_path) ||
+        (!amplitude_path.empty() && !is_safe_node_path(amplitude_path))) {
+        LOGE("[DD] init_root_pipe: invalid fd or node path");
         return false;
     }
 
@@ -289,6 +261,12 @@ bool init_root_pipe(int pipe_fd, const std::string& enable_path, const std::stri
 
     g_direct_drive_path = enable_path;
     g_direct_amplitude_path = amplitude_path;
+    const bool strikeOnly = enable_path.find("activate") != std::string::npos ||
+                             enable_path.find("aw8697") != std::string::npos ||
+                             enable_path.find("aw86224") != std::string::npos;
+    g_direct_driver_kind.store(
+        static_cast<int>(strikeOnly ? DirectDriverKind::StrikeOnly : DirectDriverKind::Continuous),
+        std::memory_order_release);
     g_root_shell_fd.store(pipe_fd, std::memory_order_release);
     g_use_root_shell.store(true, std::memory_order_release);
 
@@ -310,8 +288,9 @@ bool init_direct_drive_from_fd(int enable_fd, int amplitude_fd, const std::strin
         LOGI("[DD] already initialized, fd=%d", g_direct_drive_fd.load());
         return true;
     }
-    if (enable_fd < 0) {
-        LOGE("[DD] init_direct_drive_from_fd: invalid enable_fd");
+    if (enable_fd < 0 || !is_safe_node_path(enable_path) ||
+        (!amplitude_path.empty() && !is_safe_node_path(amplitude_path))) {
+        LOGE("[DD] init_direct_drive_from_fd: invalid fd or node path");
         return false;
     }
 
@@ -418,8 +397,8 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
     }
 
     // ─── Root Pipe Mode ───
-    // When direct open() fails due to SELinux, we write commands through a pipe
-    // to a root su shell. Each line gets eval'd as root, writing to sysfs.
+    // When direct open() fails due to SELinux, write validated commands through a
+    // long-lived root shell pipe that owns the sysfs file descriptor.
     bool useRootPipe = g_use_root_shell.load(std::memory_order_acquire);
     int rootFd = g_root_shell_fd.load(std::memory_order_acquire);
 
@@ -529,7 +508,7 @@ static std::atomic<jobject> g_bridge_ref{nullptr};
 static float g_prev_kick_onset = 0.0f;
 static float g_prev_snare_onset = 0.0f;
 static int64_t g_last_beat_trigger_ns = 0;
-static constexpr int64_t BEAT_REFRACTORY_NS = 80000000L;  // 80ms minimum between beat triggers
+static constexpr int64_t BEAT_REFRACTORY_NS = 55000000L;  // 55ms hard floor; final policy is applied in Kotlin
 
 struct SchedulerArgs {
     haptic::HapticEngine* engine;
@@ -552,18 +531,10 @@ static void* scheduler_thread_func(void* arg) {
 
     // Cache method IDs once
     jclass bridgeClass = env->GetObjectClass(bridgeRef);
-    jmethodID onFrameReady = env->GetMethodID(bridgeClass, "onNativeFrameReady", "([FI)V");
     jmethodID onBeatTrigger = env->GetMethodID(bridgeClass, "onBeatTrigger", "(Ljava/lang/String;I)V");
     env->DeleteLocalRef(bridgeClass);
-    if (!onFrameReady) {
-        g_jvm->DetachCurrentThread();
-        JNIEnv* cleanupEnv = nullptr;
-        if (g_jvm->AttachCurrentThread(&cleanupEnv, nullptr) == JNI_OK) {
-            cleanupEnv->DeleteGlobalRef(bridgeRef);
-            g_jvm->DetachCurrentThread();
-        }
-        g_bridge_ref.store(nullptr, std::memory_order_relaxed);
-        return nullptr;
+    if (!onBeatTrigger) {
+        LOGW("[DD] beat callback method unavailable; event output disabled");
     }
 
     // 5ms precise timing using absolute-time clock_nanosleep
@@ -600,7 +571,68 @@ static void* scheduler_thread_func(void* arg) {
             (g_use_udp_haptic.load(std::memory_order_acquire)) ||
             (g_use_java_pipe.load(std::memory_order_acquire));
 
+        // Event timing is useful even without a kernel direct-drive node.
+        // Drain onset events here so the native scheduler remains the single
+        // consumer and Android Vibrator fallback still works on ordinary devices.
+        haptic::HapticEngine::OnsetFrame onsetFrames[1] = {};
+        const int onsetN = engine->getOnsetFrames(onsetFrames, 1);
+        float beatAccent = 0.0f;
+        if (onsetN > 0) {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            const int64_t nowNs = static_cast<int64_t>(ts.tv_sec) * 1000000000L + ts.tv_nsec;
+            if (nowNs - g_last_beat_trigger_ns >= BEAT_REFRACTORY_NS) {
+                const float kickVal = onsetFrames[0].kick;
+                const float snareVal = onsetFrames[0].snare;
+                const float vocalVal = onsetFrames[0].vocal;
+                const float bodyVal = onsetFrames[0].body;
+                constexpr float ONSET_THRESHOLD = 0.08f;
+                int eventType = 0; // 1=KICK, 2=SNARE, 3=VOCAL, 4=BODY
+                float eventValue = 0.0f;
+                if (kickVal >= snareVal && kickVal >= vocalVal && kickVal >= bodyVal && kickVal > ONSET_THRESHOLD) {
+                    eventType = 1; eventValue = kickVal;
+                } else if (snareVal >= vocalVal && snareVal >= bodyVal && snareVal > ONSET_THRESHOLD) {
+                    eventType = 2; eventValue = snareVal;
+                } else if (vocalVal >= bodyVal && vocalVal > ONSET_THRESHOLD * 1.5f) {
+                    eventType = 3; eventValue = vocalVal;
+                } else if (bodyVal > ONSET_THRESHOLD * 2.0f) {
+                    eventType = 4; eventValue = bodyVal;
+                }
+                if (eventType != 0) {
+                    const float accentScale = eventType == 1 ? 135.0f : eventType == 2 ? 100.0f : eventType == 3 ? 58.0f : 42.0f;
+                    beatAccent = eventValue * accentScale;
+
+                    if (!use_direct_drive && onBeatTrigger) {
+                        const int intensity = static_cast<int>(std::clamp(
+                            eventValue * (eventType == 1 ? 255.0f : eventType == 2 ? 220.0f : eventType == 3 ? 170.0f : 150.0f),
+                            18.0f, 255.0f));
+                        const char* eventName = eventType == 1 ? "KICK" : eventType == 2 ? "SNARE" : eventType == 3 ? "VOCAL" : "BODY";
+                        jstring eventStr = env->NewStringUTF(eventName);
+                        env->CallVoidMethod(bridgeRef, onBeatTrigger, eventStr, static_cast<jint>(intensity));
+                        env->DeleteLocalRef(eventStr);
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                    }
+
+                    // Hardware nodes named "activate" are usually one-shot waveform
+                    // triggers, not a 200 Hz control input. Treat them as strike-only.
+                    if (use_direct_drive &&
+                        g_direct_driver_kind.load(std::memory_order_acquire) == static_cast<int>(DirectDriverKind::StrikeOnly)) {
+                            const int duration = eventType == 1 ? 16 : eventType == 2 ? 13 : eventType == 3 ? 9 : 11;
+                            const int amplitude = static_cast<int>(std::clamp(
+                                eventValue * (eventType == 1 ? 255.0f : eventType == 2 ? 220.0f : eventType == 3 ? 170.0f : 150.0f),
+                                18.0f, 255.0f));
+                            trigger_direct_drive(duration, amplitude);
+                        }
+                    }
+                    g_last_beat_trigger_ns = nowNs;
+                }
+            }
+        }
+
         if (use_direct_drive) {
+            const bool strikeOnlyDriver =
+                g_direct_driver_kind.load(std::memory_order_acquire) == static_cast<int>(DirectDriverKind::StrikeOnly);
+
             // Log first entry into direct drive mode
             if (!g_dd_mode_entered.load(std::memory_order_relaxed)) {
                 g_dd_mode_entered.store(true, std::memory_order_relaxed);
@@ -610,152 +642,49 @@ static void* scheduler_thread_func(void* arg) {
                      g_use_java_pipe.load() ? 1 : 0);
             }
 
-            // === A-LEVEL: Consume SemanticHapticFrame for continuous output ===
-            haptic::SemanticHapticFrame semFrames[1];
-            int semN = engine->getSemanticFrames(semFrames, 1);
+            // Continuous output is used only for nodes designed for duration/amplitude control.
+            // One-shot activate/Awinic nodes are driven exclusively by semantic strikes above.
+            if (!strikeOnlyDriver) {
+                haptic::SemanticHapticFrame semFrames[1];
+                const int semN = engine->getSemanticFrames(semFrames, 1);
 
-            float continuous = 0.0f;
-            if (semN > 0) {
-                continuous = 
-                      semFrames[0].kickAmp  * 0.55f
-                    + semFrames[0].snareAmp * 0.25f
-                    + semFrames[0].vocalAmp * 0.08f
-                    + semFrames[0].bodyAmp  * 0.35f;
-            }
-
-            // v4.3: Onset frames are NO LONGER consumed by the C++ scheduler.
-            // Kotlin runSemanticFrameLoop is the sole consumer via nativeGetOnsetFrames().
-            // This eliminates the dual-consumer race condition where C++ scheduler (5ms loop)
-            // was stealing onset frames before Kotlin (100ms loop) could read them.
-            // Beat trigger is handled entirely by Kotlin processOnsetFrames → triggerBeatVibration.
-            float beatAccent = 0.0f;  // Always 0 — onset-driven mode doesn't use continuous accent
-            int onsetN = 0;  // Always 0: let Kotlin consume onset frames
-            haptic::HapticEngine::OnsetFrame onsetFrames[1] = {};  // Zero-initialized, unused
-
-            // ─── Beat-triggered predefined vibration (preferred path) ───
-            // When onBeatTrigger callback is available (always registered from Kotlin),
-            // use onset detection + Android Vibrator API predefined effects.
-            // This works regardless of root/su availability — no sysfs writes needed.
-            if (onBeatTrigger && onsetN > 0) {
-                struct timespec ts;
-                clock_gettime(CLOCK_MONOTONIC, &ts);
-                int64_t nowNs = (int64_t)ts.tv_sec * 1000000000L + ts.tv_nsec;
-
-                // Refractory check — avoid triggering too frequently
-                if (nowNs - g_last_beat_trigger_ns >= BEAT_REFRACTORY_NS) {
-                    float kickVal = onsetFrames[0].kick;
-                    float snareVal = onsetFrames[0].snare;
-                    float bodyVal = onsetFrames[0].body;
-
-                    constexpr float ONSET_THRESHOLD = 0.08f;
-
-                    bool kickTrigger = (kickVal > ONSET_THRESHOLD);
-                    bool snareTrigger = (snareVal > ONSET_THRESHOLD);
-                    bool bodyTrigger = (bodyVal > ONSET_THRESHOLD * 2.0f);
-
-                    if (kickTrigger) {
-                        int intensity = static_cast<int>(std::clamp(kickVal * 255.0f, 30.0f, 255.0f));
-                        jstring eventStr = env->NewStringUTF("KICK");
-                        env->CallVoidMethod(bridgeRef, onBeatTrigger, eventStr, (jint)intensity);
-                        env->DeleteLocalRef(eventStr);
-                        if (env->ExceptionCheck()) env->ExceptionClear();
-                        g_last_beat_trigger_ns = nowNs;
-                        int tick = g_dd_tick_count.fetch_add(1, std::memory_order_relaxed);
-                        if (tick % 20 == 0) {
-                            LOGI("[DD-BEAT] KICK intensity=%d kickVal=%.3f", intensity, kickVal);
-                        }
-                    } else if (snareTrigger) {
-                        int intensity = static_cast<int>(std::clamp(snareVal * 200.0f, 25.0f, 200.0f));
-                        jstring eventStr = env->NewStringUTF("SNARE");
-                        env->CallVoidMethod(bridgeRef, onBeatTrigger, eventStr, (jint)intensity);
-                        env->DeleteLocalRef(eventStr);
-                        if (env->ExceptionCheck()) env->ExceptionClear();
-                        g_last_beat_trigger_ns = nowNs;
-                        int tick = g_dd_tick_count.fetch_add(1, std::memory_order_relaxed);
-                        if (tick % 20 == 0) {
-                            LOGI("[DD-BEAT] SNARE intensity=%d snareVal=%.3f", intensity, snareVal);
-                        }
-                    } else if (bodyTrigger) {
-                        int intensity = static_cast<int>(std::clamp(onsetFrames[0].body * 150.0f, 20.0f, 150.0f));
-                        jstring eventStr = env->NewStringUTF("BODY");
-                        env->CallVoidMethod(bridgeRef, onBeatTrigger, eventStr, (jint)intensity);
-                        env->DeleteLocalRef(eventStr);
-                        if (env->ExceptionCheck()) env->ExceptionClear();
-                        g_last_beat_trigger_ns = nowNs;
-                    }
+                float continuous = 0.0f;
+                if (semN > 0) {
+                    continuous =
+                          semFrames[0].kickAmp  * 0.55f
+                        + semFrames[0].snareAmp * 0.25f
+                        + semFrames[0].vocalAmp * 0.08f
+                        + semFrames[0].bodyAmp  * 0.35f;
                 }
 
-                // Update onset history
-                g_prev_kick_onset = onsetFrames[0].kick;
-                g_prev_snare_onset = onsetFrames[0].snare;
-            }
-            // ─── Direct sysfs drive (only when no beat trigger callback) ───
-            // When onBeatTrigger is null, fall through to continuous sysfs writes.
-            // This path is for root FD / root pipe / UDP modes only.
-            else if (!onBeatTrigger) {
-                // Target = continuous base + onset accent
+                // Target = continuous base + onset accent. The direct path owns the actuator.
                 targetAmp = std::clamp(continuous + beatAccent, 0.0f, 255.0f);
 
-                // Smooth envelope: fast attack, slow release
-                float alpha = (targetAmp > currentAmp) ? attackAlpha : releaseAlpha;
+                // Smooth envelope: fast attack, slower release.
+                const float alpha = (targetAmp > currentAmp) ? attackAlpha : releaseAlpha;
                 currentAmp += (targetAmp - currentAmp) * alpha;
 
-                // Zero-floor check: if no audio activity, decay to 0
                 if (semN == 0 && onsetN == 0) {
                     currentAmp *= 0.90f;
                     if (currentAmp < 1.0f) currentAmp = 0.0f;
                 }
 
-                // Drive the LRA: always write (even 0) for continuous 200Hz control
                 if (currentAmp > 1.0f) {
-                    int amplitude = static_cast<int>(currentAmp);
-                    int duration = 5;  // 5ms per tick
-                    trigger_direct_drive(duration, amplitude);
+                    const int amplitude = static_cast<int>(currentAmp);
+                    trigger_direct_drive(5, amplitude);
 
-                    // Update physical model for telemetry
-                    float acceleration = (currentAmp / 255.0f) - (spring_k * lra_position) - (damping_c * lra_velocity);
+                    const float acceleration = (currentAmp / 255.0f) - (spring_k * lra_position) - (damping_c * lra_velocity);
                     lra_velocity += acceleration;
                     lra_position += lra_velocity;
                 } else if (g_dd_tick_count.load(std::memory_order_relaxed) % 40 == 0) {
                     LOGI("[DD] idle (no audio), currentAmp=%.1f", currentAmp);
                 }
+            } else {
+                currentAmp = 0.0f;
             }
         } else {
-            // ═══ Fallback path: NO direct drive available ═══
-            // This is the path hit when running in hooked process without root.
-            // Onset detection + beat triggering is handled by Kotlin runSemanticFrameLoop
-            // which pulls onset frames via nativeGetOnsetFrames() JNI call.
-            // Do NOT consume onset frames here — let Kotlin side handle it all.
-
-            // Original fallback: push haptic frames via JNI callback for continuous rendering
-            int batchCount = 0;
-            float batchBuffer[6];
-            for (int b = 0; b < 6 && g_scheduler_running.load(std::memory_order_acquire); b++) {
-                float s = 0.0f;
-                int n = engine->getHapticFrame(&s, 1);
-                if (n > 0) {
-                    batchBuffer[batchCount++] = s;
-                }
-                nextWake.tv_nsec += frame_period_ns;
-                if (nextWake.tv_nsec >= 1000000000L) {
-                    nextWake.tv_sec++;
-                    nextWake.tv_nsec -= 1000000000L;
-                }
-                clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &nextWake, nullptr);
-            }
-
-            if (batchCount > 0) {
-                jfloatArray jArr = env->NewFloatArray(batchCount);
-                if (jArr) {
-                    env->SetFloatArrayRegion(jArr, 0, batchCount, batchBuffer);
-                    env->CallVoidMethod(bridgeRef, onFrameReady, jArr, batchCount);
-                    env->DeleteLocalRef(jArr);
-                }
-                if (env->ExceptionCheck()) {
-                    env->ExceptionClear();
-                }
-            }
-            continue; // Skip the single 5ms wait below
+            // No direct actuator is available. Beat events were already delivered
+            // through onBeatTrigger; avoid polling an unused legacy continuous ring.
         }
 
         // Wait for next 5ms boundary (absolute time sleep = zero jitter)
@@ -784,6 +713,17 @@ static void* scheduler_thread_func(void* arg) {
 }
 
 extern "C" {
+
+JNIEXPORT jboolean JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeSetDirectDriveNodes(
+    JNIEnv* env, jobject, jstring nodes) {
+    if (!nodes) return JNI_FALSE;
+    const char* raw = env->GetStringUTFChars(nodes, nullptr);
+    if (!raw) return JNI_FALSE;
+    const std::string value(raw);
+    env->ReleaseStringUTFChars(nodes, raw);
+    return init_direct_drive(value) ? JNI_TRUE : JNI_FALSE;
+}
 
 JNIEXPORT jlong JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeCreateEngine(JNIEnv* env, jobject thiz) {
@@ -814,6 +754,7 @@ Java_com_mouya_musichaptics_NativeBridge_nativeDestroyEngine(JNIEnv* env, jobjec
     if (ampFd >= 0) close(ampFd);
     g_direct_drive_path.clear();
     g_direct_amplitude_path.clear();
+    g_direct_driver_kind.store(static_cast<int>(DirectDriverKind::Unknown), std::memory_order_release);
     g_dd_mode_entered.store(false, std::memory_order_relaxed);
     g_dd_tick_count.store(0, std::memory_order_relaxed);
 }
@@ -824,6 +765,16 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigure(
     auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
     if (engine) {
         engine->configure(sampleRate, lowCut, highCut, amp, presetId);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeConfigureProfile(
+    JNIEnv* env, jobject thiz, jlong ptr, jfloat dspFloor, jfloat subMult,
+    jfloat kickMult, jfloat snareMult, jfloat tickMult, jfloat bodyMult, jfloat refractoryScale) {
+    auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
+    if (engine) {
+        engine->configureProfile(dspFloor, subMult, kickMult, snareMult, tickMult, bodyMult, refractoryScale);
     }
 }
 
@@ -851,21 +802,6 @@ Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
 //  Copies amplitude samples from C++ ring buffer to Java array.
 //  Returns number of samples actually copied.
 // ═════════════════════════════════════════════════════════════════
-JNIEXPORT jint JNICALL
-Java_com_mouya_musichaptics_NativeBridge_nativeGetHapticFrame(
-    JNIEnv* env, jobject thiz, jlong ptr, jfloatArray outBuffer, jint maxCount) {
-    auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
-    if (!engine || !outBuffer || maxCount <= 0) return 0;
-
-    jfloat* out = env->GetFloatArrayElements(outBuffer, nullptr);
-    if (!out) return 0;
-
-    int count = engine->getHapticFrame(out, maxCount);
-
-    env->ReleaseFloatArrayElements(outBuffer, out, 0);
-    return count;
-}
-
 // ═════════════════════════════════════════════════════════════════
 //  Clear Haptic Buffer
 //  Flushes ring buffer and resets all envelope states.
@@ -881,9 +817,9 @@ Java_com_mouya_musichaptics_NativeBridge_nativeClearHapticBuffer(
 }
 
 // ═════════════════════════════════════════════════════════════════
-//  v2.1 Native Haptic Scheduler — start/stop
-//  Starts a dedicated native thread that pulls from the C++ ring
-//  buffer at precise 10ms intervals and calls back to Java.
+//  Native Haptic Scheduler — start/stop
+//  Starts a dedicated native thread that consumes native events at a precise 5ms
+//  cadence and only crosses into Java for fallback impact events.
 //  This eliminates coroutine delay jitter and JNI polling overhead.
 // ═════════════════════════════════════════════════════════════════
 JNIEXPORT jboolean JNICALL
@@ -946,40 +882,23 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeGetSemanticFrames(JNIEnv* env, jobject, jlong ptr, jfloatArray outBuffer, jint maxFrames) {
     auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
     if (!engine || !outBuffer) return 0;
-    
-    // 4 floats per frame: kick, snare, vocal, body
     jsize capacity = env->GetArrayLength(outBuffer) / 4;
-    int framesToRead = std::min(static_cast<int>(capacity), static_cast<int>(maxFrames));
+    const int framesToRead = std::min(static_cast<int>(capacity), std::min(static_cast<int>(maxFrames), 64));
     if (framesToRead <= 0) return 0;
-    
-    std::vector<haptic::SemanticHapticFrame> frames(framesToRead);
-    int count = engine->getSemanticFrames(frames.data(), framesToRead);
-    
-    if (count > 0) {
-        // Flatten into the float array
-        std::vector<float> flat(count * 4);
-        for (int i = 0; i < count; i++) {
-            flat[i * 4 + 0] = frames[i].kickAmp;
-            flat[i * 4 + 1] = frames[i].snareAmp;
-            flat[i * 4 + 2] = frames[i].vocalAmp;
-            flat[i * 4 + 3] = frames[i].bodyAmp;
-        }
-        env->SetFloatArrayRegion(outBuffer, 0, count * 4, flat.data());
+    haptic::SemanticHapticFrame frames[64] = {};
+    const int count = engine->getSemanticFrames(frames, framesToRead);
+    if (count <= 0) return 0;
+    float flat[64 * 4] = {};
+    for (int i = 0; i < count; ++i) {
+        flat[i * 4 + 0] = frames[i].kickAmp;
+        flat[i * 4 + 1] = frames[i].snareAmp;
+        flat[i * 4 + 2] = frames[i].vocalAmp;
+        flat[i * 4 + 3] = frames[i].bodyAmp;
     }
+    env->SetFloatArrayRegion(outBuffer, 0, count * 4, flat);
     return count;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_mouya_musichaptics_NativeBridge_nativeSetDirectDriveNodes(JNIEnv* env, jobject, jstring nodes) {
-    if (!nodes) return JNI_FALSE;
-    const char* c_nodes = env->GetStringUTFChars(nodes, nullptr);
-    if (c_nodes) {
-        bool ok = init_direct_drive(std::string(c_nodes));
-        env->ReleaseStringUTFChars(nodes, c_nodes);
-        return ok ? JNI_TRUE : JNI_FALSE;
-    }
-    return JNI_FALSE;
-}
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeTriggerDirectDriveStrike(JNIEnv*, jobject, jint durationMs, jint amplitude) {
     // Support all three modes: Direct FD, Root Pipe, UDP
@@ -987,40 +906,40 @@ Java_com_mouya_musichaptics_NativeBridge_nativeTriggerDirectDriveStrike(JNIEnv*,
     bool hasRootPipe = g_use_root_shell.load(std::memory_order_acquire) &&
                        g_root_shell_fd.load(std::memory_order_acquire) >= 0;
     bool hasUdp = g_use_udp_haptic.load(std::memory_order_acquire);
-    if (!hasDirectFd && !hasRootPipe && !hasUdp) return JNI_FALSE;
+    bool hasJavaPipe = g_use_java_pipe.load(std::memory_order_acquire);
+    if (!hasDirectFd && !hasRootPipe && !hasUdp && !hasJavaPipe) return JNI_FALSE;
     trigger_direct_drive(durationMs, amplitude);
     return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeIsDirectDriveAvailable(JNIEnv*, jobject) {
-    return g_direct_drive_fd.load(std::memory_order_acquire) >= 0 ? JNI_TRUE : JNI_FALSE;
+    const bool available =
+        g_direct_drive_fd.load(std::memory_order_acquire) >= 0 ||
+        (g_use_root_shell.load(std::memory_order_acquire) && g_root_shell_fd.load(std::memory_order_acquire) >= 0) ||
+        g_use_udp_haptic.load(std::memory_order_acquire) ||
+        g_use_java_pipe.load(std::memory_order_acquire);
+    return available ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeGetOnsetFrames(JNIEnv* env, jobject, jlong ptr, jfloatArray outBuffer, jint maxFrames) {
     auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
     if (!engine || !outBuffer) return 0;
-    
-    // 4 floats per frame: kick, snare, vocal, body
-    jsize capacity = env->GetArrayLength(outBuffer) / 4;
-    int framesToRead = std::min(static_cast<int>(capacity), static_cast<int>(maxFrames));
+    const jsize capacity = env->GetArrayLength(outBuffer) / 4;
+    const int framesToRead = std::min(static_cast<int>(capacity), std::min(static_cast<int>(maxFrames), 64));
     if (framesToRead <= 0) return 0;
-    
-    std::vector<haptic::HapticEngine::OnsetFrame> frames(framesToRead);
-    int count = engine->getOnsetFrames(frames.data(), framesToRead);
-    
-    if (count > 0) {
-        // Flatten into the float array
-        std::vector<float> flat(count * 4);
-        for (int i = 0; i < count; i++) {
-            flat[i * 4 + 0] = frames[i].kick;
-            flat[i * 4 + 1] = frames[i].snare;
-            flat[i * 4 + 2] = frames[i].vocal;
-            flat[i * 4 + 3] = frames[i].body;
-        }
-        env->SetFloatArrayRegion(outBuffer, 0, count * 4, flat.data());
+    haptic::HapticEngine::OnsetFrame frames[64] = {};
+    const int count = engine->getOnsetFrames(frames, framesToRead);
+    if (count <= 0) return 0;
+    float flat[64 * 4] = {};
+    for (int i = 0; i < count; ++i) {
+        flat[i * 4 + 0] = frames[i].kick;
+        flat[i * 4 + 1] = frames[i].snare;
+        flat[i * 4 + 2] = frames[i].vocal;
+        flat[i * 4 + 3] = frames[i].body;
     }
+    env->SetFloatArrayRegion(outBuffer, 0, count * 4, flat);
     return count;
 }
 

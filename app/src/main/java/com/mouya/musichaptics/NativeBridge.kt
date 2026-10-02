@@ -1,8 +1,6 @@
 package com.mouya.musichaptics
 
 import android.content.Context
-import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
 import android.util.Log
 import java.nio.ByteBuffer
 
@@ -86,6 +84,25 @@ class NativeBridge {
         }
     }
 
+    fun configureProfile(profile: DeviceProfile) {
+        if (nativePtr != 0L) {
+            try {
+                nativeConfigureProfile(
+                    nativePtr,
+                    profile.dspEnergyFloor,
+                    profile.dspSubMult,
+                    profile.dspKickMult,
+                    profile.dspSnareMult,
+                    profile.dspTickMult,
+                    profile.dspBodyMult,
+                    profile.dspRefractoryScale
+                )
+            } catch (t: Throwable) {
+                Log.w("NativeBridge", "configureProfile failed: ${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
+    }
+
     fun processAudioDirect(buffer: ByteBuffer, size: Int, outTelemetry: FloatArray) {
         if (nativePtr != 0L) {
             try {
@@ -100,17 +117,6 @@ class NativeBridge {
 
             }
         }
-    }
-
-    fun getHapticFrame(outBuffer: FloatArray, maxCount: Int): Int {
-        if (nativePtr != 0L) {
-            try {
-                return nativeGetHapticFrame(nativePtr, outBuffer, maxCount)
-            } catch (e: Exception) {
-                Log.e("NativeBridge", "getHapticFrame failed: ${e.message}")
-            }
-        }
-        return 0
     }
 
     fun getSemanticFrames(outFrames: FloatArray, maxFrames: Int): Int {
@@ -280,9 +286,9 @@ class NativeBridge {
     private external fun nativeCreateEngine(): Long
     private external fun nativeDestroyEngine(ptr: Long)
     private external fun nativeConfigure(ptr: Long, sampleRate: Float, lowCut: Float, highCut: Float, amplitude: Float, presetId: Int)
+    private external fun nativeConfigureProfile(ptr: Long, dspFloor: Float, subMult: Float, kickMult: Float, snareMult: Float, tickMult: Float, bodyMult: Float, refractoryScale: Float)
     private external fun nativeProcessAudioDirect(ptr: Long, directBuffer: ByteBuffer, size: Int, outTelemetry: FloatArray)
     private external fun nativeGetSemanticFrames(ptr: Long, outFrames: FloatArray, maxFrames: Int): Int
-    private external fun nativeGetHapticFrame(ptr: Long, outBuffer: FloatArray, maxCount: Int): Int
     private external fun nativeClearHapticBuffer(ptr: Long)
     private external fun nativeStartScheduler(ptr: Long): Boolean
     private external fun nativeStopScheduler()
@@ -300,8 +306,6 @@ class NativeBridge {
     private external fun nativeShutdownUdpHaptic()
     private external fun nativeEnableJavaPipe(): Boolean
     private external fun nativeDisableJavaPipe()
-
-    @Volatile var onFrameCallback: ((FloatArray, Int) -> Unit)? = null
 
     @Volatile private var _rootPipeCb: ((Int, Int) -> Unit)? = null
 
@@ -336,10 +340,6 @@ class NativeBridge {
     /** Called from C++ via JNI when a beat/onset is detected */
     fun onBeatTrigger(event: String, intensity: Int) {
         beatTriggerCallback?.invoke(event, intensity)
-    }
-
-    fun onNativeFrameReady(samples: FloatArray, count: Int) {
-        onFrameCallback?.invoke(samples, count)
     }
 
     fun startScheduler(): Boolean {

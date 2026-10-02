@@ -88,7 +88,7 @@ class BouncyPressController(private val scope: kotlinx.coroutines.CoroutineScope
     fun pressAndRelease(scale: Animatable<Float, *>) {
         scope.launch {
             scale.animateTo(
-                targetValue = 0.97f,  // v3.14: subtle press, was 0.92
+                targetValue = 0.97f,  // subtle press, was 0.92
                 animationSpec = spring(
                     dampingRatio = 1f,  // 临界阻尼 — 无过冲
                     stiffness = Spring.StiffnessHigh
@@ -119,7 +119,7 @@ class BouncyPressController(private val scope: kotlinx.coroutines.CoroutineScope
     fun press(scale: Animatable<Float, *>) {
         scope.launch {
             scale.animateTo(
-                targetValue = 0.97f,  // v3.14: subtle press
+                targetValue = 0.97f,  // subtle press
                 animationSpec = spring(
                     dampingRatio = 1f,
                     stiffness = Spring.StiffnessHigh

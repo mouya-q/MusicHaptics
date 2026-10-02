@@ -83,9 +83,17 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeEffect
-import dev.chrisbanes.haze.hazeSource
+import com.kyant.backdrop.drawBackdrop
+import com.kyant.backdrop.backdrops.LayerBackdrop
+import com.kyant.backdrop.backdrops.layerBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import com.kyant.backdrop.effects.blur
+import com.kyant.backdrop.effects.lens
+import com.kyant.backdrop.effects.vibrancy
+import com.kyant.backdrop.highlight.Highlight
+import com.kyant.backdrop.shadow.Shadow
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.foundation.isSystemInDarkTheme
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.sin
@@ -119,24 +127,41 @@ private object IOSColors {
     val darkTextTertiary = Color(0xFFEBEBF5).copy(alpha = 0.3f)
 }
 
-@Composable private fun isDark() = false
+@Composable private fun isDark() = isSystemInDarkTheme()
+@Composable private fun bgPrimary() = if (isDark()) IOSColors.darkBg else IOSColors.lightBg
+@Composable private fun cardColor() = if (isDark()) IOSColors.darkCard else IOSColors.lightCard
+@Composable private fun cardAltColor() = if (isDark()) IOSColors.darkCardAlt else IOSColors.lightCardAlt
+@Composable private fun glassColor() = if (isDark()) IOSColors.glassDark else IOSColors.glassLight
+@Composable private fun textPrimary() = if (isDark()) IOSColors.darkTextPrimary else IOSColors.lightTextPrimary
+@Composable private fun textSecondary() = if (isDark()) IOSColors.darkTextSecondary else IOSColors.lightTextSecondary
+@Composable private fun textTertiary() = if (isDark()) IOSColors.darkTextTertiary else IOSColors.lightTextTertiary
+@Composable private fun separatorColor() = if (isDark()) Color.White.copy(alpha = 0.10f) else Color(0xFFC6C6C8)
 
-@Composable private fun bgPrimary() = Color.White
-@Composable private fun cardColor() = Color.White
-@Composable private fun cardAltColor() = Color(0xFFF2F2F7)
-@Composable private fun glassColor() = Color.White.copy(alpha = 0.86f)
-@Composable private fun textPrimary() = Color(0xFF000000)
-@Composable private fun textSecondary() = Color(0xFF3C3C43).copy(alpha = 0.6f)
-@Composable private fun textTertiary() = Color(0xFF3C3C43).copy(alpha = 0.3f)
-@Composable private fun separatorColor() = Color(0xFFC6C6C8)
+private val LocalLiquidGlassBackdrop = staticCompositionLocalOf<LayerBackdrop?> { null }
 
 @Composable
-fun Modifier.liquidGlass(corner: Dp = 22.dp): Modifier = this.then(
-    Modifier
-        .clip(RoundedCornerShape(corner))
-        .background(glassColor())
-        .border(0.5.dp, if (isDark()) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f), RoundedCornerShape(corner))
-)
+fun Modifier.liquidGlass(corner: Dp = 22.dp): Modifier {
+    val backdrop = LocalLiquidGlassBackdrop.current
+    val shape = RoundedCornerShape(corner)
+    return if (backdrop != null) {
+        this.then(Modifier.drawBackdrop(
+            backdrop = backdrop,
+            shape = { shape },
+            effects = {
+                vibrancy()
+                blur(18.dp.toPx())
+                lens(8f, 18f, depthEffect = true, chromaticAberration = false)
+            },
+            highlight = { Highlight.Default },
+            shadow = { Shadow(radius = 22.dp, alpha = 0.42f) },
+            onDrawSurface = {
+                drawRoundRect(glassColor(), cornerRadius = CornerRadius(corner.toPx()))
+            }
+        ))
+    } else {
+        this.then(Modifier.clip(shape).background(glassColor()).border(0.5.dp, if (isDark()) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f), shape))
+    }
+}
 
 @Composable
 fun IOSToggle(
@@ -183,9 +208,7 @@ fun <T> IOSSegmentedControl(
 
     BoxWithConstraints(
         modifier = modifier.fillMaxWidth().height(36.dp)
-            .shadow(4.dp, RoundedCornerShape(10.dp), ambientColor = Color.Black.copy(alpha = 0.05f), spotColor = Color.Black.copy(alpha = 0.08f))
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (isDark()) Color(0xFF2C2C2E) else Color(0xFFEFEFF2))  // flat light gray bar
+            .liquidGlass(10.dp)
             .padding(2.dp)
     ) {
         val itemWidth = maxWidth / items.size
@@ -196,7 +219,7 @@ fun <T> IOSSegmentedControl(
         val baseOffset = itemWidthPx * items.indexOf(selected)
         val lensOffsetPx by animateFloatAsState(
             targetValue = baseOffset + dragOffset,
-            animationSpec = PhysicsSpring.elasticSelect(),  // v3.14: near-critical damping
+            animationSpec = PhysicsSpring.elasticSelect(),  // near-critical damping
             label = "LensOffset"
         )
 
@@ -205,7 +228,7 @@ fun <T> IOSSegmentedControl(
                 .offset { androidx.compose.ui.unit.IntOffset(lensOffsetPx.toInt(), 0) }
                 .width(itemWidth)
                 .fillMaxHeight()
-                // v3.14: no scale spring — flat, clean indicator
+                // no scale spring — flat, clean indicator
                 .shadow(if (isInteracting) 6.dp else 0.dp, RoundedCornerShape(8.dp), ambientColor = IOSColors.blue.copy(alpha=0.4f), spotColor = IOSColors.blue.copy(alpha=0.3f))
                 .clip(RoundedCornerShape(8.dp))
                 .background(if (isDark()) Color(0xFF48484A) else Color.White)
@@ -223,7 +246,7 @@ fun <T> IOSSegmentedControl(
                                     val targetIndex = (totalOffset / itemWidthPx).roundToInt().coerceIn(0, items.size - 1)
                                     val targetItem = items[targetIndex]
                                     if (targetItem != selected) {
-                                        hapticEngine.perform(HapticFeedbackEngine.HapticStyle.SELECTION)  // v3.14: commit haptic only
+                                        hapticEngine.perform(HapticFeedbackEngine.HapticStyle.SELECTION)  // commit haptic only
                                         onSelect(targetItem)
                                     }
                                     pressedItem = null
@@ -325,11 +348,11 @@ fun IOSSettingSliderRow(
                             coroutineScope.launch { thumbScale.animateTo(1.25f, PhysicsSpring.uiFast()) }  // v3.14
                             val v = xToValue(offset.x)
                             onValueChange(v)
-                            hapticEngine.perform(HapticFeedbackEngine.HapticStyle.CONTINUOUS_HUM)  // v3.14: start continuous
+                            hapticEngine.perform(HapticFeedbackEngine.HapticStyle.CONTINUOUS_HUM)  // start continuous
                         },
                         onDragEnd = {
                             coroutineScope.launch { thumbScale.animateTo(1f, PhysicsSpring.uiStandard()) }  // v3.14
-                            hapticEngine.perform(HapticFeedbackEngine.HapticStyle.KICK)  // v3.14: commit tick
+                            hapticEngine.perform(HapticFeedbackEngine.HapticStyle.KICK)  // commit tick
                         },
                         onDragCancel = {
                             coroutineScope.launch { thumbScale.animateTo(1f, PhysicsSpring.uiStandard()) }  // v3.14
@@ -420,7 +443,7 @@ class HapticDashboardActivity : ComponentActivity() {
 
     private val telemetryReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            // v3.13: Unpack the packed telemetry format
+            // Unpack the packed telemetry format
             val floats = intent.getFloatArrayExtra("floats")
             val longs = intent.getLongArrayExtra("longs")
             val ints = intent.getIntArrayExtra("ints")
@@ -562,7 +585,7 @@ fun HapticDashboard() {
         mutableStateOf(Preset.entries.getOrElse(idx) { Preset.HIGH })
     }
     var showAdvancedSettings by remember { mutableStateOf(false) }
-    // v4.10: 强制满驱动 toggle. Defaults on for 小米10 系列 (umi/cmi/thyme), whose HAL
+    // 强制满驱动 toggle. Defaults on for 小米10 系列 (umi/cmi/thyme), whose HAL
     // reports amplitude control but ignores the value — matches VibrateProxy detection.
     val forceDefaultAmpAutoDefault = remember {
         val d = android.os.Build.DEVICE.lowercase(java.util.Locale.ROOT)
@@ -604,7 +627,7 @@ fun HapticDashboard() {
     
     val scope = rememberCoroutineScope()
     var dashboardTab by rememberSaveable { mutableStateOf(DashboardTab.CONSOLE) }
-    val liquidGlassBackdrop = remember { HazeState() }
+    val liquidGlassBackdrop = rememberLayerBackdrop()
  
 LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoost, hapticPreset,
                  isForceDefaultAmpActive,
@@ -644,10 +667,11 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
           )
       }
 
+    CompositionLocalProvider(LocalLiquidGlassBackdrop provides liquidGlassBackdrop) {
     Box(modifier = Modifier
         .fillMaxSize()
         .background(bgPrimary())
-        .hazeSource(liquidGlassBackdrop)
+        .layerBackdrop(liquidGlassBackdrop)
         .statusBarsPadding()
         .navigationBarsPadding()
     ) {
@@ -750,6 +774,7 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp)
         )
     }
+    }
 }
 
 private enum class DashboardTab { CONSOLE, APPS, ABOUT }
@@ -759,7 +784,7 @@ private data class LaunchableApp(val packageName: String, val label: String, val
 private fun LiquidGlassTabBar(
     selected: DashboardTab,
     onSelected: (DashboardTab) -> Unit,
-    backdrop: HazeState,
+    backdrop: LayerBackdrop,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -776,14 +801,18 @@ private fun LiquidGlassTabBar(
             .width(240.dp)
             .height(58.dp)
             .shadow(16.dp, barShape, ambientColor = Color.Black.copy(alpha = 0.08f), spotColor = Color.Black.copy(alpha = 0.12f))
-            .clip(barShape)
-            .hazeEffect(backdrop) {
-                blurRadius = 32.dp
-                noiseFactor = 0.04f
-                backgroundColor = Color.Transparent
-            }
-            .background(Color(0xFFF7F7F9).copy(alpha = 0.65f))
-            .border(0.5.dp, Color.White.copy(alpha = 0.4f), barShape)
+            .drawBackdrop(
+                backdrop = backdrop,
+                shape = { barShape },
+                effects = {
+                    vibrancy()
+                    blur(22.dp.toPx())
+                    lens(10f, 20f, depthEffect = true, chromaticAberration = false)
+                },
+                highlight = { Highlight.Default },
+                shadow = { Shadow(radius = 20.dp, alpha = 0.45f) },
+                onDrawSurface = { drawRoundRect(glassColor(), cornerRadius = CornerRadius(28.dp.toPx())) }
+            )
             .padding(5.dp)
     ) {
         val computedTabWidth = maxWidth / 3
@@ -796,14 +825,14 @@ private fun LiquidGlassTabBar(
         }
     val lensOffsetPxState = animateFloatAsState(
         targetValue = baseOffset + dragOffset,
-        animationSpec = PhysicsSpring.uiStandard(),  // v3.14: critically-damped, no overshoot
+        animationSpec = PhysicsSpring.uiStandard(),  // critically-damped, no overshoot
         label = "LensOffset"
     )
     
     val isInteracting = pressedTab != null || dragOffset != 0f
     val scaleState = animateFloatAsState(
-        targetValue = if (isInteracting) 0.97f else 1f,  // v3.14: subtle press, was 0.92
-        animationSpec = PhysicsSpring.uiFast(),  // v3.14: critically-damped
+        targetValue = if (isInteracting) 0.97f else 1f,  // subtle press, was 0.92
+        animationSpec = PhysicsSpring.uiFast(),  // critically-damped
         label = "LensScale"
     )
         
@@ -817,8 +846,14 @@ private fun LiquidGlassTabBar(
                     scaleY = scaleState.value
                 }
                 .shadow(if (isInteracting) 6.dp else 2.dp, lensShape, spotColor = Color.Black.copy(alpha = 0.1f))
-                .clip(lensShape)
-                .background(Color.White)
+                .drawBackdrop(
+                    backdrop = backdrop,
+                    shape = { lensShape },
+                    effects = { vibrancy(); blur(12.dp.toPx()); lens(7f, 14f, depthEffect = true) },
+                    highlight = { Highlight.Default },
+                    shadow = { Shadow(radius = 10.dp, alpha = 0.30f) },
+                    onDrawSurface = { drawRoundRect(if (isDark()) Color.White.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.70f), cornerRadius = CornerRadius(22.dp.toPx())) }
+                )
         )
         Row(Modifier.fillMaxSize()) {
             listOf(DashboardTab.CONSOLE to "控制台", DashboardTab.APPS to "应用", DashboardTab.ABOUT to "关于").forEach { (tab, title) ->
@@ -913,7 +948,11 @@ private fun LiquidGlassTabBar(
 @Composable
 private fun ScopedAppsScreen() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val manager = remember { WhitelistManager() }
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
+    var whitelistMode by remember { mutableStateOf(manager.getMode()) }
+    var enabledPackages by remember { mutableStateOf(manager.getWhitelist()) }
     var backProgress by remember { mutableFloatStateOf(0f) }
     var backFromLeft by remember { mutableStateOf(true) }
     PredictiveBackHandler(enabled = selected != null) { events ->
@@ -945,12 +984,34 @@ private fun ScopedAppsScreen() {
         LazyColumn(contentPadding = PaddingValues(16.dp, 24.dp, 16.dp, 102.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
                 Text("应用触觉", color = textPrimary(), fontWeight = FontWeight.Bold, fontSize = 28.sp)
-                Text("为每个 LSPosed 作用域单独覆写触觉参数", color = textSecondary(), fontSize = 14.sp, modifier = Modifier.padding(top = 3.dp, bottom = 10.dp))
+                Text("LSPosed 作用域决定注入；应用白名单决定是否处理音频", color = textSecondary(), fontSize = 14.sp, modifier = Modifier.padding(top = 3.dp, bottom = 10.dp))
+            }
+            item {
+                WhitelistPanel(
+                    mode = whitelistMode,
+                    enabledCount = enabledPackages.size,
+                    onModeChange = { mode ->
+                        whitelistMode = mode
+                        scope.launch { withContext(Dispatchers.IO) { manager.setMode(mode) } }
+                    },
+                    onClear = {
+                        whitelistMode = WhitelistManager.MODE_WHITELIST
+                        enabledPackages = emptySet()
+                        scope.launch { withContext(Dispatchers.IO) { manager.replacePackages(emptySet()) } }
+                    }
+                )
             }
             if (scopedPackages == null) item { Text("无法读取 LSPosed 作用域。请在 LSPosed 中启用模块后重新打开", color = textSecondary(), modifier = Modifier.padding(20.dp)) }
             else if (apps.isEmpty()) item { Text("LSPosed 当前没有为本模块勾选应用。", color = textSecondary(), modifier = Modifier.padding(20.dp)) }
             items(apps, key = { it.packageName }) { app ->
-                ScopedAppRow(app) { selected = app.packageName }
+                val whitelisted = whitelistMode == WhitelistManager.MODE_ALL || app.packageName in enabledPackages
+                ScopedAppRow(app, whitelisted, onToggleWhitelist = { allowed ->
+                    enabledPackages = if (allowed) enabledPackages + app.packageName else enabledPackages - app.packageName
+                    if (whitelistMode != WhitelistManager.MODE_WHITELIST) whitelistMode = WhitelistManager.MODE_WHITELIST
+                    scope.launch {
+                        withContext(Dispatchers.IO) { manager.setPackageAllowed(app.packageName, allowed) }
+                    }
+                }) { selected = app.packageName }
             }
         }
         
@@ -977,7 +1038,35 @@ private fun ScopedAppsScreen() {
     }
 }
 
-@Composable private fun ScopedAppRow(app: LaunchableApp, onClick: () -> Unit) {
+@Composable
+private fun WhitelistPanel(
+    mode: String,
+    enabledCount: Int,
+    onModeChange: (String) -> Unit,
+    onClear: () -> Unit
+) {
+    Column(Modifier.fillMaxWidth().liquidGlass(20.dp).padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("处理范围", color = textPrimary(), fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+                Text(
+                    if (mode == WhitelistManager.MODE_ALL) "当前作用域内的应用都会处理" else "仅处理已启用的应用 · $enabledCount 个",
+                    color = textSecondary(), fontSize = 12.sp
+                )
+            }
+            TextButton(onClick = onClear, enabled = enabledCount > 0) { Text("清空") }
+        }
+        Spacer(Modifier.height(10.dp))
+        IOSSegmentedControl(
+            items = listOf(WhitelistManager.MODE_WHITELIST, WhitelistManager.MODE_ALL),
+            selected = mode,
+            onSelect = onModeChange,
+            label = { it -> if (it == WhitelistManager.MODE_WHITELIST) "仅白名单" else "全部作用域" }
+        )
+    }
+}
+
+@Composable private fun ScopedAppRow(app: LaunchableApp, whitelisted: Boolean, onToggleWhitelist: (Boolean) -> Unit, onClick: () -> Unit) {
     val initial = app.label.firstOrNull()?.uppercase() ?: "•"
     Row(Modifier.fillMaxWidth().liquidGlass(20.dp).clickable { onClick() }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(48.dp).clip(RoundedCornerShape(14.dp)).background(IOSColors.indigo.copy(alpha=.10f)), contentAlignment = Alignment.Center) {
@@ -985,6 +1074,8 @@ private fun ScopedAppsScreen() {
             else Text(initial, color=IOSColors.indigo, fontWeight=FontWeight.Bold, fontSize=19.sp)
         }
         Spacer(Modifier.width(12.dp)); Column(Modifier.weight(1f)) { Text(app.label, color=textPrimary(), fontWeight=FontWeight.SemiBold); Text(app.packageName, color=textSecondary(), fontSize=12.sp, maxLines=1) }
+        IOSToggle(checked = whitelisted, onToggle = { onToggleWhitelist(!whitelisted) })
+        Spacer(Modifier.width(6.dp))
         Text("›", color=IOSColors.gray, fontSize=30.sp)
     }
 }
@@ -1149,15 +1240,15 @@ fun IOSControlPanel(
 
         AnimatedVisibility(
             visible = showAdvancedSettings,
-            enter = expandVertically(tween(300, easing = LinearOutSlowInEasing), Alignment.Top) + fadeIn(tween(250)),  // v3.14: ease-out
-            exit = shrinkVertically(tween(300, easing = FastOutLinearInEasing), Alignment.Top) + fadeOut(tween(200))  // v3.14: ease-in
+            enter = expandVertically(tween(300, easing = LinearOutSlowInEasing), Alignment.Top) + fadeIn(tween(250)),  // ease-out
+            exit = shrinkVertically(tween(300, easing = FastOutLinearInEasing), Alignment.Top) + fadeOut(tween(200))  // ease-in
         ) {
             Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("高级设置", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 IOSSettingSliderRow("总强度", customAmplitude, 0.5f..3.0f, "x", onAmplitudeChange)
                 IOSSettingSliderRow("低音强调", customBassBoost, 1.0f..2.5f, "x", onBassBoostChange)
                 HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
-                // v4.10: Some ROMs report振幅可控 but the HAL ignores it, so every custom
+                // Some ROMs report振幅可控 but the HAL ignores it, so every custom
                 // amplitude comes out equally weak. This forces DEFAULT_AMPLITUDE and lets
                 // segment *durations* carry the texture instead. On 小米10 系列 it是默认开启的。
                 Text("驱动模式", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)

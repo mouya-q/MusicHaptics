@@ -269,3 +269,4 @@ MusicHapticsX 主体：MIT License。
 
 - [`CHANGED.md`](CHANGED.md) — 面向用户和维护者的版本变更。
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 运行链路、线程模型与硬件输出说明。
+

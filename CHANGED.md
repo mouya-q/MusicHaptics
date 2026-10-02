@@ -43,16 +43,30 @@
   `Cannot infer type`、`Argument type mismatch` 等连锁报错。
 - **Kotlin context parameters 需要 Kotlin 2.2+。** `LayerRecorder.kt` 用了
   `context(node: DelegatableNode)`，在本项目锁定的 Kotlin 2.0.21 上是解析错误
-  （`Syntax error: Expecting comma or ')'`）。改为把 `node` 作为显式首参传递，
-  两个调用点（`DrawBackdropModifier`、`LayerBackdropModifier`）同步更新。
-- **`CompositingStrategy` 的包名。** `androidx.compose.ui.graphics.CompositingStrategy`
-  与 `androidx.compose.ui.graphics.layer.CompositingStrategy` 只有后者是 1.7.x 的正式位置，
-  统一到 `graphics.layer`。
+   （`Syntax error: Expecting comma or ')'`）。改为把 `node` 作为显式首参传递，
+   两个调用点（`DrawBackdropModifier`、`LayerBackdropModifier`）同步更新。
+- **`CompositingStrategy` 有两个同名类，必须按宿主类型选用。** AndroidX 同时提供
+   `androidx.compose.ui.graphics.CompositingStrategy`（在 `ui-android` 模块）与
+   `androidx.compose.ui.graphics.layer.CompositingStrategy`（在 `ui-graphics` 模块），
+   两者成员相同（`Auto` / `Offscreen` / `ModulateAlpha`）但类型不兼容：
+   `GraphicsLayerScope.compositingStrategy` 声明的是前者，
+   `layer.GraphicsLayer.compositingStrategy` 声明的是后者。
+   结论由 `ui-android-1.7.8.aar` 与 `ui-graphics-android-1.7.8.aar` 的字节码直接核验：
+   `ui-android` 里 `GraphicsLayerScope` 的 `getCompositingStrategy--NrFUSI` 返回
+   `()I` 且常量池引用 `Landroidx/compose/ui/graphics/CompositingStrategy;`；
+   `ui-android` 中根本不存在 `layer/CompositingStrategy.class`。
+   因此 `InverseLayerScope`（实现 `GraphicsLayerScope`）与 `DrawBackdropModifier.layoutLayerBlock`
+   改用 `graphics.CompositingStrategy`；而 `ShadowModifier` / `InnerShadowModifier`
+   赋值给 `createGraphicsLayer()` 返回的 `layer.GraphicsLayer`，继续使用
+   `graphics.layer.CompositingStrategy`。
 - **`GraphicsLayerScope` 成员差异。** `blendMode` / `colorFilter` 在 AndroidX Compose 1.7.x
-  属于 `GraphicsLayer` 而非 `GraphicsLayerScope`，`InverseLayerScope` 不再 override 这两个成员。
-- **仓库自检加护栏**：`scripts/repo_check.py` 新增三条检查——禁止导入 AndroidX 的
-  `graphics.RuntimeShader`、禁止 Kotlin context parameters、强制 `CompositingStrategy`
-  来自 `graphics.layer`，并确认本地 `RuntimeShader` 接口仍然存在。这三类问题以后在 CI 第一步就会被拦下。
+   属于 `GraphicsLayer` 而非 `GraphicsLayerScope`，`InverseLayerScope` 不再 override 这两个成员。
+- **仓库自检加护栏**：`scripts/repo_check.py` 新增检查——禁止导入 AndroidX 的
+   `graphics.RuntimeShader`、禁止 Kotlin context parameters、确认本地 `RuntimeShader` 接口
+   仍然存在、禁止同一文件同时导入两个 `CompositingStrategy`、并阻止把
+   `graphics.layer.CompositingStrategy` 赋给 `GraphicsLayerScope`。这些检查只扫真实代码行
+   （跳过注释），且已通过双向自检：正常仓库 exit=0，注入错误写法后 exit=1 并给出精确文件行号。
+   这几类问题以后在 CI 第一步就会被拦下。
 - **Compose BOM 统一到 2025.03.00**（Compose UI 1.7.8），`compileSdk` / `targetSdk` 升到 35，
   CI 同步安装 `platforms;android-35`。
 - **`gradle.properties` 关闭 configuration cache**：本项目同时驱动 externalNativeBuild(CMake)

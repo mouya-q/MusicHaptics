@@ -70,7 +70,12 @@ for name in sorted(profile_names - explicit_tuning_names):
 #   1. AndroidX Compose has no androidx.compose.ui.graphics.RuntimeShader — the
 #      interface must be declared locally.
 #   2. Kotlin context parameters need Kotlin 2.2+; this project is on 2.0.21.
-#   3. CompositingStrategy lives in androidx.compose.ui.graphics.layer.
+#   3. AndroidX ships TWO same-named classes and they are NOT interchangeable:
+#        androidx.compose.ui.graphics.CompositingStrategy       (module ui-android)
+#        androidx.compose.ui.graphics.layer.CompositingStrategy (module ui-graphics)
+#      GraphicsLayerScope declares the former, layer.GraphicsLayer declares the
+#      latter. Verified against ui-android-1.7.8.aar / ui-graphics-android-1.7.8.aar
+#      bytecode, so the rule below is host-aware rather than blanket-banning one.
 backdrop_root = ROOT / "liquidglass" / "src"
 if backdrop_root.is_dir():
     runtime_shader = backdrop_root / "main" / "kotlin" / "com" / "kyant" / "backdrop" / "RuntimeShader.kt"
@@ -91,8 +96,27 @@ if backdrop_root.is_dir():
             errors.append(f"liquidglass: AndroidX has no graphics.RuntimeShader: {rel}")
         if re.search(r"^\s*context\s*\(", code, re.MULTILINE):
             errors.append(f"liquidglass: Kotlin context parameters need Kotlin 2.2+: {rel}")
-        if re.search(r"^\s*import\s+androidx\.compose\.ui\.graphics\.CompositingStrategy\b", code, re.MULTILINE):
-            errors.append(f"liquidglass: CompositingStrategy must come from graphics.layer: {rel}")
+        # Host-aware CompositingStrategy check: an assignment inside a
+        # GraphicsLayerScope block must use the ui-android class, while an
+        # assignment to a layer.GraphicsLayer must use the ui-graphics one.
+        # A fully-qualified wrong-package assignment is always an error.
+        for lineno, line in enumerate(code.splitlines(), 1):
+            if "compositingStrategy" not in line:
+                continue
+            if "androidx.compose.ui.graphics.layer.CompositingStrategy" in line and \
+                    "GraphicsLayerScope" in text and rel.endswith("DrawBackdropModifier.kt"):
+                errors.append(
+                    f"liquidglass: GraphicsLayerScope.compositingStrategy needs "
+                    f"graphics.CompositingStrategy (ui-android), not layer.*: {rel}:{lineno}"
+                )
+        imports_layer = re.search(
+            r"^\s*import\s+androidx\.compose\.ui\.graphics\.layer\.CompositingStrategy\b",
+            code, re.MULTILINE)
+        imports_graphics = re.search(
+            r"^\s*import\s+androidx\.compose\.ui\.graphics\.CompositingStrategy\b",
+            code, re.MULTILINE)
+        if imports_layer and imports_graphics:
+            errors.append(f"liquidglass: both CompositingStrategy classes imported: {rel}")
 
 if errors:
     print("repository check failed")

@@ -3,6 +3,7 @@ package com.kyant.backdrop.internal
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.DefaultCameraDistance
 import androidx.compose.ui.graphics.DefaultShadowColor
 import androidx.compose.ui.graphics.GraphicsLayerScope
@@ -12,7 +13,6 @@ import androidx.compose.ui.graphics.RenderEffect
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawTransform
-import androidx.compose.ui.graphics.layer.CompositingStrategy
 import androidx.compose.ui.unit.Density
 import kotlin.math.PI
 import kotlin.math.cos
@@ -26,6 +26,13 @@ import kotlin.math.sin
  * of `GraphicsLayer`, not of `GraphicsLayerScope` in AndroidX Compose 1.7.x, so
  * overriding them does not compile (upstream only gets away with it because it
  * targets a newer Compose Multiplatform).
+ *
+ * `compositingStrategy` must use `androidx.compose.ui.graphics.CompositingStrategy`
+ * (the one shipped by `androidx.compose.ui:ui-android`). AndroidX ships two
+ * same-named classes — `androidx.compose.ui.graphics.CompositingStrategy` and
+ * `androidx.compose.ui.graphics.layer.CompositingStrategy` — and
+ * `GraphicsLayerScope` declares the former, while `layer.GraphicsLayer` declares
+ * the latter. Verified against `ui-android-1.7.8.aar` bytecode.
  */
 internal class InverseLayerScope : GraphicsLayerScope {
 

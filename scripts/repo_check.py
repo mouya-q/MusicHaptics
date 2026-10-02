@@ -147,10 +147,17 @@ if app_src.is_dir():
         # ByteArray? is an unresolved reference.
         if re.search(r"ByteArray\?[^\n]*\.isNullOrEmpty\(\)", code):
             errors.append(f"app: isNullOrEmpty has no ByteArray? overload: {rel}")
-        # SharedPreferences.getAll() is exposed as Map<String, *>; a MutableMap
-        # override does not match the synthetic property type.
-        if "override val all: MutableMap" in code:
-            errors.append(f"app: SharedPreferences.all must be Map<String, *>: {rel}")
+        # SharedPreferences.getAll() must be implemented as a *function*: Kotlin does
+        # not expose it as an overridable `all` synthetic property on a Kotlin
+        # implementation of the Java interface. Writing `override val all: ...`
+        # yields "'all' overrides nothing" plus
+        # "does not implement abstract member 'getAll'".
+        if re.search(r"^\s*override\s+val\s+all\b", code, re.MULTILINE):
+            errors.append(
+                f"app: SharedPreferences.getAll() must be 'override fun getAll(): Map<String, *>': {rel}")
+        if ": SharedPreferences {" in code and "override fun getAll(" not in code:
+            errors.append(
+                f"app: SharedPreferences impl is missing 'override fun getAll()': {rel}")
 
 if errors:
     print("repository check failed")

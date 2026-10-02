@@ -97,11 +97,15 @@
   `Argument type mismatch: 'ByteArray?' but 'ByteArray' was expected` 与
   `Only safe (?.) ... on a nullable receiver`。改为显式
   `if (waveform == null || waveform.isEmpty()) return`，一次消掉 3 条错误。
-- **`SharedPreferences.all` 的覆盖类型错误。** Java 的 `getAll()` 返回 `Map<String, ?>`，
-  Kotlin 将其暴露为合成属性，类型是 `Map<String, *>`。原写法
-  `override val all: MutableMap<String, *>` 与合成属性类型不匹配，报
+- **`SharedPreferences.all` 不能作为属性覆盖。** Java 的 `getAll()` 返回 `Map<String, ?>`，
+  但 Kotlin **不会**为 Kotlin 类实现的 Java 接口生成可覆盖的 `all` 合成属性。
+  原写法 `override val all: MutableMap<String, *>` 与中间试过的
+  `override val all: Map<String, *>` 都同时报出
   `'all' overrides nothing` + `does not implement abstract member 'getAll'`。
-  改为 `override val all: Map<String, *>`。
+  正解是**按函数覆盖**：`override fun getAll(): Map<String, *> = values.toMutableMap()`。
+  这一点由多个成熟项目交叉验证（muzei/muzei、bitwarden/android、duckduckgo/Android、
+  LawnchairLauncher/lawnchair、Dev4Mod/WaEnhancer 均为 `override fun getAll(): Map<String, *>`）。
+  调用方沿用 `prefs.all` 属性语法不受影响，无需改动。
 - **Compose BOM 统一到 2025.03.00**（Compose UI 1.7.8），`compileSdk` / `targetSdk` 升到 35，
   CI 同步安装 `platforms;android-35`。
 - **`gradle.properties` 关闭 configuration cache**：本项目同时驱动 externalNativeBuild(CMake)

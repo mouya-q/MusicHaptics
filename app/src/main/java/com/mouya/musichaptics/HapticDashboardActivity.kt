@@ -143,6 +143,9 @@ private val LocalLiquidGlassBackdrop = staticCompositionLocalOf<LayerBackdrop?> 
 fun Modifier.liquidGlass(corner: Dp = 22.dp): Modifier {
     val backdrop = LocalLiquidGlassBackdrop.current
     val shape = RoundedCornerShape(corner)
+    // glassColor() is @Composable, so it must be read in composable scope; the
+    // onDrawSurface lambda below is a plain DrawScope lambda and cannot call it.
+    val glass = glassColor()
     return if (backdrop != null) {
         this.then(Modifier.drawBackdrop(
             backdrop = backdrop,
@@ -155,7 +158,7 @@ fun Modifier.liquidGlass(corner: Dp = 22.dp): Modifier {
             highlight = { Highlight.Default },
             shadow = { Shadow(radius = 22.dp, alpha = 0.42f) },
             onDrawSurface = {
-                drawRoundRect(glassColor(), cornerRadius = CornerRadius(corner.toPx()))
+                drawRoundRect(glass, cornerRadius = CornerRadius(corner.toPx()))
             }
         ))
     } else {
@@ -795,6 +798,12 @@ private fun LiquidGlassTabBar(
     val scope = rememberCoroutineScope()
     val barShape = RoundedCornerShape(28.dp)
     val lensShape = RoundedCornerShape(22.dp)
+    // Both colours come from @Composable helpers, so they must be resolved here
+    // in composable scope: the onDrawSurface lambdas below are plain DrawScope
+    // lambdas and cannot invoke @Composable functions.
+    val barGlass = glassColor()
+    val lensGlass =
+        if (isDark()) Color.White.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.70f)
 
     BoxWithConstraints(
         modifier
@@ -811,7 +820,7 @@ private fun LiquidGlassTabBar(
                 },
                 highlight = { Highlight.Default },
                 shadow = { Shadow(radius = 20.dp, alpha = 0.45f) },
-                onDrawSurface = { drawRoundRect(glassColor(), cornerRadius = CornerRadius(28.dp.toPx())) }
+                onDrawSurface = { drawRoundRect(barGlass, cornerRadius = CornerRadius(28.dp.toPx())) }
             )
             .padding(5.dp)
     ) {
@@ -852,7 +861,7 @@ private fun LiquidGlassTabBar(
                     effects = { vibrancy(); blur(12.dp.toPx()); lens(7f, 14f, depthEffect = true) },
                     highlight = { Highlight.Default },
                     shadow = { Shadow(radius = 10.dp, alpha = 0.30f) },
-                    onDrawSurface = { drawRoundRect(if (isDark()) Color.White.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.70f), cornerRadius = CornerRadius(22.dp.toPx())) }
+                    onDrawSurface = { drawRoundRect(lensGlass, cornerRadius = CornerRadius(22.dp.toPx())) }
                 )
         )
         Row(Modifier.fillMaxSize()) {

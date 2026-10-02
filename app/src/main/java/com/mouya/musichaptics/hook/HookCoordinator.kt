@@ -293,7 +293,7 @@ class HookCoordinator(
                     waveform: ByteArray?,
                     samplingRateHz: Int
                 ) {
-                    if (waveform.isNullOrEmpty()) return
+                    if (waveform == null || waveform.isEmpty()) return
                     val now = SystemClock.elapsedRealtime()
                     if (now - lastAudioWriteAtMs < PRIORITY_WINDOW_MS) return
                     engineOrNull()?.let { engine ->

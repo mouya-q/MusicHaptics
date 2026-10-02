@@ -118,6 +118,40 @@ if backdrop_root.is_dir():
         if imports_layer and imports_graphics:
             errors.append(f"liquidglass: both CompositingStrategy classes imported: {rel}")
 
+# ── app module invariants ───────────────────────────────────────────────────
+# HapticComposer.kt is the command vocabulary shared by HapticEventGenerator and
+# HapticSynthesizer. It was lost while the 5.x tree was rebuilt and cost a full
+# CI cycle to rediscover (78 errors, all cascading from this one missing file).
+composer = (ROOT / "app" / "src" / "main" / "java" / "com" / "mouya" / "musichaptics"
+            / "HapticComposer.kt")
+if not composer.exists():
+    errors.append("app: HapticComposer.kt is missing (HapticCommand/KeyStrikeSemantic/SemanticType)")
+else:
+    composer_text = composer.read_text(encoding="utf-8", errors="ignore")
+    for decl in ("enum class KeyStrikeSemantic", "enum class SemanticType",
+                 "data class HapticCommand"):
+        if decl not in composer_text:
+            errors.append(f"app: HapticComposer.kt no longer declares '{decl}'")
+
+app_src = ROOT / "app" / "src" / "main" / "java" / "com" / "mouya" / "musichaptics"
+if app_src.is_dir():
+    for path in sorted(app_src.rglob("*.kt")):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        rel = path.relative_to(ROOT).as_posix()
+        code = "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith(("//", "*", "/*"))
+        )
+        # kotlin.text.isNullOrEmpty has no ByteArray? overload: it only covers
+        # CharSequence? / Array<out T>? / Collection? / Map?. Calling it on a
+        # ByteArray? is an unresolved reference.
+        if re.search(r"ByteArray\?[^\n]*\.isNullOrEmpty\(\)", code):
+            errors.append(f"app: isNullOrEmpty has no ByteArray? overload: {rel}")
+        # SharedPreferences.getAll() is exposed as Map<String, *>; a MutableMap
+        # override does not match the synthetic property type.
+        if "override val all: MutableMap" in code:
+            errors.append(f"app: SharedPreferences.all must be Map<String, *>: {rel}")
+
 if errors:
     print("repository check failed")
     for error in errors:

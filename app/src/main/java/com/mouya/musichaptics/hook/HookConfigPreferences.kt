@@ -38,7 +38,10 @@ internal class HookConfigPreferences(
         values = next
     }
 
-    override val all: MutableMap<String, *> get() = values.toMutableMap()
+    // Java's SharedPreferences.getAll() returns Map<String, ?>, and Kotlin exposes it
+    // as a synthetic property whose type is Map<String, *>. Overriding it with a
+    // MutableMap type does not match, so this must stay Map<String, *>.
+    override val all: Map<String, *> get() = values.toMutableMap()
 
     override fun getString(key: String?, defValue: String?): String? =
         (key?.let { values[it] } as? String) ?: defValue

@@ -62,11 +62,46 @@
 - **`GraphicsLayerScope` 成员差异。** `blendMode` / `colorFilter` 在 AndroidX Compose 1.7.x
    属于 `GraphicsLayer` 而非 `GraphicsLayerScope`，`InverseLayerScope` 不再 override 这两个成员。
 - **仓库自检加护栏**：`scripts/repo_check.py` 新增检查——禁止导入 AndroidX 的
-   `graphics.RuntimeShader`、禁止 Kotlin context parameters、确认本地 `RuntimeShader` 接口
-   仍然存在、禁止同一文件同时导入两个 `CompositingStrategy`、并阻止把
-   `graphics.layer.CompositingStrategy` 赋给 `GraphicsLayerScope`。这些检查只扫真实代码行
-   （跳过注释），且已通过双向自检：正常仓库 exit=0，注入错误写法后 exit=1 并给出精确文件行号。
-   这几类问题以后在 CI 第一步就会被拦下。
+    `graphics.RuntimeShader`、禁止 Kotlin context parameters、确认本地 `RuntimeShader` 接口
+    仍然存在、禁止同一文件同时导入两个 `CompositingStrategy`、阻止把
+    `graphics.layer.CompositingStrategy` 赋给 `GraphicsLayerScope`、确认 `HapticComposer.kt`
+    及其三个类型声明仍在、阻止对 `ByteArray?` 调用 `isNullOrEmpty()`、阻止
+    `SharedPreferences.all` 被声明成 `MutableMap`。这些检查只扫真实代码行
+    （跳过注释），且已通过双向自检：正常仓库 exit=0，注入错误写法后 exit=1 并给出精确文件行号。
+    这几类问题以后在 CI 第一步就会被拦下。
+
+### 构建链修复（第二轮：`app` 模块）
+第一轮把 `:liquidglass` 修通后（72 条错误 → 0），CI 随即暴露出 `:app` 模块自身的
+78 条错误。根因与第一轮性质相同——都是重建 5.x 目录树时的遗漏：
+
+- **`HapticComposer.kt` 整个文件丢失（本版最大问题）。** `HapticEventGenerator.kt` 与
+  `HapticSynthesizer.kt` 大量引用 `HapticCommand`、`KeyStrikeSemantic`、`SemanticType`，
+  但这三个类型在整个 5.1.0 / 5.2.0 仓库中都不存在——它们只存在于 4.23 的
+  `HapticComposer.kt`，迁移时该文件被整份漏掉。78 条错误里有 70 条（89%）是它的级联：
+  `Unresolved reference 'KeyStrikeSemantic'` ×16、`'semanticType'` ×7、`'SemanticType'` ×6、
+  `'isBeat'` ×6、`'isKeyStrike'` ×6、`'keyStrikeSemantic'` ×5、`'bassComponent'` ×5、
+  `'pitch'` ×4、`'isTransient'` ×4、`'textureComponent'` ×3、`'adsrEnvelope'` ×2、
+  `'thermalGain'` ×2、`'HapticCommand'` ×1，以及由它们派生的
+  `None of the following candidates is applicable` ×1。已按 4.23 原文补回该文件
+  （7 个 `KeyStrikeSemantic` 值、7 个 `SemanticType` 值、12 个 `HapticCommand` 字段），
+  并加 KDoc 说明它是命令词表的唯一来源。
+- **`@Composable` 调用出现在非 composable 的 `onDrawSurface` 里（3 处）。**
+  `HapticDashboardActivity.kt` 的 `Modifier.liquidGlass()` 与 `LiquidGlassTabBar` 中，
+  `onDrawSurface = { drawRoundRect(glassColor(), ...) }` 的 lambda 是 `DrawScope` 接收者，
+  不是 composable 作用域，而 `glassColor()` / `isDark()` 都标了 `@Composable`。
+  改为在 composable 作用域先求值到局部变量（`glass`、`barGlass`、`lensGlass`）再在
+  lambda 内使用，顺带避免了每帧重算颜色。
+- **对 `ByteArray?` 调用 `isNullOrEmpty()`。** `kotlin.text.isNullOrEmpty` 只有
+  `CharSequence?` / `Array<out T>?` / `Collection?` / `Map?` 四个重载，**没有 `ByteArray?`**，
+  因此 `HookCoordinator.kt:296` 报 Unresolved，并连带 302 行的
+  `Argument type mismatch: 'ByteArray?' but 'ByteArray' was expected` 与
+  `Only safe (?.) ... on a nullable receiver`。改为显式
+  `if (waveform == null || waveform.isEmpty()) return`，一次消掉 3 条错误。
+- **`SharedPreferences.all` 的覆盖类型错误。** Java 的 `getAll()` 返回 `Map<String, ?>`，
+  Kotlin 将其暴露为合成属性，类型是 `Map<String, *>`。原写法
+  `override val all: MutableMap<String, *>` 与合成属性类型不匹配，报
+  `'all' overrides nothing` + `does not implement abstract member 'getAll'`。
+  改为 `override val all: Map<String, *>`。
 - **Compose BOM 统一到 2025.03.00**（Compose UI 1.7.8），`compileSdk` / `targetSdk` 升到 35，
   CI 同步安装 `platforms;android-35`。
 - **`gradle.properties` 关闭 configuration cache**：本项目同时驱动 externalNativeBuild(CMake)

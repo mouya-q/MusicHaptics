@@ -15,6 +15,15 @@ object ConsoleLogArchive {
     private const val FILE_NAME = "console.log"
     private const val MAX_LINES = 300
     private const val MAX_BYTES = 192 * 1024
+    private const val FLUSH_INTERVAL_MS = 750L
+    private const val FLUSH_CHAR_THRESHOLD = 4096
+
+    // Lines are buffered in memory and flushed in batches; the old code issued
+    // a file open/write/close per log line, which shows up as UI-process I/O
+    // storms when the hooked apps stream diagnostics.
+    private val pending = StringBuilder()
+    private var lastFlushMs = 0L
+    private var flushesSinceSizeCheck = 0
 
     private fun file(context: Context): File = File(context.filesDir, DIRECTORY).apply { mkdirs() }
         .resolve(FILE_NAME)
@@ -27,6 +36,7 @@ object ConsoleLogArchive {
     @Synchronized
     fun replace(context: Context, lines: List<String>) {
         try {
+            pending.setLength(0)
             val target = file(context)
             val retained = lines.takeLast(MAX_LINES)
             target.writeText(retained.joinToString(separator = "\n", postfix = if (retained.isEmpty()) "" else "\n"))
@@ -36,10 +46,36 @@ object ConsoleLogArchive {
     @Synchronized
     fun append(context: Context, line: String) {
         try {
-            val target = file(context)
-            target.appendText(line + "\n")
-            if (target.length() > MAX_BYTES) replace(context, target.readLines().takeLast(MAX_LINES))
+            pending.append(line).append('\n')
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (pending.length >= FLUSH_CHAR_THRESHOLD || now - lastFlushMs >= FLUSH_INTERVAL_MS) {
+                flushLocked(context, now)
+            }
         } catch (_: Exception) { }
+    }
+
+    /** Persists any buffered lines; safe to call from lifecycle onStop(). */
+    @Synchronized
+    fun flush(context: Context) {
+        try {
+            if (pending.isNotEmpty()) flushLocked(context, android.os.SystemClock.elapsedRealtime())
+        } catch (_: Exception) { }
+    }
+
+    private fun flushLocked(context: Context, nowMs: Long) {
+        if (pending.isEmpty()) return
+        val target = file(context)
+        target.appendText(pending.toString())
+        pending.setLength(0)
+        lastFlushMs = nowMs
+        // Size capping is amortized: checking length on every line is a syscall
+        // per log entry, so only re-trim every 16 flushes.
+        if (++flushesSinceSizeCheck >= 16) {
+            flushesSinceSizeCheck = 0
+            if (target.length() > MAX_BYTES) {
+                replace(context, target.readLines().takeLast(MAX_LINES))
+            }
+        }
     }
 
     @Synchronized

@@ -7,8 +7,17 @@ import androidx.compose.ui.node.requireDensity
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.toIntSize
 
-context(node: DelegatableNode)
+/**
+ * Records [block] into [layer], re-scoping the draw density to the density of
+ * the owning [node].
+ *
+ * Upstream writes this with Kotlin context parameters
+ * (`context(node: DelegatableNode)`), which needs the `context-parameters`
+ * language feature (Kotlin 2.2+). This project is pinned to Kotlin 2.0.21 where
+ * that syntax is a hard parse error, so the receiver is passed explicitly.
+ */
 internal fun DrawScope.recordLayer(
+    node: DelegatableNode,
     layer: GraphicsLayer,
     size: IntSize = this.size.toIntSize(),
     block: DrawScope.() -> Unit

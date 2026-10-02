@@ -1,14 +1,82 @@
-# CHANGED
+# Changelog
+
+## 5.2.0 — 全链路性能打磨 (2026-10-02)
+
+### Native DSP（最大收益）
+- **音高估计 16× 提速**：`estimatePitch` 自相关先做 4× 盒式抽取（12kHz），滞后扫描 1212×256 ≈ 31 万次乘加 → 300×64 ≈ 1.9 万次；附带静音门控，安静段落直接跳过扫描。
+- **Hann 窗预计算**：`updateSpectrum` 每个音频块不再执行 512 次 `cosf`，窗函数只算一次。
+- **JNI 遥测零拷贝**：`nativeProcessAudioDirect` 改用 `GetPrimitiveArrayCritical`，消除每个音频块两次 32-float 数组拷贝。
+- **调度线程 JNI 缓存**：四个事件名字符串改为全局引用缓存，每次节拍不再 `NewStringUTF`/`DeleteLocalRef`；退出时先删引用再 detach，去掉多余的二次 attach。
+- **修复 JNI 弱引用误用**：Java Pipe 回調路径对 weak-global-ref 直接 `GetObjectClass`，GC 后可能悬空——改为 `NewLocalRef` 提升后再调用。
+- **直驱日志降频**：200Hz 触发路径上的周期日志从每 100ms 降为每 10s，空闲日志 200ms → 12s。
+
+### Kotlin 热路径
+- **AudioIngress 批量写**：四路 PCM 入口（short[]/float[]/byte[]/ByteBuffer）由逐样本 `FloatBuffer.put`（直接缓冲区上的虚调用）改为堆数组暂存 + 单次批量 `put`（内联 intrinsic 拷贝）。
+- **LinkHealthMonitor.setPlayingState 去抖**：该函数在每个 `AudioTrack.write` 上被调用，原实现每次都写 volatile + 打日志，现仅在状态真正翻转时生效。
+- **Root pipe 零分配**：`triggerRootPipeVibration`（200Hz）的 `"G0x%02x\n".format()` 字符串格式化替换为 201/256 项预编码字节表。
+- **禁用期不再每帧 cancel**：`processAudioFrame` 在总开关关闭时只发送一次 `Vibrator.cancel()`。
+- **日志门控**：节拍事件、`[C++-ONSET]`、VibrateProxy 每次振动等热路径日志统一收进 `verboseLogging`（默认 = BuildConfig.DEBUG）。
+
+### 正确性修复
+- **能量浪涌检测复活**：`generateAndPlay` 中 `accumulatedEnergy` 先清零再判断 `isEnergySurge(...)`，导致该分支永假；mood 包络也同时被拍平。现调整求值顺序，Drop 波形与情绪包络恢复生效。
+- **HapticEventGenerator 去重**：四份复制的 vibrator 回退解析合并为 `resolveVibrator()`。
+
+### 日志/广播链路
+- **LogBroadcaster 限流**：跨进程 `sendBroadcast` 增加 16 条/秒滑动窗口限流，防止异常状态下刷爆 system_server。
+- **ConsoleLogArchive 批量落盘**：每条日志一次 open/write/close → 内存缓冲 750ms/4KB 批量 flush；文件长度检查摊销到每 16 次 flush；UI 退到后台时兜底 flush。
+- **ConsoleLogState 批量裁剪**：300 条上限处由逐条 `removeAt(0)`（O(n) 搬移）改为每次裁 32 条。
+### 构建
+- **Release 开启 R8 + 资源压缩**：配套完整 keep 规则（Xposed 入口、JNI 方法与回调、Manifest 组件、LSPosed 服务回调）。
+- **CMake**：去掉 `-fno-omit-frame-pointer`，新增 `-ffunction-sections -fdata-sections -fvisibility-inlines-hidden`，链接 `-Wl,--gc-sections --icf=all`，缩小注入到每个宿主进程的 .so。
+- **Gradle**：开启并行构建、构建缓存、Kotlin 增量编译。
+
+### 构建链修复（本版性能改动本身不动，只修编译）
+5.2.0 的性能代码方向正确，但 `:liquidglass` 模块是从 Compose Multiplatform 库整体搬来的，
+在 AndroidX Compose 上有三处硬编译错误，共 72 条。逐条定位如下：
+
+- **`RuntimeShader` 不是 AndroidX 的类型。** 上游把 `interface RuntimeShader` 放在 `commonMain`，
+  只有工厂函数是 `expect/actual`；搬运时只带了 `androidMain` 实现，接口声明丢失，
+  而 `import androidx.compose.ui.graphics.RuntimeShader` 在 AndroidX Compose 里根本不存在
+  （已用 ui-graphics 1.7.8 / 1.8.2 的 classes.jar 逐类核对，两版都没有该类型）。
+  现在接口在 `com.kyant.backdrop` 内本地声明，不再依赖任何 AndroidX 同名类型。
+  这一条同时消掉 `setFloatUniform/setIntUniform/setColorUniform overrides nothing`、
+  `Cannot infer type`、`Argument type mismatch` 等连锁报错。
+- **Kotlin context parameters 需要 Kotlin 2.2+。** `LayerRecorder.kt` 用了
+  `context(node: DelegatableNode)`，在本项目锁定的 Kotlin 2.0.21 上是解析错误
+  （`Syntax error: Expecting comma or ')'`）。改为把 `node` 作为显式首参传递，
+  两个调用点（`DrawBackdropModifier`、`LayerBackdropModifier`）同步更新。
+- **`CompositingStrategy` 的包名。** `androidx.compose.ui.graphics.CompositingStrategy`
+  与 `androidx.compose.ui.graphics.layer.CompositingStrategy` 只有后者是 1.7.x 的正式位置，
+  统一到 `graphics.layer`。
+- **`GraphicsLayerScope` 成员差异。** `blendMode` / `colorFilter` 在 AndroidX Compose 1.7.x
+  属于 `GraphicsLayer` 而非 `GraphicsLayerScope`，`InverseLayerScope` 不再 override 这两个成员。
+- **仓库自检加护栏**：`scripts/repo_check.py` 新增三条检查——禁止导入 AndroidX 的
+  `graphics.RuntimeShader`、禁止 Kotlin context parameters、强制 `CompositingStrategy`
+  来自 `graphics.layer`，并确认本地 `RuntimeShader` 接口仍然存在。这三类问题以后在 CI 第一步就会被拦下。
+- **Compose BOM 统一到 2025.03.00**（Compose UI 1.7.8），`compileSdk` / `targetSdk` 升到 35，
+  CI 同步安装 `platforms;android-35`。
+- **`gradle.properties` 关闭 configuration cache**：本项目同时驱动 externalNativeBuild(CMake)
+  与 R8 release 变体，AGP 8.7 的配置缓存在这两条路径上仍有边界问题，缓存未命中会直接变成构建失败，
+  不值得为此冒险。并行构建、构建缓存、Kotlin 增量编译保留。
+- **恢复 `local-maven` 本地仓库**：`de.robv.android.xposed:api:82` 以 vendored 形式入库，
+  并在 `settings.gradle.kts` 重新声明，避免 CI 去访问常年不可达的 `api.xposed.info`。
+- **CI 不再使用 `android-actions/setup-android@v3`**：该 action 会执行 `sdkmanager tools`，
+  而 legacy `tools` 包已从 Google SDK 仓库下架，必然以 exit 1 中断构建；改为直接定位
+  runner 预装的 SDK 并用 `sdkmanager` 安装缺失组件。
+- **R8 规则补充**：`-dontwarn` 覆盖 `org.jetbrains.annotations`、`org.intellij.lang.annotations`
+  与 `androidx.compose.**`，避免 shrink 阶段因缺失注解类报错。
+
+
 
 ## 5.1.0 — 2026-10-02
 
-在 5.0 架构基础上，将“机型适配”从少数 Build 判断提升成贯穿 DSP → 事件层 → 输出层的多机型适配链
+这次是在 5.0 架构基础上，把“机型适配”从少数 Build 判断提升成真正贯穿 DSP → 事件层 → 输出层的多机型适配链。
 
 ### 多机型深度适配
 
-- `DeviceTuningRegistry` 覆盖 `DeviceProfile.kt` 中全部命名机型档案：Xiaomi / Redmi / OnePlus / OPPO / Lenovo / Samsung / vivo/iQOO；`FLAGSHIP_XAXIS` 只作为现代旗舰 fallback。
+- `DeviceTuningRegistry` 不再只识别 `umi / cmi / thyme`，现在覆盖 `DeviceProfile.kt` 中全部命名机型档案：Xiaomi / Redmi / OnePlus / OPPO / Lenovo / Samsung / vivo/iQOO；`FLAGSHIP_XAXIS` 只作为现代旗舰 fallback。
 - `HapticImpactPolicy` 改为按已经解析完成的 `DeviceProfile` 取 tuning，避免再次用一套 `Build.DEVICE` 判断覆盖掉 Root fingerprint 已确定的机型。
-- `VibrateProxy.init(profile)` 接收最终 profile；`DEFAULT_AMPLITUDE` 兼容策略不再硬编码
+- `VibrateProxy.init(profile)` 接收最终 profile；`DEFAULT_AMPLITUDE` 兼容策略不再硬编码为 Xiaomi 10 条件。
 - `DeviceProfile` 的 DSP 参数现在通过新增 JNI 配置入口真正进入 Native：low-band profile gain、KICK/SNARE onset 权重、DSP floor、high-frequency texture 权重和 per-band refractory；同时修正 VOCAL / BODY onset 的归一化门控，避免原有阈值组合导致永远触发不到。
 - `RootHardwareProbe` 的 fingerprint 解析与 `DeviceProfile` 保持同一机型矩阵；补齐 Xiaomi 13/14/15 Ultra、14 Pro、15 Pro、17 Pro 的 codename/model 别名，并保留移植 ROM 旧别名；同时补充 AW86224 / Qualcomm haptic 家族的已知入口扫描。
 - 对 Xiaomi Ultra / Redmi K70 Ultra / K80 的判断增加优先级，避免产品名中的 `Ultra` 把 Redmi Ultra 机型误判成 Xiaomi Ultra；13/14/15 Ultra 均能命中已有 `XIAOMI_ULTRA` 档。
@@ -61,7 +129,7 @@
 
 ### 仓库
 
-- 删除字体资源
+- 删除 PingFang 字体资源。
 - 删除重复 C++ 源码、`cpp_disabled`、临时 patch、debug keystore、本地 Maven 缓存和其他构建垃圾。
 - 删除未参与主链路的旧版音频 / 触觉缓存实现与无调用 RichTap 包装层。
 - 补充 `LICENSE`、`CONTRIBUTING.md`、`SECURITY.md`、`docs/ARCHITECTURE.md` 和 `scripts/repo_check.py`。
@@ -84,5 +152,5 @@
 1. LSPosed 作用域是否正确；
 2. MusicHapticsX 白名单是否包含目标包；
 3. 硬件检测结果是否仍然有效；
-4. 是否正在走 `strike-only` 直驱；
+4. Xiaomi 10 是否正在走 `strike-only` 直驱；
 5. 无直驱权限时是否正确回退到 Android Vibrator。

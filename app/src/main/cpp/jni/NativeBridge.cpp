@@ -351,7 +351,11 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
             }
         }
         if (env) {
-            jobject bridge = g_java_pipe_bridge.load(std::memory_order_acquire);
+            jobject weak = g_java_pipe_bridge.load(std::memory_order_acquire);
+            // g_java_pipe_bridge is a WEAK global ref: it must be promoted to a
+            // strong local ref before use, otherwise the VM may have cleared it
+            // and every call below would operate on a dangling object.
+            jobject bridge = weak ? env->NewLocalRef(weak) : nullptr;
             if (bridge) {
                 jclass cls = env->GetObjectClass(bridge);
                 if (cls) {
@@ -365,12 +369,13 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
                     }
                     env->DeleteLocalRef(cls);
                 }
+                env->DeleteLocalRef(bridge);
             }
         }
         if (attached) g_jvm->DetachCurrentThread();
 
         int tick = g_dd_tick_count.fetch_add(1, std::memory_order_relaxed);
-        if (tick % 20 == 0) {
+        if (tick % 2000 == 0) {
             LOGI("[DD-JAVA] tick=%d amp=%d dur=%d", tick, amplitude, duration_ms);
         }
         return;
@@ -389,7 +394,7 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
 
         // Periodic diagnostic
         int tick = g_dd_tick_count.fetch_add(1, std::memory_order_relaxed);
-        if (tick % 20 == 0) {
+        if (tick % 2000 == 0) {
             LOGI("[DD-UDP] tick=%d amp=%d dur=%d sent=%s",
                  tick, amplitude, duration_ms, ok ? "OK" : "FAIL");
         }
@@ -435,7 +440,7 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
 
         // Periodic diagnostic
         int tick = g_dd_tick_count.fetch_add(1, std::memory_order_relaxed);
-        if (tick % 20 == 0) {
+        if (tick % 2000 == 0) {
             LOGI("[DD-ROOT] tick=%d amp=%d written=%zd cmd=%s",
                  tick, amplitude, written, cmd);
         }
@@ -495,7 +500,7 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
 
     // Periodic diagnostic (every 20 ticks = 100ms at 5ms/tick)
     int tick = g_dd_tick_count.fetch_add(1, std::memory_order_relaxed);
-    if (tick % 20 == 0) {
+    if (tick % 2000 == 0) {
         LOGI("[DD] tick=%d dur=%d amp=%d ampWritten=%zd enableWritten=%zd aw8697=%d",
              tick, duration_ms, amplitude, ampWritten, durWritten, isAW8697 ? 1 : 0);
     }
@@ -536,6 +541,14 @@ static void* scheduler_thread_func(void* arg) {
     if (!onBeatTrigger) {
         LOGW("[DD] beat callback method unavailable; event output disabled");
     }
+
+    // Cache the four event-name strings as global refs. The old code ran
+    // NewStringUTF + DeleteLocalRef on every single beat; with cached globals
+    // the per-beat JNI cost drops to a bare CallVoidMethod.
+    jstring evKick  = onBeatTrigger ? (jstring)env->NewGlobalRef(env->NewStringUTF("KICK"))  : nullptr;
+    jstring evSnare = onBeatTrigger ? (jstring)env->NewGlobalRef(env->NewStringUTF("SNARE")) : nullptr;
+    jstring evVocal = onBeatTrigger ? (jstring)env->NewGlobalRef(env->NewStringUTF("VOCAL")) : nullptr;
+    jstring evBody  = onBeatTrigger ? (jstring)env->NewGlobalRef(env->NewStringUTF("BODY"))  : nullptr;
 
     // 5ms precise timing using absolute-time clock_nanosleep
     const long frame_period_ns = 5000000L;  // 5ms for 200Hz Control Loop
@@ -606,11 +619,11 @@ static void* scheduler_thread_func(void* arg) {
                         const int intensity = static_cast<int>(std::clamp(
                             eventValue * (eventType == 1 ? 255.0f : eventType == 2 ? 220.0f : eventType == 3 ? 170.0f : 150.0f),
                             18.0f, 255.0f));
-                        const char* eventName = eventType == 1 ? "KICK" : eventType == 2 ? "SNARE" : eventType == 3 ? "VOCAL" : "BODY";
-                        jstring eventStr = env->NewStringUTF(eventName);
-                        env->CallVoidMethod(bridgeRef, onBeatTrigger, eventStr, static_cast<jint>(intensity));
-                        env->DeleteLocalRef(eventStr);
-                        if (env->ExceptionCheck()) env->ExceptionClear();
+                        jstring eventName = eventType == 1 ? evKick : eventType == 2 ? evSnare : eventType == 3 ? evVocal : evBody;
+                        if (eventName) {
+                            env->CallVoidMethod(bridgeRef, onBeatTrigger, eventName, static_cast<jint>(intensity));
+                            if (env->ExceptionCheck()) env->ExceptionClear();
+                        }
                     }
 
                     // Hardware nodes named "activate" are usually one-shot waveform
@@ -622,8 +635,8 @@ static void* scheduler_thread_func(void* arg) {
                                 eventValue * (eventType == 1 ? 255.0f : eventType == 2 ? 220.0f : eventType == 3 ? 170.0f : 150.0f),
                                 18.0f, 255.0f));
                             trigger_direct_drive(duration, amplitude);
-                        }
                     }
+                    // Refractory window re-arms only when an event actually fired.
                     g_last_beat_trigger_ns = nowNs;
                 }
             }
@@ -676,7 +689,7 @@ static void* scheduler_thread_func(void* arg) {
                     const float acceleration = (currentAmp / 255.0f) - (spring_k * lra_position) - (damping_c * lra_velocity);
                     lra_velocity += acceleration;
                     lra_position += lra_velocity;
-                } else if (g_dd_tick_count.load(std::memory_order_relaxed) % 40 == 0) {
+                } else if (g_dd_tick_count.load(std::memory_order_relaxed) % 2400 == 0) {
                     LOGI("[DD] idle (no audio), currentAmp=%.1f", currentAmp);
                 }
             } else {
@@ -698,15 +711,14 @@ static void* scheduler_thread_func(void* arg) {
 
     LOGI("[DD] scheduler thread exiting");
 
-    // Thread exit: detach and clean up the global ref
+    // Thread exit: release all JNI refs while still attached (the old code
+    // detached first and then re-attached just to delete one global ref).
+    env->DeleteGlobalRef(bridgeRef);
+    if (evKick)  env->DeleteGlobalRef(evKick);
+    if (evSnare) env->DeleteGlobalRef(evSnare);
+    if (evVocal) env->DeleteGlobalRef(evVocal);
+    if (evBody)  env->DeleteGlobalRef(evBody);
     g_jvm->DetachCurrentThread();
-
-    // Re-attach briefly to delete the global ref
-    JNIEnv* cleanupEnv = nullptr;
-    if (g_jvm->AttachCurrentThread(&cleanupEnv, nullptr) == JNI_OK) {
-        cleanupEnv->DeleteGlobalRef(bridgeRef);
-        g_jvm->DetachCurrentThread();
-    }
     g_bridge_ref.store(nullptr, std::memory_order_relaxed);
 
     return nullptr;
@@ -781,20 +793,21 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigureProfile(
 JNIEXPORT void JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
     JNIEnv* env, jobject thiz, jlong ptr, jobject directInputBuffer, jint size, jfloatArray outTelemetry) {
-    
+
     auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
     if (!engine || !directInputBuffer || !outTelemetry) return;
 
     auto* inputPtr = static_cast<float*>(env->GetDirectBufferAddress(directInputBuffer));
     if (!inputPtr) return;
 
-    jfloat* telemetry = env->GetFloatArrayElements(outTelemetry, nullptr);
+    // GetPrimitiveArrayCritical avoids the copy-in/copy-out pair that
+    // GetFloatArrayElements performs on ART. The critical section only spans
+    // the pure-C++ DSP pass (no JNI calls inside), which is tens of µs —
+    // short enough to never stall the GC.
+    jfloat* telemetry = static_cast<jfloat*>(env->GetPrimitiveArrayCritical(outTelemetry, nullptr));
     if (!telemetry) return;
-
     engine->processAudioBlock(inputPtr, size, telemetry);
-
-    // 核心：第 3 个参数必须是 0，保证将 C++ 写入的数据刷新回 Java 数组！
-    env->ReleaseFloatArrayElements(outTelemetry, telemetry, 0);
+    env->ReleasePrimitiveArrayCritical(outTelemetry, telemetry, 0);
 }
 
 // ═════════════════════════════════════════════════════════════════

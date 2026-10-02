@@ -12,12 +12,13 @@ android {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
         targetSdk = 35
-        versionCode = 50100
-        versionName = "5.1.0"
+        versionCode = 50200
+        versionName = "5.2.0"
         ndkVersion = "27.0.12077973"
         // 云编译（GitHub Actions）环境下由 Gradle 直接驱动 CMake 编译 C++，
         // 使用 c++_static 静态链接 libc++，避免注入宿主进程时与旧版 libc++_shared.so 符号冲突。
         // DSP 引擎使用 ARM NEON SIMD 指令，仅支持 ARM 架构（arm64-v8a / armeabi-v7a）。
+        // x86/x86_64 设备在现代 Android 生态中极少，且本项目目标设备（小米 10）为 arm64。
         ndk {
             // Only arm64-v8a for the supported target-device set.
             // This keeps the injected Native DSP binary small and matches the current profiles.
@@ -31,7 +32,12 @@ android {
             // 如果环境变量不存在，则使用默认调试签名
         }
         release {
-            isMinifyEnabled = false
+            // R8 full-mode shrinking + resource shrinking: the module APK is
+            // downloaded/installed per device and its classes are loaded into
+            // every hooked process, so a smaller dex measurably cuts inject
+            // time. Entry points are protected in proguard-rules.pro.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

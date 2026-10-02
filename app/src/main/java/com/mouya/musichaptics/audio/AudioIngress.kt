@@ -33,6 +33,10 @@ class AudioIngress(
             .allocateDirect(MAX_BATCH_FRAMES * 4)
             .order(ByteOrder.nativeOrder())
         val mono: FloatBuffer = pcm.asFloatBuffer()
+        // Scratch for the downmix: writing a plain heap array per sample is far
+        // cheaper than per-sample virtual put() calls on a direct FloatBuffer,
+        // and the final bulk put() compiles down to an intrinsic copy.
+        val scratch = FloatArray(MAX_BATCH_FRAMES)
         val telemetry = FloatArray(TELEMETRY_SIZE)
         val readySequence = AtomicLong(0L)
         var frames = 0
@@ -72,22 +76,23 @@ class AudioIngress(
             if (sequence < 0L) break
             val slot = slots[(sequence.toInt() and (QUEUE_CAPACITY - 1))]
             val mono = slot.mono
-            mono.clear()
+            val scratch = slot.scratch
             var src = safeOffset + frameOffset * channels
             when (channels) {
-                1 -> repeat(batch) { mono.put(data[src++].toFloat() / 32768f) }
-                2 -> repeat(batch) {
+                1 -> for (i in 0 until batch) { scratch[i] = data[src++].toFloat() / 32768f }
+                2 -> for (i in 0 until batch) {
                     val left = data[src++].toInt()
                     val right = data[src++].toInt()
-                    mono.put((left + right) * (1f / 65536f))
+                    scratch[i] = (left + right) * (1f / 65536f)
                 }
-                else -> repeat(batch) {
+                else -> for (i in 0 until batch) {
                     var sum = 0f
                     repeat(channels) { sum += data[src++].toFloat() }
-                    mono.put(sum / (channels * 32768f))
+                    scratch[i] = sum / (channels * 32768f)
                 }
             }
-            mono.flip()
+            mono.clear()
+            mono.put(scratch, 0, batch)
             publish(sequence, slot, batch)
             frameOffset += batch
         }
@@ -113,18 +118,19 @@ class AudioIngress(
             if (sequence < 0L) break
             val slot = slots[(sequence.toInt() and (QUEUE_CAPACITY - 1))]
             val mono = slot.mono
-            mono.clear()
+            val scratch = slot.scratch
             var src = (start + frameOffset) * ch
             if (ch == 1) {
-                repeat(batch) { mono.put(data[src++].coerceIn(-1f, 1f)) }
+                for (i in 0 until batch) { scratch[i] = data[src++].coerceIn(-1f, 1f) }
             } else {
-                repeat(batch) {
+                for (i in 0 until batch) {
                     var sum = 0f
                     repeat(ch) { sum += data[src++] }
-                    mono.put((sum / ch).coerceIn(-1f, 1f))
+                    scratch[i] = (sum / ch).coerceIn(-1f, 1f)
                 }
             }
-            mono.flip()
+            mono.clear()
+            mono.put(scratch, 0, batch)
             publish(sequence, slot, batch)
             frameOffset += batch
         }
@@ -150,24 +156,25 @@ class AudioIngress(
             if (sequence < 0L) break
             val slot = slots[(sequence.toInt() and (QUEUE_CAPACITY - 1))]
             val mono = slot.mono
-            mono.clear()
+            val scratch = slot.scratch
             var p = safeOffset + frameOffset * ch * 2
             if (ch == 1) {
-                repeat(batch) {
-                    mono.put(readLeShort(data, p) / 32768f)
+                for (i in 0 until batch) {
+                    scratch[i] = readLeShort(data, p) / 32768f
                     p += 2
                 }
             } else {
-                repeat(batch) {
+                for (i in 0 until batch) {
                     var sum = 0
                     repeat(ch) {
                         sum += readLeShort(data, p).toInt()
                         p += 2
                     }
-                    mono.put(sum / (ch * 32768f))
+                    scratch[i] = sum / (ch * 32768f)
                 }
             }
-            mono.flip()
+            mono.clear()
+            mono.put(scratch, 0, batch)
             publish(sequence, slot, batch)
             frameOffset += batch
         }
@@ -194,24 +201,25 @@ class AudioIngress(
             if (sequence < 0L) break
             val slot = slots[(sequence.toInt() and (QUEUE_CAPACITY - 1))]
             val mono = slot.mono
-            mono.clear()
+            val scratch = slot.scratch
             var pos = start + frameOffset * ch * 2
             if (ch == 1) {
-                repeat(batch) {
-                    mono.put(buffer.getShort(pos).toFloat() / 32768f)
+                for (i in 0 until batch) {
+                    scratch[i] = buffer.getShort(pos).toFloat() / 32768f
                     pos += 2
                 }
             } else {
-                repeat(batch) {
+                for (i in 0 until batch) {
                     var sum = 0
                     repeat(ch) {
                         sum += buffer.getShort(pos).toInt()
                         pos += 2
                     }
-                    mono.put(sum / (ch * 32768f))
+                    scratch[i] = sum / (ch * 32768f)
                 }
             }
-            mono.flip()
+            mono.clear()
+            mono.put(scratch, 0, batch)
             publish(sequence, slot, batch)
             frameOffset += batch
         }

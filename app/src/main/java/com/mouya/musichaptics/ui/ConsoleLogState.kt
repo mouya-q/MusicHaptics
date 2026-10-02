@@ -13,6 +13,10 @@ import com.mouya.musichaptics.LogBroadcaster
 class ConsoleLogState(private val context: Context) : DefaultLifecycleObserver {
 
     private val MAX_LOGS = 300
+    // Trim in batches instead of one removeAt(0) per appended line: each
+    // removeAt(0) shifts the whole snapshot list, so per-line trimming was
+    // O(n) per log. Batch trimming amortizes the shift.
+    private val TRIM_BATCH = 32
     private val appContext = context.applicationContext
     private val logQueue = mutableStateListOf<String>().apply {
         addAll(ConsoleLogArchive.load(appContext))
@@ -21,7 +25,10 @@ class ConsoleLogState(private val context: Context) : DefaultLifecycleObserver {
     val logs = logQueue
 
     private fun addLog(message: String) {
-        if (logQueue.size >= MAX_LOGS) logQueue.removeAt(0)
+        if (logQueue.size >= MAX_LOGS) {
+            val removeCount = minOf(TRIM_BATCH, logQueue.size)
+            repeat(removeCount) { logQueue.removeAt(0) }
+        }
         logQueue.add(message)
         ConsoleLogArchive.append(appContext, message)
     }
@@ -29,6 +36,11 @@ class ConsoleLogState(private val context: Context) : DefaultLifecycleObserver {
     fun clear() {
         logQueue.clear()
         ConsoleLogArchive.replace(appContext, emptyList())
+    }
+
+    override fun onStop(owner: LifecycleOwner) {
+        // Best-effort durability for buffered lines when the UI goes away.
+        ConsoleLogArchive.flush(appContext)
     }
 
     fun exportToDownloads(): Result<String> = ConsoleLogArchive.exportToDownloads(appContext, logQueue.toList())

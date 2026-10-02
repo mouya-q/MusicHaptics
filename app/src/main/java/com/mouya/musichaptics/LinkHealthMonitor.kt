@@ -174,6 +174,9 @@ object LinkHealthMonitor {
     }
 
     fun setPlayingState(playing: Boolean) {
+        // Called from the PCM hot path (once per AudioTrack.write). Only pay
+        // for the write + log when the state actually flips.
+        if (isPlaying == playing) return
         isPlaying = playing
         lastPlayStateChangeMs = SystemClock.elapsedRealtime()
         Log.d(TAG, "Play state changed: isPlaying=$playing")

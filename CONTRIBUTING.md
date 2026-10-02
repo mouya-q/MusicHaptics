@@ -2,6 +2,17 @@
 
 感谢贡献代码、测试结果和设备适配数据。
 
+## 提交前
+
+运行：
+
+```bash
+python3 scripts/repo_check.py
+./gradlew assembleDebug
+```
+
+Android 构建需要 JDK 17、SDK 34、NDK 27.0.12077973 和 CMake 3.22.1。
+
 ## 改动原则
 
 - Hook 代码优先保证宿主音频线程延迟，不在 `AudioTrack.write()` 回调里做 FFT、Root 命令或阻塞 IPC。

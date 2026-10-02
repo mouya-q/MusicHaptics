@@ -63,6 +63,37 @@ explicit_tuning_names = set(re.findall(r"DeviceProfile\.([A-Z0-9_]+)\s*->\s*Devi
 for name in sorted(profile_names - explicit_tuning_names):
     errors.append(f"DeviceProfile has no explicit DeviceTuning branch: {name}")
 
+# ── Vendored com.kyant.backdrop source invariants ───────────────────────────
+# The :liquidglass module is a copy of a Compose Multiplatform library running
+# on plain AndroidX Compose. Three things silently break that port and each of
+# them costs a full CI cycle to rediscover, so fail fast here instead:
+#   1. AndroidX Compose has no androidx.compose.ui.graphics.RuntimeShader — the
+#      interface must be declared locally.
+#   2. Kotlin context parameters need Kotlin 2.2+; this project is on 2.0.21.
+#   3. CompositingStrategy lives in androidx.compose.ui.graphics.layer.
+backdrop_root = ROOT / "liquidglass" / "src"
+if backdrop_root.is_dir():
+    runtime_shader = backdrop_root / "main" / "kotlin" / "com" / "kyant" / "backdrop" / "RuntimeShader.kt"
+    if not runtime_shader.exists():
+        errors.append("liquidglass: RuntimeShader.kt is missing")
+    elif "interface RuntimeShader" not in runtime_shader.read_text(encoding="utf-8", errors="ignore"):
+        errors.append("liquidglass: RuntimeShader.kt no longer declares interface RuntimeShader")
+
+    for path in sorted(backdrop_root.rglob("*.kt")):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        rel = path.relative_to(ROOT).as_posix()
+        # Only inspect real code, not doc comments that explain these pitfalls.
+        code = "\n".join(
+            line for line in text.splitlines()
+            if not line.lstrip().startswith(("//", "*", "/*"))
+        )
+        if re.search(r"^\s*import\s+androidx\.compose\.ui\.graphics\.RuntimeShader\b", code, re.MULTILINE):
+            errors.append(f"liquidglass: AndroidX has no graphics.RuntimeShader: {rel}")
+        if re.search(r"^\s*context\s*\(", code, re.MULTILINE):
+            errors.append(f"liquidglass: Kotlin context parameters need Kotlin 2.2+: {rel}")
+        if re.search(r"^\s*import\s+androidx\.compose\.ui\.graphics\.CompositingStrategy\b", code, re.MULTILINE):
+            errors.append(f"liquidglass: CompositingStrategy must come from graphics.layer: {rel}")
+
 if errors:
     print("repository check failed")
     for error in errors:

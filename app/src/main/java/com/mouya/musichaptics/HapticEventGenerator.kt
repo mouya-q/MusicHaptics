@@ -27,6 +27,9 @@ class HapticEventGenerator(
         private const val SURGE_TRIGGER_RATIO = 2.8f
 
         private const val SURGE_COOLDOWN_MS = 800L
+
+        /** Verbose per-event logging; off in release builds. */
+        @Volatile var verboseLogging: Boolean = BuildConfig.DEBUG
     }
 
     enum class HapticProfile(val displayName: String, val description: String) {
@@ -81,6 +84,20 @@ class HapticEventGenerator(
     }
 
     val hasVibrator: Boolean = try { vibrator?.hasVibrator() ?: false } catch (e: Exception) { false }
+
+    /** Primary vibrator, or a fresh service lookup when the lazy resolution failed.
+     *  (This fallback used to be copy-pasted into four separate call sites.) */
+    private fun resolveVibrator(): Vibrator? = vibrator ?: try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "Fallback vibrator resolution failed: ${e.message}")
+        null
+    }
 
     private val hasAmplitudeControl: Boolean =
         if (vibrator != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -192,8 +209,8 @@ class HapticEventGenerator(
         currentTimeMs: Long
     ) {
 
-        if (frameIndex % 32L == 0L) {
-            Log.e(TAG, "🎵 INPUT sub=%.6f mid=%.6f pres=%.6f pitch=%.1fHz enabled=$isEnabled vib=$hasVibrator"
+        if (verboseLogging && frameIndex % 32L == 0L) {
+            Log.d(TAG, "INPUT sub=%.6f mid=%.6f pres=%.6f pitch=%.1fHz enabled=$isEnabled vib=$hasVibrator"
                 .format(sub, mid, presence, pitch))
         }
         frameIndex++
@@ -209,8 +226,8 @@ class HapticEventGenerator(
 
         val finalBlendedIntensity = blendedIntensity * presetAmplitudeMultiplier
 
-        if (frameIndex % 32L == 0L) {
-            Log.e(TAG, " BLEND=%.6f final=%.6f silenceTh=%.6f accumEnergy=%.4f energyTh=%.3f minInterval=%dms"
+        if (verboseLogging && frameIndex % 32L == 0L) {
+            Log.d(TAG, "BLEND=%.6f final=%.6f silenceTh=%.6f accumEnergy=%.4f energyTh=%.3f minInterval=%dms"
                 .format(blendedIntensity, finalBlendedIntensity, profile.silenceThreshold,
                     accumulatedEnergy, profile.energyThreshold, profile.minIntervalMs))
         }
@@ -221,17 +238,7 @@ class HapticEventGenerator(
 
             silentFrameCount++
             if (silentFrameCount >= profile.fillerFrameThreshold && hasAmplitudeControl) {
-                val vib = vibrator ?: run {
-                    try {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-                            vm?.defaultVibrator
-                        } else {
-                            @Suppress("DEPRECATION")
-                            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-                        }
-                    } catch (e: Exception) { null }
-                }
+                val vib = resolveVibrator()
                 try {
                     vib?.vibrate(
                         VibrationEffect.createOneShot(
@@ -248,6 +255,13 @@ class HapticEventGenerator(
 
         accumulatedEnergy = (accumulatedEnergy + finalBlendedIntensity).coerceAtMost(ENERGY_CAP)
         if (accumulatedEnergy < energyThresholdActive) return
+
+        // Surge and mood must be evaluated BEFORE the accumulator is reset.
+        // The old order zeroed accumulatedEnergy first, making isEnergySurge()
+        // dead code (0 > x * 2.8 is never true) and flattening the mood envelope
+        // to a constant fraction of the instantaneous intensity.
+        val surgeDetected = isEnergySurge(finalBlendedIntensity, accumulatedEnergy, currentTimeMs)
+        val moodEnergy = (accumulatedEnergy * 0.8f + finalBlendedIntensity * 0.2f).coerceIn(0f, 1.5f)
         accumulatedEnergy = 0f
 
         val pitchIntervalMs = if (pitch > 0f && pitch < 500f) {
@@ -275,7 +289,6 @@ class HapticEventGenerator(
         }
         val nonlinearBoost = beatConfidence.pow(1.5f)
 
-        val moodEnergy = (accumulatedEnergy * 0.8f + finalBlendedIntensity * 0.2f).coerceIn(0f, 1.5f)
         val moodSmoothAlpha = when (activeProfile) {
             HapticProfile.CINEMATIC -> 0.70f
             HapticProfile.EDM -> 0.90f
@@ -309,7 +322,7 @@ class HapticEventGenerator(
 
             val effect = when {
 
-                isEnergySurge(finalBlendedIntensity, accumulatedEnergy, currentTimeMs) && isApi26Plus -> {
+                surgeDetected && isApi26Plus -> {
                     buildDropWaveform(targetAmplitude, finalBlendedIntensity)
                 }
 
@@ -345,50 +358,29 @@ class HapticEventGenerator(
 
                 else -> {
                     @Suppress("DEPRECATION")
-                    val vib = vibrator ?: run {
-                        try {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-                                vm?.defaultVibrator
-                            } else {
-                                @Suppress("DEPRECATION")
-                                context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-                            }
-                        } catch (e: Exception) { null }
-                    }
-                    vib?.vibrate(if (isSubDominant) 40L else 15L)
+                    resolveVibrator()?.vibrate(if (isSubDominant) 40L else 15L)
                     null
                 }
             }
             if (effect != null) {
-                Log.e(TAG, "VIBRATE! amp=$targetAmplitude mode=%s effectClass=%s".format(
-                    when {
-                        isSubDominant -> "SUB"
-                        isPresenceDominant -> "PRES"
-                        else -> "MID"
-                    }, effect.javaClass.simpleName
-                ))
-
-                Log.d("HapticLink", "【节点 3】准备发起系统震动 | Vibrator Calling... | amp=$targetAmplitude | hasVibrator=$hasVibrator")
+                if (verboseLogging) {
+                    Log.d(TAG, "VIBRATE! amp=$targetAmplitude mode=%s effectClass=%s".format(
+                        when {
+                            isSubDominant -> "SUB"
+                            isPresenceDominant -> "PRES"
+                            else -> "MID"
+                        }, effect.javaClass.simpleName
+                    ))
+                }
 
                 val now = System.currentTimeMillis()
                 if (now - lastVibrateTimeMs < minVibrateIntervalMs) {
-                    Log.d("HapticLink", "【抑制】振动间隔过短 (${now - lastVibrateTimeMs}ms < ${minVibrateIntervalMs}ms)，跳过本次触发")
+                    if (verboseLogging) Log.d(TAG, "interval too short, skip")
                     return
                 }
                 lastVibrateTimeMs = now
 
-                val vib = vibrator ?: run {
-                    try {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-                            vm?.defaultVibrator
-                        } else {
-                            @Suppress("DEPRECATION")
-                            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-                        }
-                    } catch (e: Exception) { null }
-                }
+                val vib = resolveVibrator()
                 try { vib?.vibrate(effect) } catch (e: Exception) { Log.w(TAG, "vibrate failed: ${e.message}") }
 
                 LinkHealthMonitor.heartbeatVibrateCall()
@@ -704,22 +696,7 @@ class HapticEventGenerator(
         }
         if (!isEnabled) return
 
-        val vib = vibrator ?: run {
-            Log.w(TAG, "vibrator is null, attempting to get system vibrator")
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-                    vm?.defaultVibrator
-                } else {
-                    @Suppress("DEPRECATION")
-                    context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to get fallback vibrator: ${e.message}")
-                null
-            }
-        }
-
+        val vib = resolveVibrator()
         if (vib == null) {
             Log.e(TAG, "VIBRATOR IS NULL - cannot vibrate!")
             return
@@ -818,14 +795,16 @@ class HapticEventGenerator(
         }
 
         effect?.let {
-            Log.e(TAG, "VIBRATE! amp=$envelopedAmplitude mode=${when {
-                command.isKeyStrike -> "KEY-STRIKE[${command.keyStrikeSemantic.name}]"
-                command.isBeat -> "BEAT-Pulse"
-                command.isTransient -> "TRANSIENT-Impact"
-                command.bassComponent > 0.3f -> "SUB-Wave"
-                command.textureComponent > 0.2f -> "TEXTURE-Tick"
-                else -> "MID-Click"
-            }} effectClass=${it.javaClass.simpleName}")
+            if (verboseLogging) {
+                Log.d(TAG, "VIBRATE! amp=$envelopedAmplitude mode=${when {
+                    command.isKeyStrike -> "KEY-STRIKE[${command.keyStrikeSemantic.name}]"
+                    command.isBeat -> "BEAT-Pulse"
+                    command.isTransient -> "TRANSIENT-Impact"
+                    command.bassComponent > 0.3f -> "SUB-Wave"
+                    command.textureComponent > 0.2f -> "TEXTURE-Tick"
+                    else -> "MID-Click"
+                }} effectClass=${it.javaClass.simpleName}")
+            }
 
             LinkHealthMonitor.heartbeatVibrateCall()
 

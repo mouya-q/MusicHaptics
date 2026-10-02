@@ -2,7 +2,7 @@
 
 LSPosed 音乐触觉模块。把目标应用的 PCM 音频送入轻量 Native DSP，识别瞬态、频段和节奏事件，再根据执行器特性合成为短促、可控的触觉反馈。
 
-MusicHapticsX 让真正有意义的瞬间落在对的位置
+MusicHapticsX 的重点不是“让手机一直震”，而是让真正有意义的瞬间落在对的位置：鼓点更干净、尾奏不拖、快歌不乱、长时间播放不靠持续低频轰鸣填空。
 
 ## 核心能力
 
@@ -14,7 +14,7 @@ MusicHapticsX 让真正有意义的瞬间落在对的位置
 - **语义触觉**：KICK / SNARE / VOCAL / BODY 四层语义输出，避免把整首音乐压成单一音量曲线。
 - **LRA 触觉成形**：攻击 / 保持 / 衰减三段式包络，结合执行器 Q、上升时间、最小间隔与强度下限调整。
 - **直驱与安全回退**：可直接写已知触觉节点；无权限时回退到 Root 管道、UDP 守护或 Android Vibrator，不同时驱动多个输出链路。
-- **多机型深度适配**：`DeviceProfile` 负责执行器模型，`DeviceTuningRegistry` 负责输出时序/增益/冷却，二者共同进入 Kotlin 事件层与 Native DSP。
+- **多机型深度适配**：`DeviceProfile` 负责执行器模型，`DeviceTuningRegistry` 负责输出时序/增益/冷却，二者共同进入 Kotlin 事件层与 Native DSP；不再把 Xiaomi 10 当成唯一特殊机型。
 - **LiquidGlass UI**：控制台、应用列表、参数面板和底部导航统一接入 AndroidLiquidGlass / Backdrop 源码；没有玻璃渲染能力时仍有低成本降级层。
 
 ## 架构
@@ -47,10 +47,10 @@ MusicHapticsX 让真正有意义的瞬间落在对的位置
                                 │
               ┌─────────────────┴──────────────────┐
               │                                    │
-      ┌───────▼────────┐                    ┌───────▼────────┐
-      │ direct actuator │                   │ Android Vibrator │
+      ┌───────▼────────┐                   ┌───────▼────────┐
+      │ direct actuator │                   │ Android Vibrator│
       │ / root / UDP    │                   │ / proxy fallback│
-      └─────────────────┘                  └─────────────────┘
+      └─────────────────┘                   └─────────────────┘
 ```
 
 ### 为什么这样拆
@@ -79,11 +79,11 @@ KISS FFT 是适合进一步替换固定 FFT 核的 BSD-3-Clause 方案，且提�
 
 ## 触觉链路
 
-MusicHapticsX 的触觉输出分为两类：
+MusicHapticsX 的触觉输出分为两类。
 
 **事件型触觉**负责 KICK / SNARE / VOCAL / BODY 的离散冲击。每个事件经过 `HapticImpactPolicy`：先根据设备执行器参数决定总时长，再生成 attack / sustain / decay 三段，最后套上最小间隔与强度门槛。
 
-**连续型触觉**只用于真正支持持续幅值控制的节点。对于  `activate` / AW8697 / AW86224 一类“一次写入就触发波形”的节点，Native scheduler 会自动切成 **strike-only** 模式：瞬态直接触发短冲击，不再把一个 one-shot 节点当成 200 Hz 连续幅值口反复写入。
+**连续型触觉**只用于真正支持持续幅值控制的节点。对于 Xiaomi 10 的 `activate` / AW8697 / AW86224 一类“一次写入就触发波形”的节点，Native scheduler 会自动切成 **strike-only** 模式：瞬态直接触发短冲击，不再把一个 one-shot 节点当成 200 Hz 连续幅值口反复写入。
 
 这样可以避开最常见的一类问题：事件看起来“很强”，但因为驱动节点语义不对，最终变成持续重触发、发糊、尾振长、快歌全部粘成一片。
 
@@ -123,13 +123,19 @@ DeviceProfile        ← 执行器模型 + DSP floor / band multipliers
 | vivo / iQOO | Flagship / V23-V24 兼容档 | 高速 X-axis 与 IPC fallback |
 | 其他现代旗舰 | `FLAGSHIP_XAXIS` | 仅在没有更精确命名档案时作为保守 fallback |
 
-这里的“深度适配”指**渲染策略已经实际使用这些档案**，不表示每个执行器参数都是厂商公开规格。执行器数值与机型曲线属于项目内的经验模型；未知设备仍然走 fallback
+这里的“深度适配”指**渲染策略已经实际使用这些档案**，不表示每个执行器参数都是厂商公开规格。执行器数值与机型曲线属于项目内的经验模型；未知设备仍然走 fallback，而不是猜一个最强档。
 
 ### 机型档案现在真正影响什么
 
 `DeviceProfile.kt` 中的 `dspEnergyFloor / dspSubMult / dspKickMult / dspSnareMult / dspTickMult / dspBodyMult / dspRefractoryScale` 已经通过 `NativeBridge.configureProfile()` 进入 C++。Native DSP 会据此调整低频分析增益、KICK/SNARE onset 门槛与权重、高频 texture 概率以及各类 onset 的 refractory；同时修正 VOCAL / BODY 的归一化门控，避免错误的“先压到 0.05、再要求大于 0.20”导致这两类事件永远不会出现。
 
 `DeviceTuning.kt` 则负责输出端的第二层修正：KICK / SNARE / TICK / BODY 时长、事件增益、最小触发强度、cooldown、振幅上限与 `DEFAULT_AMPLITUDE` 偏好。这样同一个“鼓点强度”在高速旗舰和慢响应执行器上不会再使用完全相同的 envelope。
+
+### Xiaomi 10
+
+`umi / cmi / thyme` 仍然保留最明确的专用兼容：短攻击、高瞬态、较短事件窗口，并继续优先处理自定义 ROM 下的振幅缩放兼容；但它只是整个适配矩阵中的一个档案，而不是全局基准。14/14 Pro、15/15 Pro 与 Ultra 家族也各自经过指纹与执行器档案分流，避免“一套 Xiaomi 参数打天下”。
+
+这套设计参考了你提供的 14 Pro Root 音乐触觉模块所体现的工程方向：全局/回退音频能量、平滑包络、事件限频、硬件特化和预打开 Root 输出链路；这里只借鉴架构思路，没有直接搬运实现代码。
 
 ## Hook 设计
 
@@ -239,7 +245,7 @@ python3 scripts/repo_check.py
 3. 播放静音 / 人声 / 鼓点 / 密集电子乐，观察是否出现持续底震；
 4. 快歌连续 8 分音符或 16 分音符时，确认事件不会叠成“电机嗡鸣”；
 5. 至少覆盖一个高速旗舰（如 Xiaomi 14/15/OnePlus 13）、一个中速档（如 Xiaomi 11/Redmi K70）和一个慢响应档（如 Redmi K80U/OPPO Reno8 Pro），确认时长与冷却确实随 profile 变化；
-6. 分别测试直驱节点可用和不可用两种路径；
+6. Xiaomi 10 上分别测试直驱节点可用和不可用两种路径；
 7. 暂停 / 切歌 / App 切后台后，确认震动在生命周期结束后释放；
 8. 在没有 AudioTrack PCM 的应用中，确认 Visualizer 回退不会与 PCM 路径双驱动；
 9. 长时间循环播放，观察温升模型与实际触感有没有明显失真。
@@ -249,7 +255,8 @@ python3 scripts/repo_check.py
 - 无法保证所有厂商的 `/sys` 触觉节点都具有相同语义；未知机型优先使用 Android Vibrator 回退。
 - `Visualizer` 是兼容路径，不等价于直接 PCM Hook；延迟、频响和动态范围都会不同。
 - Root 直驱涉及厂商驱动节点与 SELinux 策略，设备升级后节点名称或权限可能发生变化。
-- 小米部分设备的调音是针对实机路线，不代表其他 Xiaomi / Redmi 设备可以直接复用同一参数。
+- 小米 10 的调音是针对 `umi` 实机路线，不代表其他 Xiaomi / Redmi 设备可以直接复用同一参数。
+- 构建环境若没有 Android SDK/NDK，源码级检查仍可运行，但不能把它当作成功的 Android 二进制构建结果。
 
 ## 第三方与许可
 
@@ -257,7 +264,7 @@ MusicHapticsX 主体：MIT License。
 
 第三方声明见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
-本仓库不再包含字体文件，也不会把 GPL-3.0 DSP 框架作为运行时依赖直接打进模块。
+本仓库不再包含 PingFang 等未取得再分发许可的字体文件，也不会把 GPL-3.0 DSP 框架作为运行时依赖直接打进模块。
 
 ## 致谢
 

@@ -17,6 +17,9 @@ class VibrateProxy(private val context: Context) {
 
     companion object {
         private const val TAG = "VibrateProxy"
+
+        /** Per-call vibration logging; off in release builds. */
+        @Volatile var verboseLogging: Boolean = BuildConfig.DEBUG
     }
 
     @Volatile private var remoteBinder: IBinder? = null
@@ -323,7 +326,7 @@ class VibrateProxy(private val context: Context) {
 
         
         if (!hasAmplitudeControl) {
-            Log.w(TAG, "performWaveform: no amplitude control, fallback path, proxy=$useProxy hasAmpCtrl=$hasAmplitudeControl, primitives CLICK=$primitiveClickSupported THUD=$primitiveHeavyClickSupported")
+            if (verboseLogging) Log.d(TAG, "performWaveform: no ampCtrl fallback, proxy=$useProxy primitives CLICK=$primitiveClickSupported THUD=$primitiveHeavyClickSupported")
             val maxAmp = amplitudes.maxOrNull() ?: 0
             if (primitiveHeavyClickSupported) {
                 performComposition(listOf(Triple(VibrationEffect.Composition.PRIMITIVE_THUD, (maxAmp / 255f).coerceIn(0f, 1f), 0)))
@@ -332,7 +335,7 @@ class VibrateProxy(private val context: Context) {
             } else {
                 
                 val totalDuration = timings.sum()
-                Log.i(TAG, "performWaveform: no amp ctrl, no primitives → performOneShot($totalDuration, DEFAULT)")
+                if (verboseLogging) Log.i(TAG, "performWaveform: no amp ctrl, no primitives → performOneShot($totalDuration, DEFAULT)")
                 performOneShot(totalDuration.coerceAtMost(100L), VibrationEffect.DEFAULT_AMPLITUDE)
             }
             return
@@ -361,7 +364,7 @@ class VibrateProxy(private val context: Context) {
             val vib = directVibrator
             if (vib != null && hasDirectVibrator) {
                 try {
-                    Log.i(TAG, "performWaveform: vibrate(waveform, ${timings.size} segments) useProxy=$useProxy ampCtrl=$hasAmplitudeControl")
+                    if (verboseLogging) Log.i(TAG, "performWaveform: vibrate(waveform, ${timings.size} segments) useProxy=$useProxy ampCtrl=$hasAmplitudeControl")
                     vib.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
                 } catch (e: Exception) { Log.e(TAG, "Direct performWaveform FAILED: ${e.message}", e) }
             } else {
@@ -412,7 +415,7 @@ class VibrateProxy(private val context: Context) {
             val vib = directVibrator
             if (vib != null && hasDirectVibrator) {
                 try {
-                    Log.i(TAG, "performOneShot: vibrate(duration=$durationMs, amp=$amplitude) useProxy=$useProxy")
+                    if (verboseLogging) Log.i(TAG, "performOneShot: vibrate(duration=$durationMs, amp=$amplitude) useProxy=$useProxy")
                     vib.vibrate(VibrationEffect.createOneShot(durationMs, amplitude))
                 } catch (e: Exception) {
                     Log.e(TAG, "Direct performOneShot FAILED: ${e.message}", e)
@@ -513,7 +516,7 @@ class VibrateProxy(private val context: Context) {
             
             val totalDur = segments.sumOf { it.first }.coerceAtMost(100L)
             val maxAmp = segments.maxOfOrNull { it.second } ?: VibrationEffect.DEFAULT_AMPLITUDE
-            Log.i(TAG, "performEnvelope(noAmpCtrl): fallback oneShot(${totalDur}ms, amp=$maxAmp)")
+            if (verboseLogging) Log.i(TAG, "performEnvelope(noAmpCtrl): fallback oneShot(${totalDur}ms, amp=$maxAmp)")
             performOneShot(totalDur, maxAmp)
             return
         }
@@ -542,7 +545,7 @@ class VibrateProxy(private val context: Context) {
                 try {
                     val timings = LongArray(segments.size) { segments[it].first.coerceAtLeast(1L) }
                     val amplitudes = IntArray(segments.size) { segments[it].second.coerceIn(1, 255) }
-                    Log.i(TAG, "performEnvelope: ${timings.size} segments total=${timings.sum()}ms ampCtrl=$hasAmplitudeControl")
+                    if (verboseLogging) Log.i(TAG, "performEnvelope: ${timings.size} segments total=${timings.sum()}ms ampCtrl=$hasAmplitudeControl")
                     vib.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
                 } catch (e: Exception) {
                     Log.e(TAG, "performEnvelope FAILED: ${e.message}", e)

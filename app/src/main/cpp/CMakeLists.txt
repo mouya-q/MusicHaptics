@@ -21,7 +21,20 @@ target_compile_options(native-bridge PRIVATE
     -O3
     -ffast-math
     -fvisibility=hidden
-    -fno-omit-frame-pointer
+    -fvisibility-inlines-hidden
+    # Frame pointers are debug aids; omitting them frees a register on every
+    # DSP hot-path call. Symbolicated debugging still works via .eh_frame.
+    -fomit-frame-pointer
+    # Let the linker strip unreferenced code (LTO + gc-sections shrink the
+    # .so that gets injected into every hooked process).
+    -ffunction-sections
+    -fdata-sections
+    -flto
+)
+
+target_link_options(native-bridge PRIVATE
+    -Wl,--gc-sections
+    -Wl,--icf=all
     -flto
 )
 

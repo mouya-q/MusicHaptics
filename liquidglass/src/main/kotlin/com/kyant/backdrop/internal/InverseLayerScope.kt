@@ -2,10 +2,7 @@ package com.kyant.backdrop.internal
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.DefaultCameraDistance
 import androidx.compose.ui.graphics.DefaultShadowColor
 import androidx.compose.ui.graphics.GraphicsLayerScope
@@ -15,11 +12,21 @@ import androidx.compose.ui.graphics.RenderEffect
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawTransform
+import androidx.compose.ui.graphics.layer.CompositingStrategy
 import androidx.compose.ui.unit.Density
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
+/**
+ * A [GraphicsLayerScope] that only records the transform-relevant part of a
+ * layer block, so the backdrop can be drawn with the inverse transform applied.
+ *
+ * `blendMode` / `colorFilter` are deliberately not implemented: they are members
+ * of `GraphicsLayer`, not of `GraphicsLayerScope` in AndroidX Compose 1.7.x, so
+ * overriding them does not compile (upstream only gets away with it because it
+ * targets a newer Compose Multiplatform).
+ */
 internal class InverseLayerScope : GraphicsLayerScope {
 
     override var size: Size = Size.Unspecified
@@ -28,7 +35,7 @@ internal class InverseLayerScope : GraphicsLayerScope {
 
     override var scaleX: Float = 1f
     override var scaleY: Float = 1f
-    override var alpha: Float = 0f
+    override var alpha: Float = 1f
     override var translationX: Float = 0f
     override var translationY: Float = 0f
     override var shadowElevation: Float = 0f
@@ -42,8 +49,6 @@ internal class InverseLayerScope : GraphicsLayerScope {
     override var shape: Shape = RectangleShape
     override var clip: Boolean = false
     override var renderEffect: RenderEffect? = null
-    override var blendMode: BlendMode = BlendMode.SrcOver
-    override var colorFilter: ColorFilter? = null
     override var compositingStrategy: CompositingStrategy = CompositingStrategy.Auto
 
     private var matrix: Matrix? = null
@@ -86,8 +91,6 @@ internal class InverseLayerScope : GraphicsLayerScope {
         shape = RectangleShape
         clip = false
         renderEffect = null
-        blendMode = BlendMode.SrcOver
-        colorFilter = null
         compositingStrategy = CompositingStrategy.Auto
 
         matrix = null

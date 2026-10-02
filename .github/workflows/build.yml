@@ -59,7 +59,7 @@ jobs:
           echo "using $SDKMGR"
           yes | "$SDKMGR" --sdk_root="$ANDROID_HOME" --licenses > /dev/null 2>&1 || true
           "$SDKMGR" --sdk_root="$ANDROID_HOME" --install \
-            "ndk;27.0.12077973" "build-tools;35.0.0" "cmake;3.22.1" "platforms;android-34"
+            "ndk;27.0.12077973" "build-tools;35.0.0" "cmake;3.22.1" "platforms;android-35"
 
       - name: Repository checks
         run: python3 scripts/repo_check.py

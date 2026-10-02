@@ -143,6 +143,9 @@ class HapticEngine(
         const val TEXTURE_LOW = 200f
         const val TEXTURE_HIGH = 800f
 
+        /** Per-event diagnostic logging; off in release to keep the beat path clean. */
+        @Volatile var verboseLogging: Boolean = BuildConfig.DEBUG
+
         val WAVE_SUB_BASS_IMPACT = floatArrayOf(1.0f, 0.95f, 0.85f, 0.70f, 0.50f, 0.30f, 0.15f, 0.05f)
         val WAVE_MID_TRANSIENT  = floatArrayOf(1.0f, 0.60f, 0.20f, 0.05f)
         val WAVE_MICRO_TEXTURE  = floatArrayOf(0.4f, 0.80f, 0.40f, 0.10f, 0.60f, 0.20f)
@@ -210,8 +213,9 @@ class HapticEngine(
 
     @Volatile private var pcmFallbackAmplitude = 0
     @Volatile private var pcmFallbackAtMs = 0L
+    @Volatile private var disabledCancelSent = false
 
-    @Volatile private var lastVibrationMs = AtomicLong(0L)
+    private val lastVibrationMs = AtomicLong(0L)
     @Volatile private var lastBeatEvent = ""
 
     private var lastPcmIngressLogMs = 0L
@@ -467,24 +471,31 @@ class HapticEngine(
     }
 
     
+    // Pre-encoded root-pipe commands. The pipe write runs at up to 200 Hz on
+    // the native scheduler callback thread; String.format() allocates a
+    // Formatter + several boxed objects per call, so we keep lookup tables.
+    private val activateCmdBytes = "A\n".toByteArray(Charsets.US_ASCII)
+    private val decGainCmdBytes: Array<ByteArray> by lazy {
+        Array(256) { i -> "G$i\n".toByteArray(Charsets.US_ASCII) }
+    }
+    private val hexGainCmdBytes: Array<ByteArray> by lazy {
+        Array(201) { i -> "G0x%02x\n".format(i).toByteArray(Charsets.US_ASCII) }
+    }
+
     private fun triggerRootPipeVibration(amplitude: Int, duration: Int) {
         if (!rootPipeActive) return
         try {
             val stream = rootPipeStream ?: return
             synchronized(rootPipeLock) {
                 if (rootPipeGainPath.isNotEmpty() && amplitude > 0) {
-                    val gainVal: Int
-                    val gainStr: String
-                    if (rootPipeGainIsHex) {
-                        
-                        gainVal = (amplitude.coerceIn(0, 255) * 200 / 255)
-                        gainStr = "G0x%02x\n".format(gainVal)
+                    val cmd = if (rootPipeGainIsHex) {
+                        hexGainCmdBytes[amplitude.coerceIn(0, 255) * 200 / 255]
                     } else {
-                        gainStr = "G%d\n".format(amplitude)
+                        decGainCmdBytes[amplitude.coerceIn(0, 255)]
                     }
-                    stream.write(gainStr.toByteArray())
+                    stream.write(cmd)
                 } else {
-                    stream.write("A\n".toByteArray())
+                    stream.write(activateCmdBytes)
                 }
                 stream.flush()
             }
@@ -496,7 +507,9 @@ class HapticEngine(
 
     
     fun onKotlinBeatDetected(event: String, intensity: Int, rms: Float) {
-        Log.d(TAG, "[BEAT] event=$event intensity=$intensity rms=${"%.5f".format(rms)}")
+        if (verboseLogging) {
+            Log.d(TAG, "[BEAT] event=$event intensity=$intensity rms=${"%.5f".format(rms)}")
+        }
         triggerBeatVibration(event, intensity)
     }
 
@@ -529,7 +542,9 @@ class HapticEngine(
         try {
             vibrateProxy.performWaveform(timings, amplitudes)
             lastBeatEvent = plan.event
-            Log.d(TAG, "[HAPTIC] ${plan.event} intensity=$intensity duration=${plan.totalDurationMs}ms cooldown=${plan.cooldownMs}ms")
+            if (verboseLogging) {
+                Log.d(TAG, "[HAPTIC] ${plan.event} intensity=$intensity duration=${plan.totalDurationMs}ms cooldown=${plan.cooldownMs}ms")
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "[HAPTIC] output failed: ${t.message}")
         }
@@ -590,7 +605,9 @@ class HapticEngine(
                         triggerBeatVibration(beatType, intensity)
 
                         lastBeatMs = now
-                        Log.i(TAG, "[C++-ONSET] $beatType intensity=$intensity k=${"%.3f".format(k)} s=${"%.3f".format(s)} v=${"%.3f".format(v)} b=${"%.3f".format(b)}")
+                        if (verboseLogging) {
+                            Log.i(TAG, "[C++-ONSET] $beatType intensity=$intensity k=${"%.3f".format(k)} s=${"%.3f".format(s)} v=${"%.3f".format(v)} b=${"%.3f".format(b)}")
+                        }
                         break // 每轮只触发一次
                     }
                 }
@@ -852,9 +869,15 @@ class HapticEngine(
     }
 fun processAudioFrame(pcmData: ShortArray?) {
         if (pcmData == null || pcmData.isEmpty() || !isEngineEnabled.get()) {
-            if (!isEngineEnabled.get()) vibrateProxy.cancel()
+            // Cancel exactly once when the master switch flips off; the old code
+            // issued a Vibrator.cancel() on every incoming frame while disabled.
+            if (!isEngineEnabled.get() && !disabledCancelSent) {
+                disabledCancelSent = true
+                vibrateProxy.cancel()
+            }
             return
         }
+        disabledCancelSent = false
         resumeFromHook()
         audioIngress.processPcm16(pcmData, 0, pcmData.size, channels)
     }

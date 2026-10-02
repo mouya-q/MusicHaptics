@@ -254,7 +254,7 @@ private class DrawBackdropNode(
     private val layoutLayerBlock: GraphicsLayerScope.() -> Unit = {
         clip = true
         shape = shapeProvider.shape
-        compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen
+        compositingStrategy = androidx.compose.ui.graphics.layer.CompositingStrategy.Offscreen
     }
 
     private var layoutCoordinates: LayoutCoordinates? by mutableStateOf(null, neverEqualPolicy())
@@ -288,6 +288,7 @@ private class DrawBackdropNode(
             val padding = padding
 
             recordLayer(
+                this@DrawBackdropNode,
                 layer,
                 size = IntSize(
                     size.width.toInt() + padding.toInt() * 2,
@@ -325,7 +326,7 @@ private class DrawBackdropNode(
         onDrawFront?.invoke(this)
 
         exportedBackdrop?.graphicsLayer?.let { layer ->
-            recordLayer(layer) {
+            recordLayer(this@DrawBackdropNode, layer) {
                 onDrawBehind?.invoke(this)
                 drawBackdropLayer()
                 onDrawSurface?.invoke(this)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <arm_neon.h>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -228,7 +229,12 @@ private:
     float bassSustainProbability_ = 0.0f;
 
     SemanticHapticFrame historyBuffer_[2048] = {};
-    float pitchHistory_[2048] = {};
+
+    // 4x-decimated history for pitch autocorrelation (replaces the old
+    // full-rate 2048-sample history; see estimatePitch for the rationale).
+    static constexpr int PITCH_DECIM = 4;
+    static constexpr int PITCH_HIST = 2048 / PITCH_DECIM; // 512
+    float pitchDecimHistory_[PITCH_HIST] = {};
 
     // Single-producer/single-consumer semantic ring. Audio processing writes;
     // the native scheduler is the sole reader while the Kotlin path is used only
@@ -400,7 +406,7 @@ private:
         std::memset(energyHistory_, 0, sizeof(energyHistory_));
         std::memset(previousMagnitude_, 0, sizeof(previousMagnitude_));
         std::memset(spectrumHistory_, 0, sizeof(spectrumHistory_));
-        std::memset(pitchHistory_, 0, sizeof(pitchHistory_));
+        std::memset(pitchDecimHistory_, 0, sizeof(pitchDecimHistory_));
         frameCounter_ = 0;
         lastOnsetFrame_ = -1000;
         beatIntervalFrames_ = 0.0f;
@@ -473,10 +479,17 @@ private:
         spectrumSamples_ = std::min(FFT_SIZE, spectrumSamples_ + size);
         if (spectrumSamples_ < FFT_SIZE) return;
 
+        // Hann window, computed exactly once (was 512 cosf() calls per block).
+        static const std::array<float, FFT_SIZE> kHannWindow = [] {
+            std::array<float, FFT_SIZE> w{};
+            const float step = 2.0f * static_cast<float>(M_PI) / static_cast<float>(FFT_SIZE);
+            for (int i = 0; i < FFT_SIZE; ++i) {
+                w[i] = 0.5f - 0.5f * std::cos(step * static_cast<float>(i));
+            }
+            return w;
+        }();
         for (int i = 0; i < FFT_SIZE; ++i) {
-            const float phase = 2.0f * static_cast<float>(M_PI) * static_cast<float>(i) / static_cast<float>(FFT_SIZE);
-            const float window = 0.5f - 0.5f * cosf(phase);
-            fftRe_[i] = spectrumHistory_[i] * window;
+            fftRe_[i] = spectrumHistory_[i] * kHannWindow[i];
             fftIm_[i] = 0.0f;
         }
         for (int i = 1, j = 0; i < FFT_SIZE; ++i) {
@@ -533,31 +546,55 @@ private:
         spectralCentroidHz_ = std::clamp(weightedHz / total, 0.0f, sampleRate_.load(std::memory_order_relaxed) * 0.5f);
     }
 
+    // ── Pitch estimation: 4x-decimated autocorrelation ──
+    // The old full-rate sweep ran lags 160..1371 (48 kHz) over a 256-sample
+    // window — ~310K multiply-accumulates per call, the single most expensive
+    // DSP operation in the engine. Pitch only targets 35..300 Hz, far below
+    // the 6 kHz Nyquist of a 4x-decimated 12 kHz signal, so we box-decimate
+    // first (the box average doubles as an anti-alias low-pass) and sweep
+    // lags 40..343 over a 64-sample window instead: ~16x less work for
+    // effectively identical pitch accuracy in the target band.
     float estimatePitch(const float* signal, int size) {
-        std::memmove(pitchHistory_, pitchHistory_ + size, (2048 - size) * sizeof(float));
-        std::memcpy(pitchHistory_ + (2048 - size), signal, size * sizeof(float));
+        const int decim = size / PITCH_DECIM;
+        if (decim <= 0) return 150.0f;
 
-        int minLag = static_cast<int>(sampleRate_.load(std::memory_order_relaxed) / 300.0f);
-        int maxLag = static_cast<int>(sampleRate_.load(std::memory_order_relaxed) / 35.0f);
-        if (maxLag > 1500) maxLag = 1500;
+        std::memmove(pitchDecimHistory_, pitchDecimHistory_ + decim,
+                     (PITCH_HIST - decim) * sizeof(float));
+        float* dst = pitchDecimHistory_ + (PITCH_HIST - decim);
+        for (int i = 0; i < decim; ++i) {
+            const float* p = signal + i * PITCH_DECIM;
+            dst[i] = (p[0] + p[1] + p[2] + p[3]) * 0.25f;
+        }
+
+        // Silence gate on the fresh block: skip the sweep when there is
+        // nothing to track (saves the full lag scan during quiet passages).
+        float absSum = 0.0f;
+        for (int i = 0; i < decim; ++i) absSum += std::fabs(dst[i]);
+        if (absSum / static_cast<float>(decim) < 0.001f) return 150.0f;
+
+        const float decimatedRate = sampleRate_.load(std::memory_order_relaxed)
+                                    / static_cast<float>(PITCH_DECIM);
+        int minLag = static_cast<int>(decimatedRate / 300.0f);
+        int maxLag = static_cast<int>(decimatedRate / 35.0f);
+        const int maxLagCap = PITCH_HIST - decim - 1;
+        if (maxLag > maxLagCap) maxLag = maxLagCap;
+        if (minLag < 2) minLag = 2;
 
         int bestLag = -1;
-        float maxCorr = -1e9f;
-        int startIndex = 2048 - size;
+        float maxCorr = 1.0e-4f; // doubles as the "no periodicity" threshold
+        const float* base = pitchDecimHistory_ + (PITCH_HIST - decim);
 
         for (int lag = minLag; lag <= maxLag; ++lag) {
-            float corr = 0.0f;
+            const float* lagged = base - lag;
             int i = 0;
             float32x4_t vSum = vdupq_n_f32(0.0f);
-            const float* base = pitchHistory_ + startIndex;
-            const float* lagged = base - lag;
-            for (; i <= size - 4; i += 4) {
+            for (; i <= decim - 4; i += 4) {
                 float32x4_t vA = vld1q_f32(base + i);
                 float32x4_t vB = vld1q_f32(lagged + i);
                 vSum = vmlaq_f32(vSum, vA, vB);
             }
-            corr = neonReduceF32(vSum);
-            for (; i < size; ++i) {
+            float corr = neonReduceF32(vSum);
+            for (; i < decim; ++i) {
                 corr += base[i] * lagged[i];
             }
             if (corr > maxCorr) {
@@ -566,11 +603,12 @@ private:
             }
         }
 
-        if (bestLag == -1 || maxCorr <= 0.001f) return 150.0f;
-        float freq = sampleRate_.load(std::memory_order_relaxed) / static_cast<float>(bestLag);
+        if (bestLag <= 0) return 150.0f;
+        float freq = decimatedRate / static_cast<float>(bestLag);
         return std::clamp(freq, 35.0f, 300.0f);
     }
 
+public:
     // ══════════════════════════════════════════════
     //  Main audio processing block
     // ══════════════════════════════════════════════

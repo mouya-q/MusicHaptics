@@ -178,17 +178,6 @@ UI 采用独立 `:liquidglass` Android library module，当前直接集成 Andro
 
 上游项目当前公开仓库为 `Kyant0/AndroidLiquidGlass`，项目采用 Apache-2.0；其 Backdrop 模块当前发布坐标为 `io.github.kyant0:backdrop:2.0.1`。
 
-本项目没有把 LiquidGlass 当成一个“装饰底栏”，而是统一到：
-
-- 页面背景与 backdrop layer；
-- 主状态卡片；
-- 设置面板；
-- 应用白名单列表；
-- 分段选择器；
-- 底部 Tab Bar。
-
-同时保留无 backdrop 能力时的普通半透明背景降级，避免 UI 依赖单一渲染路径。
-
 ## 项目结构
 
 ```text
@@ -240,17 +229,15 @@ python3 scripts/repo_check.py
 3. 播放静音 / 人声 / 鼓点 / 密集电子乐，观察是否出现持续底震；
 4. 快歌连续 8 分音符或 16 分音符时，确认事件不会叠成“电机嗡鸣”；
 5. 至少覆盖一个高速旗舰（如 Xiaomi 14/15/OnePlus 13）、一个中速档（如 Xiaomi 11/Redmi K70）和一个慢响应档（如 Redmi K80U/OPPO Reno8 Pro），确认时长与冷却确实随 profile 变化；
-6. Xiaomi 10 上分别测试直驱节点可用和不可用两种路径；
-7. 暂停 / 切歌 / App 切后台后，确认震动在生命周期结束后释放；
-8. 在没有 AudioTrack PCM 的应用中，确认 Visualizer 回退不会与 PCM 路径双驱动；
-9. 长时间循环播放，观察温升模型与实际触感有没有明显失真。
+6. 暂停 / 切歌 / App 切后台后，确认震动在生命周期结束后释放；
+7. 在没有 AudioTrack PCM 的应用中，确认 Visualizer 回退不会与 PCM 路径双驱动；
+8. 长时间循环播放，观察温升模型与实际触感有没有明显失真。
 
 ## 已知限制
 
 - 无法保证所有厂商的 `/sys` 触觉节点都具有相同语义；未知机型优先使用 Android Vibrator 回退。
 - `Visualizer` 是兼容路径，不等价于直接 PCM Hook；延迟、频响和动态范围都会不同。
 - Root 直驱涉及厂商驱动节点与 SELinux 策略，设备升级后节点名称或权限可能发生变化。
-- 小米 10 的调音是针对 `umi` 实机路线，不代表其他 Xiaomi / Redmi 设备可以直接复用同一参数。
 - 构建环境若没有 Android SDK/NDK，源码级检查仍可运行，但不能把它当作成功的 Android 二进制构建结果。
 
 ## 第三方与许可
@@ -258,8 +245,6 @@ python3 scripts/repo_check.py
 MusicHapticsX 主体：MIT License。
 
 第三方声明见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
-
-本仓库不再包含 PingFang 等未取得再分发许可的字体文件，也不会把 GPL-3.0 DSP 框架作为运行时依赖直接打进模块。
 
 ## 致谢
 

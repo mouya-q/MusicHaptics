@@ -131,11 +131,6 @@ DeviceProfile        ← 执行器模型 + DSP floor / band multipliers
 
 `DeviceTuning.kt` 则负责输出端的第二层修正：KICK / SNARE / TICK / BODY 时长、事件增益、最小触发强度、cooldown、振幅上限与 `DEFAULT_AMPLITUDE` 偏好。这样同一个“鼓点强度”在高速旗舰和慢响应执行器上不会再使用完全相同的 envelope。
 
-### Xiaomi 10
-
-`umi / cmi / thyme` 仍然保留最明确的专用兼容：短攻击、高瞬态、较短事件窗口，并继续优先处理自定义 ROM 下的振幅缩放兼容；但它只是整个适配矩阵中的一个档案，而不是全局基准。14/14 Pro、15/15 Pro 与 Ultra 家族也各自经过指纹与执行器档案分流，避免“一套 Xiaomi 参数打天下”。
-
-这套设计参考了你提供的 14 Pro Root 音乐触觉模块所体现的工程方向：全局/回退音频能量、平滑包络、事件限频、硬件特化和预打开 Root 输出链路；这里只借鉴架构思路，没有直接搬运实现代码。
 
 ## Hook 设计
 

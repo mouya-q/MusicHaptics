@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.mouya.musichaptics.liquidglass"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         minSdk = 28
@@ -23,7 +23,7 @@ android {
 }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2024.08.00"))
+    implementation(platform("androidx.compose:compose-bom:2025.03.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.foundation:foundation")

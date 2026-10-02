@@ -3,6 +3,7 @@ package com.kyant.backdrop
 import android.os.Build
 import androidx.annotation.RequiresApi
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RuntimeShader
 import androidx.compose.ui.graphics.Shader
 import androidx.compose.ui.graphics.toArgb
 

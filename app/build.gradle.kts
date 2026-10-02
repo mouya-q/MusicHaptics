@@ -6,19 +6,18 @@ plugins {
 
 android {
     namespace = "com.mouya.musichaptics"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 50100
         versionName = "5.1.0"
         ndkVersion = "27.0.12077973"
         // 云编译（GitHub Actions）环境下由 Gradle 直接驱动 CMake 编译 C++，
         // 使用 c++_static 静态链接 libc++，避免注入宿主进程时与旧版 libc++_shared.so 符号冲突。
         // DSP 引擎使用 ARM NEON SIMD 指令，仅支持 ARM 架构（arm64-v8a / armeabi-v7a）。
-        // x86/x86_64 设备在现代 Android 生态中极少，且本项目目标设备（小米 10）为 arm64。
         ndk {
             // Only arm64-v8a for the supported target-device set.
             // This keeps the injected Native DSP binary small and matches the current profiles.
@@ -93,7 +92,7 @@ dependencies {
     implementation(files("libs/libxposed-service-101.0.0.aar"))
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.3")
-    implementation(platform("androidx.compose:compose-bom:2024.08.00"))
+    implementation(platform("androidx.compose:compose-bom:2025.03.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.foundation:foundation")

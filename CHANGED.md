@@ -2,13 +2,13 @@
 
 ## 5.1.0 — 2026-10-02
 
-这次是在 5.0 架构基础上，把“机型适配”从少数 Build 判断提升成真正贯穿 DSP → 事件层 → 输出层的多机型适配链。
+在 5.0 架构基础上，将“机型适配”从少数 Build 判断提升成贯穿 DSP → 事件层 → 输出层的多机型适配链
 
 ### 多机型深度适配
 
-- `DeviceTuningRegistry` 不再只识别 `umi / cmi / thyme`，现在覆盖 `DeviceProfile.kt` 中全部命名机型档案：Xiaomi / Redmi / OnePlus / OPPO / Lenovo / Samsung / vivo/iQOO；`FLAGSHIP_XAXIS` 只作为现代旗舰 fallback。
+- `DeviceTuningRegistry` 覆盖 `DeviceProfile.kt` 中全部命名机型档案：Xiaomi / Redmi / OnePlus / OPPO / Lenovo / Samsung / vivo/iQOO；`FLAGSHIP_XAXIS` 只作为现代旗舰 fallback。
 - `HapticImpactPolicy` 改为按已经解析完成的 `DeviceProfile` 取 tuning，避免再次用一套 `Build.DEVICE` 判断覆盖掉 Root fingerprint 已确定的机型。
-- `VibrateProxy.init(profile)` 接收最终 profile；`DEFAULT_AMPLITUDE` 兼容策略不再硬编码为 Xiaomi 10 条件。
+- `VibrateProxy.init(profile)` 接收最终 profile；`DEFAULT_AMPLITUDE` 兼容策略不再硬编码
 - `DeviceProfile` 的 DSP 参数现在通过新增 JNI 配置入口真正进入 Native：low-band profile gain、KICK/SNARE onset 权重、DSP floor、high-frequency texture 权重和 per-band refractory；同时修正 VOCAL / BODY onset 的归一化门控，避免原有阈值组合导致永远触发不到。
 - `RootHardwareProbe` 的 fingerprint 解析与 `DeviceProfile` 保持同一机型矩阵；补齐 Xiaomi 13/14/15 Ultra、14 Pro、15 Pro、17 Pro 的 codename/model 别名，并保留移植 ROM 旧别名；同时补充 AW86224 / Qualcomm haptic 家族的已知入口扫描。
 - 对 Xiaomi Ultra / Redmi K70 Ultra / K80 的判断增加优先级，避免产品名中的 `Ultra` 把 Redmi Ultra 机型误判成 Xiaomi Ultra；13/14/15 Ultra 均能命中已有 `XIAOMI_ULTRA` 档。
@@ -61,7 +61,7 @@
 
 ### 仓库
 
-- 删除 PingFang 字体资源。
+- 删除字体资源
 - 删除重复 C++ 源码、`cpp_disabled`、临时 patch、debug keystore、本地 Maven 缓存和其他构建垃圾。
 - 删除未参与主链路的旧版音频 / 触觉缓存实现与无调用 RichTap 包装层。
 - 补充 `LICENSE`、`CONTRIBUTING.md`、`SECURITY.md`、`docs/ARCHITECTURE.md` 和 `scripts/repo_check.py`。
@@ -84,5 +84,5 @@
 1. LSPosed 作用域是否正确；
 2. MusicHapticsX 白名单是否包含目标包；
 3. 硬件检测结果是否仍然有效；
-4. Xiaomi 10 是否正在走 `strike-only` 直驱；
+4. 是否正在走 `strike-only` 直驱；
 5. 无直驱权限时是否正确回退到 Android Vibrator。

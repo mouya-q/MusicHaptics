@@ -2,6 +2,7 @@ package com.kyant.backdrop
 
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.RenderEffect
+import androidx.compose.ui.graphics.RuntimeShader
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.unit.Density

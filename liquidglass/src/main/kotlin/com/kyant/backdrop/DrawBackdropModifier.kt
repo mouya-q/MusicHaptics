@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.neverEqualPolicy
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.GraphicsLayerScope
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
@@ -365,6 +366,14 @@ private class DrawBackdropNode(
 
     private fun updateEffects() {
         if (!isRenderEffectSupported()) return
+        // onAttach() runs observeEffects() before the first draw pass, so
+        // effectScope.size is still Size.Unspecified at that moment. Effects
+        // such as lens() derive their corner radii from size and would throw
+        // IllegalStateException("Size is unspecified") out of
+        // Size.minDimension. Bail out here instead: ContentDrawScope.draw()
+        // calls effectScope.update(this) and re-runs updateEffects() as soon
+        // as a real size is known.
+        if (!effectScope.size.isSpecified) return
 
         effectScope.apply(effects)
         graphicsLayer?.renderEffect = effectScope.renderEffect

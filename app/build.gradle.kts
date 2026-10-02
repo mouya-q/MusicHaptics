@@ -12,8 +12,8 @@ android {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
         targetSdk = 35
-        versionCode = 50200
-        versionName = "5.2.0"
+        versionCode = 50201
+        versionName = "5.2.1"
         ndkVersion = "27.0.12077973"
         // 云编译（GitHub Actions）环境下由 Gradle 直接驱动 CMake 编译 C++，
         // 使用 c++_static 静态链接 libc++，避免注入宿主进程时与旧版 libc++_shared.so 符号冲突。
@@ -28,10 +28,15 @@ android {
 
     buildTypes {
         debug {
-            // 使用环境变量配置的签名密钥（GitHub Actions 提供）
-            // 如果环境变量不存在，则使用默认调试签名
+            // Uses the default debug signing config.
         }
         release {
+            // Sign the release build with the debug keystore so CI can emit an
+            // installable artifact without storing secrets. The APK is signed
+            // but NOT debuggable, which is what removes the "you are testing a
+            // debuggable app" system warning. AGP creates ~/.android/debug.keystore
+            // on demand, so no keystore file needs to be committed.
+            signingConfig = signingConfigs.getByName("debug")
             // R8 full-mode shrinking + resource shrinking: the module APK is
             // downloaded/installed per device and its classes are loaded into
             // every hooked process, so a smaller dex measurably cuts inject

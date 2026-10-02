@@ -3,6 +3,7 @@ package com.kyant.backdrop.effects
 import androidx.annotation.FloatRange
 import androidx.compose.foundation.shape.AbsoluteRoundedCornerShape
 import androidx.compose.foundation.shape.CornerBasedShape
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.util.fastCoerceAtLeast
 import androidx.compose.ui.util.fastCoerceAtMost
@@ -20,6 +21,12 @@ fun BackdropEffectScope.lens(
 ) {
     if (!isRuntimeShaderSupported()) return
     if (refractionHeight <= 0f || refractionAmount <= 0f) return
+    // The backdrop effect scope is measured lazily: it still reports
+    // Size.Unspecified while the node is being attached, before the first
+    // draw pass. cornerRadii below reads size.minDimension, which throws
+    // IllegalStateException on an unspecified size, so skip the effect until
+    // a real size is available (updateEffects() re-runs on the next draw).
+    if (!size.isSpecified) return
 
     if (padding > 0f) {
         padding = (padding - refractionHeight).fastCoerceAtLeast(0f)

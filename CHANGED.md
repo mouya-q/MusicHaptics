@@ -1,5 +1,105 @@
 # Changelog
 
+## 5.2.1 — 安装后闪退与 16 KB 页对齐修复 (2026-10-03)
+
+5.2.0 云编译全绿（Debug + Release 均 BUILD SUCCESSFUL）后，真机安装暴露两类问题。
+两者都已定位到确切代码行并用设备上的官方工具取证，修复如下。
+
+### 修复一：除引导页外全部界面一打开就闪退
+
+**现象**：首次激活（`RootActivationActivity`）正常，进入 Dashboard 后立即闪退；
+`am start` 返回 `Status: ok`，但进程在首帧合成阶段被 `RuntimeInit$KillApplicationHandler` 杀掉。
+
+**崩溃栈（取自 `dumpsys dropbox`，PID 26288 / 28130，v50200）**：
+
+```
+java.lang.IllegalStateException: Size is unspecified
+    at androidx.compose.ui.geometry.Size.getMinDimension-impl(Size.kt:166)
+    at com.kyant.backdrop.effects.LensKt.getCornerRadii(Lens.kt:80)
+    at com.kyant.backdrop.effects.LensKt.lens(Lens.kt:28)
+    at com.mouya.musichaptics.HapticDashboardActivityKt.liquidGlass_...$lambda$4$lambda$3(HapticDashboardActivity.kt:156)
+    at com.kyant.backdrop.BackdropEffectScopeImpl.apply(BackdropEffectScope.kt:62)
+    at com.kyant.backdrop.DrawBackdropNode.updateEffects(DrawBackdropModifier.kt:369)
+    at com.kyant.backdrop.DrawBackdropNode.observeEffects(DrawBackdropModifier.kt:363)
+    at com.kyant.backdrop.DrawBackdropNode.onAttach(DrawBackdropModifier.kt:378)
+```
+
+**根因**：`DrawBackdropNode.onAttach()` 无条件调用 `observeEffects()` → `updateEffects()`，
+而 `onAttach()` 发生在**首次绘制之前**，此时 `BackdropEffectScopeImpl.size` 仍是初始值
+`Size.Unspecified`。`lens()` 的 `cornerRadii` 直接读取 `size.minDimension`，
+`Size.minDimension` 对未指定尺寸会主动抛 `IllegalStateException`，异常从
+`observeReads` 里逃出，直接打断首次组合（`Recomposer.composeInitial`），进程被杀。
+
+**修复（三层防御，任一层单独都能挡住这类崩溃）**：
+
+- `DrawBackdropModifier.updateEffects()`：进入时先判 `effectScope.size.isSpecified`，
+  尺寸未就绪直接返回。`ContentDrawScope.draw()` 里的 `effectScope.update(this)`
+  会在真实尺寸可用后重新触发 `updateEffects()`，因此不会丢失效果。
+- `effects/Lens.kt` 的 `lens()`：在读取 `cornerRadii` 之前加同一守卫，
+  使该扩展函数自身对调用时机免疫。
+- `highlight/HighlightStyle.kt` 的 `DrawScope.getCornerRadii()`：尺寸未指定时
+  返回全零圆角数组而不是抛异常（该方法还会被高光 shader 在组合早期调用）。
+
+这三处都用 `androidx.compose.ui.geometry.isSpecified`，不引入新依赖。
+
+### 修复二：16 KB 页对齐检查失败
+
+**现象**：系统安装/运行弹窗提示
+「此应用不符合 16 KB 对齐要求。ELF 文件对齐检查失败」，
+并列出 `lib/arm64-v8a/libandroidx.graphics.path.so: 未知错误` 与
+`lib/arm64-v8a/libnative-bridge.so: LOAD 区段未对齐`。
+
+**取证方法与结论**：用设备自带的官方 `readelf -lW`（`/system/bin/readelf`）逐个核对
+APK 内两个 `.so` 的 `PT_LOAD` 段：
+
+| 库 | `p_align` | 判定 |
+|---|---|---|
+| `lib/arm64-v8a/libnative-bridge.so` | **0x1000 (4 KB)** | **真违规** |
+| `lib/arm64-v8a/libandroidx.graphics.path.so` | 0x4000 (16 KB) | 合规 |
+
+`libnative-bridge.so` 是本项目自己的 C++ DSP 引擎（`app/src/main/cpp/CMakeLists.txt`），
+由 NDK r27 默认参数产出，仍是 4 KB 对齐——这才是真正的违规项。
+`libandroidx.graphics.path.so` 是 `androidx.compose.ui:ui-graphics` 传递依赖进来的
+`androidx.graphics:graphics-path:1.0.1`，其 ELF 与 APK 内 zip 条目偏移都已 16 KB 对齐；
+系统给出的「未知错误」是该条目在页大小检查器里无法归类时的兜底文案，
+并非真实的对齐缺陷。这一点有旁证：设备上多个第三方应用（如 `com.kiminonawa.HyperLight`）
+内置的 `libandroidx.graphics.path.so` 与本项目**字节完全一致（SHA-256 相同）**，
+且不触发该提示。
+
+**修复**：`app/src/main/cpp/CMakeLists.txt` 增加
+
+```cmake
+add_link_options(-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384)
+```
+
+强制链接器按 16 KB 页输出 `PT_LOAD`（`p_align = 0x4000`）。
+NDK r28+ 已默认如此，此设置在旧 NDK 上生效、在新 NDK 上无害。
+`graphics-path` 未做排除：它本身合规，排除它反而会破坏
+`AndroidPathIterator` 的可用性。
+
+### 修复三：去掉「正在测试可调试应用」警告
+
+**现象**：安装后系统提示「由于当前正在测试的是可调试应用，因此系统会显示此警告」。
+
+**根因**：`dumpsys package com.mouya.musichaptics` 显示 `flags=[ DEBUGGABLE ... ]`——
+之前安装的是 **debug 变体**（`versionName=5.2.0`，`flags=0x20e83e46` 含 DEBUGGABLE）。
+可调试应用必然触发该提示，这是系统设计行为，不是缺陷。
+
+**修复**：`app/build.gradle.kts` 的 `release` 构建类型显式使用调试签名配置
+（`signingConfig = signingConfigs.getByName("debug")`），
+使 CI 无需注入密钥即可产出**已签名且不可调试**的 Release APK。
+安装 `app-release-unsigned.apk`（CI 产物，实际已签名）即不再出现该警告。
+
+### 排查工具（留在 /storage/emulated/0/push/）
+
+- `elfcheck.py` — 按 `(p_vaddr - p_offset) % p_align == 0` 判定 ELF 16 KB 对齐
+- `apkalign.py` — 同时检查 ELF `PT_LOAD` 与 APK 内未压缩条目的 16 KB 偏移
+- `apkcmp.py` — 对比多个 APK 中 `.so` 的对齐写法与 zip extra field
+- `elfdeep.py` — 转储 ELF 头、程序头、节区名与 GNU 属性
+- `classinfo.py` — 极简 Java class 常量池解析（定位 `loadLibrary` 等引用）
+- `getlog.py` / `runinfo.py` — GitHub Actions 完整日志与提交核验
+
+
 ## 5.2.0 — 全链路性能打磨 (2026-10-02)
 
 ### Native DSP（最大收益）

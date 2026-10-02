@@ -8,6 +8,7 @@ import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.util.fastCoerceAtMost
 import com.kyant.backdrop.RuntimeShader
@@ -114,6 +115,10 @@ interface HighlightStyle {
 
 private fun DrawScope.getCornerRadii(shape: Shape): FloatArray {
     val size = size
+    // createShader() may run before the first draw pass, when the scope still
+    // reports Size.Unspecified; size.minDimension would throw. Fall back to a
+    // zero radius instead of crashing the composition.
+    if (!size.isSpecified) return FloatArray(4)
     val maxRadius = size.minDimension / 2f
     val shape = shape as? CornerBasedShape ?: return FloatArray(4) { maxRadius }
     val isLtr = layoutDirection == LayoutDirection.Ltr

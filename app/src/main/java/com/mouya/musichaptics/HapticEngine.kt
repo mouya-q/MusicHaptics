@@ -556,7 +556,7 @@ class HapticEngine(
         if (verboseLogging) {
             Log.d(TAG, "[HAPTIC] ${plan.event} intensity=$intensity duration=${plan.totalDurationMs}ms cooldown=${plan.cooldownMs}ms dynamic=$usedDynamic")
         }
-</ARG>
+    }
 
     private suspend fun runSemanticFrameLoop() {
         val pullIntervalMs = 16L

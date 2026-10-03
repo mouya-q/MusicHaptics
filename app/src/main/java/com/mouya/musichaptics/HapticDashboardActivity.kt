@@ -674,10 +674,37 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
     Box(modifier = Modifier
         .fillMaxSize()
         .background(bgPrimary())
-        .layerBackdrop(liquidGlassBackdrop)
         .statusBarsPadding()
         .navigationBarsPadding()
     ) {
+        // The backdrop layer must record only what lives *behind* the glass.
+        // Applying layerBackdrop() to a node that also contains the glass
+        // children makes the RenderNode reference itself: the layer's display
+        // list ends up drawing the glass, which in turn drawLayer()s this same
+        // layer. RenderNode::prepareTreeImpl then recurses into
+        // SkiaDisplayList::prepareListAndChildren and back without a base
+        // case, overflowing the RenderThread stack (SIGSEGV, "stack pointer is
+        // not in a rw map"). So record a dedicated background-only layer and
+        // keep the glass content as a sibling drawn on top of it.
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .layerBackdrop(liquidGlassBackdrop)
+        ) {
+            // Backdrop content: a decorative gradient, no glass children.
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                (bgPrimary()).copy(alpha = 1f),
+                                (bgPrimary()).copy(alpha = 0.92f),
+                            )
+                        )
+                    )
+            )
+        }
         AnimatedContent(
             targetState = dashboardTab,
             transitionSpec = {

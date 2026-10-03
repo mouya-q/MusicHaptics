@@ -1,5 +1,120 @@
 # Changelog
 
+## 5.2.2 — RenderThread 栈溢出（渲染节点自引用成环）修复 (2026-10-03)
+
+5.2.1 修掉了 `onAttach` 阶段的 Java 异常后，程序终于能走到渲染阶段，随即暴露出
+**下一层问题**：这不是 Java 崩溃，而是 **native 崩溃（SIGSEGV / RenderThread 栈溢出）**。
+
+### 现象
+
+`dumpsys dropbox` 里**没有任何 5.2.1 的 Java 崩溃记录**，`logcat -b crash` 也是空的。
+但进程仍然在启动约 2.7 秒后静默死亡：
+
+```
+=== 8:35:14.986  BinderSender: onForegroundActivitiesChanged: uid=10405, foregroundActivities=true
+=== 8:35:17.671  BinderSender: onProcessDied: pid=9051, uid=10405
+```
+
+`dumpsys activity exit-info com.mouya.musichaptics` 给出真实死因——连续 16 次
+`reason=5 (APP CRASH(NATIVE)) status=11`（SIGSEGV）。
+
+### 崩溃证据（`/data/tombstones/tombstone_01`）
+
+```
+pid: 9051, tid: 18894, name: RenderThread  >>> com.mouya.musichaptics <<<
+signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x00000074639eeea0 (write)
+Cause: stack pointer is not in a rw map; likely due to stack overflow.
+
+512 total frames
+backtrace:
+  #00 libhwui.so  android::uirenderer::RenderNode::prepareTreeImpl(...)
+  #01 libhwui.so  std::__1::__function<...prepareTreeImpl...>::operator()(RenderNode*&&, ...)
+  #02 libhwui.so  android::uirenderer::skiapipeline::SkiaDisplayList::prepareListAndChildren(...)
+  #03 libhwui.so  android::uirenderer::RenderNode::prepareTreeImpl(...)
+  #04 libhwui.so  ...prepareListAndChildren...
+  ...（以 3 帧为周期重复 512 次）
+```
+
+512 帧里 `prepareTreeImpl` 与 `prepareListAndChildren` 以 3 帧为周期**无限重复**，
+说明渲染节点树**深度失控或成环**。
+
+### 根因
+
+`HapticDashboardActivity.kt` 把整个 Box（含内部全部玻璃卡片）用
+`.layerBackdrop(liquidGlassBackdrop)` 录进同一个 backdrop `GraphicsLayer`：
+
+```kotlin
+Box(Modifier.fillMaxSize().background(bgPrimary())
+    .layerBackdrop(liquidGlassBackdrop)   // ← 录入了内部全部玻璃卡片
+) {
+    // 内部所有卡片又都是 .liquidGlass(...) → drawBackdrop(backdrop = 同一层)
+}
+```
+
+而每张玻璃卡片通过 `LocalLiquidGlassBackdrop` 拿到**同一个** `LayerBackdrop`，
+绘制时调用 `LayerBackdrop.drawBackdrop()` → `drawLayer(graphicsLayer)` 去读取这个
+**仍在录制中的层**。于是：层的 display list 包含卡片 → 卡片又 drawLayer 这个层
+→ RenderNode 自引用成环（B 的 display list 里有 B），Hwui 递归遍历时没有终止条件，
+RenderThread 栈被耗尽。
+
+这正是 5.2.0 那次 Java 崩溃**挡住**的路径：当时程序在 `onAttach` 就死了，
+永远走不到渲染阶段，因此这个环一直潜伏着。
+
+### 修复一：把 backdrop 层移出玻璃子树（结构修正）
+
+`HapticDashboardActivity.kt` 不再对包含玻璃卡片的父 Box 直接应用 `layerBackdrop()`，
+而是录制一个**只含背景、不含玻璃卡片**的独立兄弟层，玻璃内容叠在其上：
+
+```kotlin
+Box(Modifier.fillMaxSize().background(bgPrimary())...) {
+    // 兄弟层：只录制背景，不含任何 liquidGlass 子节点
+    Box(Modifier.matchParentSize().layerBackdrop(liquidGlassBackdrop)) {
+        Box(Modifier.matchParentSize().background(Brush.verticalGradient(...)))
+    }
+    AnimatedContent { /* 全部玻璃卡片，作为兄弟节点叠在上方 */ }
+    LiquidGlassTabBar(...)
+}
+```
+
+这样 backdrop 层的内容与消费它的玻璃卡片互不包含，环被打断。
+
+### 修复二：库层重入守卫（防止同类误用再次爆栈）
+
+`liquidglass` 的 `LayerBackdropNode.draw()` 增加录制重入检测：
+
+```kotlin
+private var isRecording = false
+
+override fun ContentDrawScope.draw() {
+    if (isRecording) return
+    drawContent()
+    isRecording = true
+    try {
+        recordLayer(this@LayerBackdropNode, backdrop.graphicsLayer) { backdrop.onDraw(this@draw) }
+    } finally {
+        isRecording = false
+    }
+}
+```
+
+即使将来有调用方再次把玻璃卡片放进 backdrop 层内部，检测到递归后也只会
+**少录一次内容**（降级为「没有额外背景」），而不是 native 栈溢出。
+
+### 取证工具
+
+- `dumpsys activity exit-info <pkg>`：区分 Java 崩溃与 native 崩溃的**关键**命令。
+  `reason=5 (APP CRASH(NATIVE)) status=11` 直接指明 SIGSEGV，
+  而 `dumpsys dropbox --print data_app_crash` 在 native 崩溃场景下**没有记录**。
+- `su -c head -60 /data/tombstones/tombstone_01`：native 崩溃现场（信号、
+  寄存器、512 帧回溯）。
+
+### 附：5.2.1 已确认生效的两项
+
+- 5.2.1 已安装且 `flags=[ HAS_CODE ALLOW_CLEAR_USER_DATA ]`——**DEBUGGABLE 标志已消失**，
+  「正在测试可调试应用」警告消除。
+- 5.2.1 APK 内 `libnative-bridge.so` 三段 LOAD 的 `p_align` 均为 `0x4000`，
+  16 KB 页对齐修复保留。
+
 ## 5.2.1 — 安装后闪退与 16 KB 页对齐修复 (2026-10-03)
 
 5.2.0 云编译全绿（Debug + Release 均 BUILD SUCCESSFUL）后，真机安装暴露两类问题。

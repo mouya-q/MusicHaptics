@@ -313,12 +313,54 @@ class VibrateProxy(private val context: Context) {
             }
         }
     }
+    /**
+     * Android 14+ DynamicEffect path: continuous ADSR envelope driven by OS haptic engine.
+     * Falls back to false when SDK < 34 or reflection fails; caller should use performWaveform.
+     */
+    fun performDynamicEffect(amplitude: Float, sharpness: Float, durationSec: Float, attackSec: Float): Boolean {
+        if (paused) return false
+        if (Build.VERSION.SDK_INT < 34) return false
+        // Brand gate: RichTap DynamicEffect only for Xiaomi / Redmi
+        val mfr = Build.MANUFACTURER.lowercase(Locale.ROOT)
+        val brand = Build.BRAND.lowercase(Locale.ROOT)
+        if (mfr !in setOf("xiaomi", "redmi") && brand !in setOf("xiaomi", "redmi")) return false
+        try {
+            val dynCls = Class.forName("android.os.DynamicEffect")
+            val playerCls = Class.forName("android.os.HapticPlayer")
+            val primCls = Class.forName("android.os.DynamicEffect\$PrimitiveEffect")
+            val paramCls = Class.forName("android.os.DynamicEffect\$Parameter")
+
+            val createDyn = dynCls.getMethod("create")
+            val createCont = dynCls.getMethod("createContinuous", Float::class.java, Float::class.java, Float::class.java)
+            val createParam = dynCls.getMethod("createParameter", Int::class.java, FloatArray::class.java, FloatArray::class.java)
+            val addPrim = dynCls.getMethod("addPrimitive", Float::class.java, primCls)
+            val addParam = primCls.getMethod("addParameter", paramCls)
+
+            val dynEffect = createDyn.invoke(null)
+            val contEffect = createCont.invoke(null, amplitude.coerceIn(0f, 1f), sharpness.coerceIn(0f, 1f), durationSec.coerceAtLeast(0.001f))
+
+            val times = floatArrayOf(0f, attackSec.coerceAtLeast(0f), 0.62f * durationSec, durationSec)
+            val amps = floatArrayOf(0f, amplitude.coerceIn(0f, 1f), 0.76f * amplitude.coerceIn(0f, 1f), 0f)
+            val param = createParam.invoke(null, 0, times, amps)
+            addParam.invoke(contEffect, param)
+            addPrim.invoke(dynEffect, 0f, contEffect)
+
+            val playerCtor = playerCls.getConstructor(dynCls)
+            val player = playerCtor.newInstance(dynEffect)
+            playerCls.getMethod("start").invoke(player)
+            return true
+        } catch (t: Throwable) {
+            if (verboseLogging) Log.d(TAG, "DynamicEffect unavailable: ${t.message}")
+            return false
+        }
+    }
 
     fun performWaveform(timings: LongArray, amplitudes: IntArray) {
         if (paused) {
             android.util.Log.w(TAG, "performWaveform SKIPPED: paused=true")
             return
         }
+</ARG>
         if (timings.isEmpty() || amplitudes.isEmpty()) {
             android.util.Log.w(TAG, "performWaveform SKIPPED: empty arrays")
             return

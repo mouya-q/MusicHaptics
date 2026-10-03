@@ -1,7 +1,40 @@
 # Changelog
 
-## 5.2.4 — HapticEngine 构造抛异常：Linux nice 值被当成 Java 线程优先级 (2026-10-03)
+## 5.2.5 — DynamicEffect ADSR 包络：接入 Android 14+ OS 级触觉引擎 (2026-10-03)
 
+5.2.4 修好线程优先级崩溃后引擎能正常初始化，但振动质感仍差——`VibrationEffect.createWaveform`
+是离散阶梯波，无法表达 C++ DSP 算出的连续 ADSR 包络（rise=2.8ms / fall=4.5ms / Q=17.0）。
+
+### 参考实现分析
+
+反编译 14PRO MusicHaptic v0.1.8 daemon.dex，发现其核心并非 RichTap 私有 API，而是
+Android 14+ 标准 `android.os.DynamicEffect` + `android.os.HapticPlayer`：
+
+```java
+DynamicEffect.createContinuous(amplitude, sharpness, duration)
+  .addParameter(createParameter(0, times[], amps[]))  // 四点 ADSR
+new HapticPlayer(effect).start()
+```
+
+OS 底层对四点曲线做插值，直接驱动 LRA，质感远优于阶梯波。该 API 是 AOSP 标准，
+不限品牌。
+
+### 变更
+- `VibrateProxy.performDynamicEffect()`：反射调用 DynamicEffect/HapticPlayer，加入品牌
+  门控（仅 Xiaomi/Redmi 生效），SDK<34、非目标品牌或反射失败均返回 false
+- `HapticEngine.triggerBeatVibration()`：优先调 performDynamicEffect，失败 fallback 到
+  原 performWaveform 路径；ADSR 参数从 actuator profile 映射（attack=riseTime,
+  sharpness=Q/30, duration=totalDuration）
+- `versionCode` 50204 → 50205
+
+### 兼容性
+
+- SDK≥34 且品牌为 Xiaomi/Redmi：走 DynamicEffect 连续包络（RichTap OS 级驱动）
+- SDK<34、非 Xiaomi/Redmi 品牌或 API 不可用：自动 fallback 到 createWaveform 阶梯波
+</ARG>
+
+## 5.2.4 — HapticEngine 构造抛异常：Linux nice 值被当成 Java 线程优先级 (2026-10-03)
+</ARG>
 5.2.3 修掉 Context 获取问题后，模块日志终于完整出现，但引擎仍然建不起来。冷启动网易云
 （pid 31196）抓到 21 条模块日志，链路一路通到引擎构造，然后抛出：
 

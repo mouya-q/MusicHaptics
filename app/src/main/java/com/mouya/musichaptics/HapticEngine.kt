@@ -532,23 +532,31 @@ class HapticEngine(
         if (now - previous < plan.cooldownMs) return
         if (!lastVibrationMs.compareAndSet(previous, now)) return
 
-        val timings = LongArray(plan.segments.size)
-        val amplitudes = IntArray(plan.segments.size)
-        plan.segments.forEachIndexed { index, segment ->
-            timings[index] = segment.durationMs
-            amplitudes[index] = segment.amplitude
-        }
+        // Try Android 14+ DynamicEffect first (continuous ADSR envelope via OS haptic engine)
+        val ampNorm = (intensity / 255f).coerceIn(0.08f, 0.98f)
+        val durSec = plan.totalDurationMs / 1000f
+        val attackSec = hapticEventGenerator.profile.actuator.riseTimeMs / 1000f
+        val sharpness = (hapticEventGenerator.profile.actuator.qFactor / 30f).coerceIn(0.1f, 1.0f)
+        val usedDynamic = vibrateProxy.performDynamicEffect(ampNorm, sharpness, durSec, attackSec)
 
-        try {
-            vibrateProxy.performWaveform(timings, amplitudes)
-            lastBeatEvent = plan.event
-            if (verboseLogging) {
-                Log.d(TAG, "[HAPTIC] ${plan.event} intensity=$intensity duration=${plan.totalDurationMs}ms cooldown=${plan.cooldownMs}ms")
+        if (!usedDynamic) {
+            val timings = LongArray(plan.segments.size)
+            val amplitudes = IntArray(plan.segments.size)
+            plan.segments.forEachIndexed { index, segment ->
+                timings[index] = segment.durationMs
+                amplitudes[index] = segment.amplitude
             }
-        } catch (t: Throwable) {
-            Log.w(TAG, "[HAPTIC] output failed: ${t.message}")
+            try {
+                vibrateProxy.performWaveform(timings, amplitudes)
+            } catch (t: Throwable) {
+                Log.w(TAG, "[HAPTIC] output failed: ${t.message}")
+            }
         }
-    }
+        lastBeatEvent = plan.event
+        if (verboseLogging) {
+            Log.d(TAG, "[HAPTIC] ${plan.event} intensity=$intensity duration=${plan.totalDurationMs}ms cooldown=${plan.cooldownMs}ms dynamic=$usedDynamic")
+        }
+</ARG>
 
     private suspend fun runSemanticFrameLoop() {
         val pullIntervalMs = 16L

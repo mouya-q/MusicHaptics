@@ -52,7 +52,16 @@ class AudioIngress(
     private val droppedFrameCount = AtomicLong(0L)
 
     init {
-        worker.priority = Process.THREAD_PRIORITY_AUDIO
+        // Thread.priority is a *Java* scheduling hint and only accepts 1..10.
+        // Process.THREAD_PRIORITY_AUDIO (-16) is a Linux nice value for
+        // android.os.Process.setThreadPriority and throws
+        // IllegalArgumentException("Priority out of range") when assigned to it.
+        // The DSP loop feeds native code from the same AudioFlinger thread, so the
+        // worker has to be pinned at the OS level instead.
+        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
+            .onSuccess { Log.i(TAG, "DSP worker pinned at THREAD_PRIORITY_AUDIO") }
+            .onFailure { Log.w(TAG, "DSP worker priority pin failed: ${it.message}") }
+        worker.priority = Thread.MAX_PRIORITY
         worker.start()
     }
 

@@ -1,5 +1,134 @@
 # Changelog
 
+## 5.2.4 — HapticEngine 构造抛异常：Linux nice 值被当成 Java 线程优先级 (2026-10-03)
+
+5.2.3 修掉 Context 获取问题后，模块日志终于完整出现，但引擎仍然建不起来。冷启动网易云
+（pid 31196）抓到 21 条模块日志，链路一路通到引擎构造，然后抛出：
+
+```
+11:15:03.230 I MusicHapticsX-Hook: [com.netease.cloudmusic] hooked Application.attach
+11:15:03.269 I MusicHapticsX-Hook: [com.netease.cloudmusic] hooks registered (context not yet bound)
+11:15:03.269 I MusicHapticsX-Hook: HookCoordinator installed for com.netease.cloudmusic
+11:15:04.234 I MusicHapticsX-Hook: [com.netease.cloudmusic] context acquired via CloudMusicApplication
+11:15:04.367 E MusicHapticsX-Hook: Engine init failed for com.netease.cloudmusic
+                  java.lang.IllegalArgumentException: Priority out of range: -16
+                    at java.lang.Thread.setPriority(Thread.java:1956)
+                    at p1.b.<init>(SourceFile:93)     ← AudioIngress.<init>
+                    at o1.T0.<init>(SourceFile:224)   ← HapticEngine.<init>
+```
+
+### 排查过程中的一个假象
+
+先前"完全没有日志"的判断是错的。模块一直在正常加载，只是 **logcat 缓冲区被宿主侧
+对话日志冲刷掉了**——网易云 10:30 产生的记录到 10:37 已滚出缓冲。改用
+`logcat -c` → 强杀目标 App → 冷启动 → **立刻**按 pid 抓取后，21 条模块日志全部到手。
+
+> 取证纪律：判断"模块有没有加载"不能靠事后翻 logcat 缓冲区，必须在复现的同一
+> 脚本里先清缓冲、再按 `grep -a " <pid> "` 精确锁定，否则会被无关日志淹没。
+
+### 根因
+
+`AudioIngress` 的 `init` 把 **Linux nice 值**赋给了 **Java 线程优先级**：
+
+```kotlin
+worker.priority = Process.THREAD_PRIORITY_AUDIO   // -16
+```
+
+两者是完全不同的量纲：
+
+| API | 合法范围 | 语义 |
+| --- | --- | --- |
+| `Thread.priority` | `1..10` | Java 层调度提示 |
+| `Process.setThreadPriority()` | `进程tid..20` 的 nice 值 | OS 层调度策略 |
+
+`Process.THREAD_PRIORITY_AUDIO` = `-16` 远超 `1..10`，`Thread.setPriority()` 直接抛
+`IllegalArgumentException("Priority out of range")`。`HapticEngine` 构造函数里同步构造
+`AudioIngress`，异常一路冒泡上来，**引擎从未建成**，因此依旧零振动。
+
+该异常被 R8 混淆成 `p1.b.<init>`，栈帧完全看不出是 `AudioIngress`，这也是它能潜伏
+至今的原因。
+
+### 变更
+
+- `AudioIngress.init`：Java 侧改用 `Thread.MAX_PRIORITY`，OS 侧另用
+  `Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)` 固定 nice 值，两者各自
+  就位，并全程 `runCatching` 记录结果
+- `versionCode` 50203 → 50204
+
+DSP 循环与 AudioFlinger 同源，从 OS 层加压才是原本意图的语义；Java 优先级仅作
+辅助提示。
+
+### 排查笔记
+
+- `HookCoordinator` 里的 `HandlerThread("MusicHapticsX-Hook", Process.THREAD_PRIORITY_DISPLAY)`
+  **没有**这个问题——`HandlerThread(String, int)` 重载的第二个参数本来就是 nice 值，
+  内部直接调 `Process.setThreadPriority`，`-4` 合法。
+- 全工程仅 `AudioIngress` 一处存在该缺陷。
+
+## 5.2.3 — Hook 装上了却毫无振动：Android 14+ 取不到 Context (2026-10-03)
+
+5.2.2 修掉 RenderThread 栈溢出后应用能正常打开，但**注入的音乐应用完全没有振动**，
+且 logcat 里找不到任何模块日志。
+
+### 排查结论：Hook 其实是成功的
+
+在设备上冷启动网易云后，模块日志确实存在：
+
+```
+09:53:45.232 28757 28757 I MusicHapticsX-Hook: HookCoordinator installed for com.netease.cloudmusic
+09:53:49.207 28757 19373 D MusicHapticsX-Hook: [com.google.android.webview] not enabled by application filter
+```
+
+`MainHook` → `WhitelistManager` → `HookCoordinator.install()` 全链路正常，AudioTrack 的
+hook 也确实注册了。但**再往后什么都没有**：`HapticEngine`、`VibrateProxy`、
+`NativeBridge` 的日志一条都没有出现。
+
+> 附带的取证经验：模块用 `android.util.Log`（TAG `MusicHapticsX-Hook`）而非
+> `XposedBridge.log`，所以在 LSPosed 的 `modules_*.log` 里**查不到任何记录**——
+> 那是正常现象，不代表模块没加载。判断是否注入应看目标进程的 `/proc/<pid>/maps`
+> 或直接抓 logcat。
+
+### 根因
+
+`HookCoordinator.hookApplicationAttach()` 只 hook 了**一个**方法：
+
+```kotlin
+val attach = runCatching {
+    applicationClass.getDeclaredMethod("attach", Context::class.java)
+}.getOrNull() ?: return          // ← 这里静默 return
+```
+
+`android.app.Application.attach(Context)` 在 **Android 14 起已被移除**，本机是
+Android 17 / SDK 37，反射必然拿到 `null`，于是方法直接 `return`：
+
+- `attachedContext` 永远是 `null`
+- `initializeEngine()` 里 `attachedContext ?: contextProvider() ?: return null`
+  两次都拿不到，**`HapticEngine` 从未被构造**
+- `MainHook` 传入的 `contextProvider = { null }` 也不可能提供 Context
+
+结果就是：Hook 装上了、AudioTrack 也 hook 了，但引擎从未启动，因此没有任何振动，
+而且**全程零日志**——因为失败路径是一个不带任何提示的 `return`。
+
+### 修复
+
+`hookApplicationAttach()` 改为在多个候选入口上依次注册，取到即用：
+
+1. `Application.attach(Context)` — 旧版本（Android 13 及以下）
+2. `Application.attach(Context, ActivityThread)` — 旧版本重载
+3. `Application.attachForCreate(Context)` — **Android 14+ 实际入口**
+4. `Application.attachBaseContext(Context)` — 通用兜底
+5. `ActivityThread.currentActivityThread().getApplication()` 轮询探测 — 最后的保险
+
+同时把静默 `return` 换成显式日志：每个候选方法的注册结果（存在 / 不存在 / 失败）
+都会打印，`install()` 结束也会记录「hooks 已注册、Context 尚未绑定」，
+下次再出问题可以一眼看出断在哪一步。
+
+### 变更
+
+- `HookCoordinator.hookApplicationAttach()`：多入口注册 + 轮询兜底 + 逐步日志
+- `HookCoordinator.install()`：新增注册完成日志
+- `versionCode` 50202 → 50203
+
 ## 5.2.2 — RenderThread 栈溢出（渲染节点自引用成环）修复 (2026-10-03)
 
 5.2.1 修掉了 `onAttach` 阶段的 Java 异常后，程序终于能走到渲染阶段，随即暴露出

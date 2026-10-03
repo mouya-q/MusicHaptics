@@ -90,6 +90,7 @@ class HookCoordinator(
         hookMediaPlayers(lpparam.classLoader)
         handler.post { initializeEngine() }
         handler.post(whitelistRefresh)
+        Log.i(TAG, "[$targetPackage] hooks registered (context not yet bound)")
         contextProvider()?.let { LogBroadcaster.sendLog(it, "Hook ready: $targetPackage") }
     }
 
@@ -114,18 +115,72 @@ class HookCoordinator(
     private fun hookApplicationAttach(classLoader: ClassLoader) {
         val applicationClass = runCatching { XposedHelpers.findClass("android.app.Application", classLoader) }
             .getOrElse { Application::class.java }
-        val attach = runCatching {
-            applicationClass.getDeclaredMethod("attach", Context::class.java)
-        }.getOrNull() ?: return
-        XposedBridge.hookMethod(attach, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                attachedContext = (param.args.firstOrNull() as? Context)?.applicationContext
-                handler.post {
-                    attachedContext?.let(::preloadNative)
-                    initializeEngine()
+
+        // Context acquisition strategy:
+        //   1. android.app.Application#attach(Context)      — legacy (removed on A14+)
+        //   2. android.app.Application#attach(Context, ActivityThread) — legacy overload
+        //   3. android.app.Application#attachForCreate / #attachBaseContext — A14+ replaces #attach
+        //   4. ActivityThread.currentActivityThread().getApplication() — fallback probe
+        // Every hook records the Context it saw; the engine is initialized as soon as any
+        // of them fires. Registration failures are logged instead of silently dropped so a
+        // missing entry point is diagnosable from logcat alone.
+        val attached = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        fun adopt(context: Context?) {
+            val appContext = context?.applicationContext ?: return
+            if (!attached.compareAndSet(false, true)) return
+            attachedContext = appContext
+            Log.i(TAG, "[$targetPackage] context acquired via ${context!!.javaClass.simpleName}")
+            handler.post {
+                preloadNative(appContext)
+                initializeEngine()
+            }
+        }
+
+        fun hookFirst(name: String, vararg types: Class<*>) {
+            val method = runCatching { applicationClass.getDeclaredMethod(name, *types) }.getOrNull()
+            if (method == null) {
+                Log.d(TAG, "[$targetPackage] Application.$name(${types.joinToString { it.simpleName }}) not present on this ROM")
+                return
+            }
+            runCatching {
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        adopt(param.args.firstOrNull { it is Context } as? Context)
+                    }
+                })
+            }.onSuccess {
+                Log.i(TAG, "[$targetPackage] hooked Application.$name")
+            }.onFailure {
+                Log.w(TAG, "[$targetPackage] failed to hook Application.$name: ${it.message}")
+            }
+        }
+
+        hookFirst("attach", Context::class.java)
+        runCatching {
+            hookFirst("attach", Context::class.java, Class.forName("android.app.ActivityThread"))
+        }.onFailure {
+            Log.d(TAG, "[$targetPackage] ActivityThread class unavailable: ${it.message}")
+        }
+        hookFirst("attachForCreate", Context::class.java)
+        hookFirst("attachBaseContext", Context::class.java)
+
+        // Last-resort: poll ActivityThread for the Application object once it exists.
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                if (attached.get()) return
+                val app = runCatching {
+                    val at = Class.forName("android.app.ActivityThread")
+                    val current = at.getDeclaredMethod("currentActivityThread").invoke(null)
+                    at.getDeclaredMethod("getApplication").invoke(current) as? Context
+                }.getOrNull()
+                if (app != null) {
+                    adopt(app)
+                } else if (thread.isAlive) {
+                    handler.postDelayed(this, 500L)
                 }
             }
-        })
+        }, 500L)
     }
 
     private fun preloadNative(context: Context) {

@@ -28,15 +28,36 @@ internal class HookConfigPreferences(
                 null,
                 Bundle().apply { putString("target_package", targetPackage) }
             )
-        }.getOrNull() ?: return
+        }.getOrNull()
+
+        // 5.2.6: 此前 provider 查询失败会静默 return，导致 values 永远停在
+        // emptyMap，所有 get* 都返回默认值 —— UI 层的设置在注入进程里
+        // 完全读不到，且没有任何日志可查。这里补上可见性。
+        if (bundle == null) {
+            if (!refreshWarned.compareAndSet(false, true)) return
+            android.util.Log.w(
+                "MusicHapticsX-Prefs",
+                "[prefs] ConfigProvider unreachable for $targetPackage; " +
+                    "UI settings will NOT apply (all reads fall back to defaults)"
+            )
+            return
+        }
 
         val next = HashMap<String, Any>(bundle.keySet().size)
         for (key in bundle.keySet()) {
             val value = bundle.get(key)
             if (value != null) next[key] = value
         }
+        if (values.isEmpty() && next.isNotEmpty()) {
+            android.util.Log.i(
+                "MusicHapticsX-Prefs",
+                "[prefs] loaded ${next.size} keys for $targetPackage: ${next.keys.take(12).joinToString(",")}"
+            )
+        }
         values = next
     }
+
+    private val refreshWarned = java.util.concurrent.atomic.AtomicBoolean(false)
 
     // SharedPreferences.getAll() must be overridden as a *function*. Kotlin does
     // not expose it as an `all` synthetic property here, so writing

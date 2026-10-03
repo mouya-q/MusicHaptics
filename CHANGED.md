@@ -1,5 +1,72 @@
 # Changelog
 
+## 5.2.6 — 直驱与 Java 链路解耦：修复"报告可用但零振动" (2026-10-03)
+
+5.2.5 装上后仍然零振动。本座从导出的四份 Dashboard 日志定位到**三个互相叠加的缺陷**，
+它们共同构成了"直驱明明可用，却一声不响"的完整因果链。
+
+### 根因一：native 调度器把 Java 回调与直驱做成了互斥
+
+`NativeBridge.cpp` 的 `scheduler_thread_func` 里，onset 命中后走的是二选一：
+
+```cpp
+if (!use_direct_drive && onBeatTrigger) { env->CallVoidMethod(...); }   // 分支 A
+if (use_direct_drive && StrikeOnly)     { trigger_direct_drive(...); }   // 分支 B
+```
+
+日志中 `isDirectDriveAvailable=true` → `use_direct_drive=true` → **分支 A 永不执行**，
+`onBeatTrigger` 一次都不会回调 Java。于是 `triggerBeatVibration` → `performDynamicEffect`
+整条 5.2.5 新链路从未被调用过——这也解释了为何日志里连一条 `[HAPTIC] ... dynamic=` 都没有。
+
+**修复**：分支 A 去掉 `!use_direct_drive` 条件，改为无条件回调。直驱降级为"附加通道"，
+可用则叠加，不可用也不影响 Java 主链路。
+
+### 根因二：音频活动判定只看 native 帧计数，导致恢复逻辑永不触发
+
+`runSemanticFrameLoop` 中 `lastAudioInputTime` 仅在 `semanticFrameCount > 0 || onsetFrameCount > 0`
+时刷新，而这两个计数受 `!nativeSchedulerActive` 守卫——调度器启用时恒为 0。
+于是 `hasAudioActivity` 永远为 false。
+
+**修复**：`markHookAudioArrival()` 每次 PCM 到达都会写 `nativeLastAudioTime`，
+改以它作为真实音频活动来源（`hasNativeAudioActivity || hasHookAudioActivity`）。
+
+### 根因三：hapticPaused 一旦置位即永久锁死
+
+`markCandidateStopped()` 误判后会置 `hapticPaused = true`，但恢复路径只复位了
+`vibrateProxy.paused`，从未复位 `hapticPaused`。而 onset 分支带 `!hapticPaused` 守卫，
+于是整条振动链路永久关闭。日志里连续三次 `[PLAYBACK TRULY PAUSED]` 之后不再振动，
+正是这个锁死。
+
+**修复**：音频恢复时一并解冻 `hapticPaused`，并输出 `[PLAYBACK RESUMED]` 日志。
+
+### 附带：设置读取静默失效
+
+`HookConfigPreferences.refresh()` 在 provider 查询失败时静默 `return`，`values` 永远停在
+`emptyMap`，所有 `get*` 返回默认值且无任何日志。补上一次性告警与加载成功日志，
+避免"UI 改了设置但注入进程读不到"这类问题再次隐身。
+
+### 变更
+
+- `NativeBridge.cpp`：Java 回调改为无条件执行，与直驱并存
+- `HapticEngine.kt`：音频活动判定引入 `nativeLastAudioTime`；恢复时解冻 `hapticPaused`
+- `HookConfigPreferences.kt`：`refresh()` 失败与成功均输出日志
+- `versionCode` 50205 → 50206
+
+### 兼容性
+
+- 直驱可用：Java DynamicEffect/fallback 必发 + sysfs 叠加
+- 直驱不可用：仅 Java 链路
+- 无行为回退风险；振动强度提升后可用 UI 的 `haptic_amplitude` 重新微调
+
+### 已验证的存储/UI 链路
+
+`ConfigProvider` 已注册且可读，`haptics_config.xml` 内容完整：
+`master_switch=true`、`haptic_amplitude=2.0`、`haptic_boost_level=1.6`、
+`selected_preset=3`、`haptic_preset_id=0`、`hardware_profile_id=XIAOMI14`、
+`direct_drive_nodes` 已配置。`synchronizeParameters()` 每 60 帧同步一次，
+`outputAmp`/`forceDefaultAmplitude`/`boostLevel`/profile/preset 均正确下传。
+
+
 ## 5.2.5 — DynamicEffect ADSR 包络：接入 Android 14+ OS 级触觉引擎 (2026-10-03)
 
 5.2.4 修好线程优先级崩溃后引擎能正常初始化，但振动质感仍差——`VibrationEffect.createWaveform`

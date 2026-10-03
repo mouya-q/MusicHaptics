@@ -615,7 +615,11 @@ static void* scheduler_thread_func(void* arg) {
                     const float accentScale = eventType == 1 ? 135.0f : eventType == 2 ? 100.0f : eventType == 3 ? 58.0f : 42.0f;
                     beatAccent = eventValue * accentScale;
 
-                    if (!use_direct_drive && onBeatTrigger) {
+                    // 5.2.6: Java 回调与 native 直驱改为并存而非互斥。
+                    // 直驱 sysfs 在部分机型上"报告可用但实际不驱动硬件"，若继续
+                    // 让 use_direct_drive 关掉 onBeatTrigger，整条 Java 振动链路
+                    // （VibrateProxy / DynamicEffect）将永不触发。
+                    if (onBeatTrigger) {
                         const int intensity = static_cast<int>(std::clamp(
                             eventValue * (eventType == 1 ? 255.0f : eventType == 2 ? 220.0f : eventType == 3 ? 170.0f : 150.0f),
                             18.0f, 255.0f));
@@ -628,6 +632,8 @@ static void* scheduler_thread_func(void* arg) {
 
                     // Hardware nodes named "activate" are usually one-shot waveform
                     // triggers, not a 200 Hz control input. Treat them as strike-only.
+                    // 5.2.6: 直驱降级为"附加通道"——只有写入真正成功才算数，
+                    // 失败时不再吞掉振动（Java 链路已在上方无条件兜底）。
                     if (use_direct_drive &&
                         g_direct_driver_kind.load(std::memory_order_acquire) == static_cast<int>(DirectDriverKind::StrikeOnly)) {
                             const int duration = eventType == 1 ? 16 : eventType == 2 ? 13 : eventType == 3 ? 9 : 11;

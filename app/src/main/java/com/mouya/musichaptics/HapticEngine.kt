@@ -626,10 +626,27 @@ class HapticEngine(
 
                 val timeSinceAudio = frameStartTime - lastAudioInputTime
                 val hasNativeAudioActivity = timeSinceAudio < silenceTimeoutMs
-                val hasAudioActivity = hasNativeAudioActivity
+                // 5.2.6 修复：lastAudioInputTime 仅在 semantic/onset 帧计数非零时
+                // 刷新，而这两个计数在 native 调度器启用时恒为 0，导致
+                // hasAudioActivity 永远 false、恢复逻辑永不触发。
+                // markHookAudioArrival() 每次 PCM 到达都会写 nativeLastAudioTime，
+                // 以它为准才是真实音频活动。
+                val hookPcmAge = frameStartTime - nativeLastAudioTime
+                val hasHookAudioActivity = nativeLastAudioTime > 0L && hookPcmAge < silenceTimeoutMs
+                val hasAudioActivity = hasNativeAudioActivity || hasHookAudioActivity
 
                 if (hasAudioActivity && vibrateProxy.paused) {
                     vibrateProxy.setResumed()
+                }
+
+                // 5.2.6 修复：markCandidateStopped() 会置 hapticPaused=true，
+                // 但此前只有 vibrateProxy.paused 被复位，hapticPaused 一旦被
+                // 误判暂停就永久锁死 —— onset 分支的 !hapticPaused 守卫会
+                // 让整条振动链路再也无法触发。音频恢复时必须一并解冻。
+                if (hasAudioActivity && hapticPaused) {
+                    hapticPaused = false
+                    Log.i(TAG, "[PLAYBACK RESUMED] PCM activity detected, clearing hapticPaused latch")
+                    LogBroadcaster.sendLog(context, "[PLAYBACK RESUMED] haptic engine unpaused")
                 }
 
                 if (hasAudioActivity && vibrateProxy.hasVibrator) {

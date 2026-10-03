@@ -360,7 +360,6 @@ class VibrateProxy(private val context: Context) {
             android.util.Log.w(TAG, "performWaveform SKIPPED: paused=true")
             return
         }
-</ARG>
         if (timings.isEmpty() || amplitudes.isEmpty()) {
             android.util.Log.w(TAG, "performWaveform SKIPPED: empty arrays")
             return

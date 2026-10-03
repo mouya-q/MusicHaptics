@@ -816,7 +816,7 @@ class HapticEngine(
         val styleSnapshot = "[STYLE] preset=${style.key}(${style.label}) intensity=${intensityPct}% " +
                 "ampScale=${style.ampScale} effAmp=${"%.2f".format(outputAmp)} " +
                 "sharp=${style.sharpness} atkScale=${style.attackScale} " +
-                "band=${lowCutoffFreq.toInt()}-${highCutoffHz.toInt()}Hz " +
+                "band=${lowCutoffFreq.toInt()}-${highCutoffFreq.toInt()}Hz " +
                 "onsetTh=${style.onsetThreshold} cooldown=${style.cooldownMs}ms"
         if (styleSnapshot != lastStyleSnapshot) {
             lastStyleSnapshot = styleSnapshot

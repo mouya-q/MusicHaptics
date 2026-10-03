@@ -70,6 +70,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.IntSize
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -850,8 +851,9 @@ private fun IOSStylePresetCard(
     onPresetChange: (StylePreset) -> Unit,
     onIntensityChange: (Int) -> Unit,
 ) {
-    val haptic = remember { HapticFeedbackEngine.create(LocalContext.current) }
-
+    // remember 的 lambda 不是 composable 上下文，LocalContext 必须先在外面取出来。
+    val context = LocalContext.current
+    val haptic = remember(context) { HapticFeedbackEngine.create(context) }
     // 用工程既有的液态玻璃容器承载，与其它卡片保持同一套材质语言
     // （材料的统一性比"每张卡各自华丽"更重要）。
     Column(
@@ -1067,7 +1069,8 @@ private fun LiquidGlassTabBar(
                     animationSpec = iconScaleSpec,
                     label = "DockScale_$title",
                 )
-                val iconLift by animateFloatAsState(
+                // 抬起量是 Dp，必须走 animateDpAsState —— animateFloatAsState 的目标值是 Float。
+                val iconLift by animateDpAsState(
                     targetValue = if (active && !reducedMotion) (-3).dp else 0.dp,
                     animationSpec = if (reducedMotion) snap() else spring(dampingRatio = 0.7f, stiffness = 500f),
                     label = "DockLift_$title",
@@ -1372,7 +1375,9 @@ fun IOSHardwareProfileCard(
     onToggleExpanded: () -> Unit,
 ) {
     val profile = detectDeviceProfile(persistedProfileId = profileId)
-    val hardwareHaptic = remember { HapticFeedbackEngine.create(LocalContext.current) }
+    // 同上：LocalContext 先在 composable 作用域取出，再交给 remember。
+    val hwContext = LocalContext.current
+    val hardwareHaptic = remember(hwContext) { HapticFeedbackEngine.create(hwContext) }
     val statusColor = if (rootVerified) IOSColors.green else IOSColors.red
     val statusText = if (rootVerified) "Root 已验证 · 已使用板级指纹" else "Root 未授权 · 未验证"
     val compactFingerprint = fingerprint.lineSequence()
@@ -1394,11 +1399,12 @@ fun IOSHardwareProfileCard(
     )
     // Reduced motion 不是零反馈 —— 保留透明度过渡（它帮助理解"展开了"），
     // 只丢掉高度与位移这类会移动的动画，避免前庭不适。
-    val foldExpandSpec: FiniteAnimationSpec<Int> =
+    // expandVertically 的高度动画作用在 IntSize 上（不是 Int），类型必须对上。
+    val foldExpandSpec: FiniteAnimationSpec<IntSize> =
         if (reducedMotion) tween(160) else spring(dampingRatio = 0.9f, stiffness = 300f)
     val foldFadeSpec: FiniteAnimationSpec<Float> =
         if (reducedMotion) tween(160) else spring(dampingRatio = 1f, stiffness = 400f)
-    val foldShrinkSpec: FiniteAnimationSpec<Int> =
+    val foldShrinkSpec: FiniteAnimationSpec<IntSize> =
         if (reducedMotion) tween(120) else spring(dampingRatio = 1f, stiffness = 400f)
 
     Column(

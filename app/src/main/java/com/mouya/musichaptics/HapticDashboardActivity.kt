@@ -40,6 +40,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
@@ -604,6 +606,13 @@ fun HapticDashboard() {
         val idx = prefs.getInt("haptic_preset_id", HapticPreset.BALANCED.ordinal)
         mutableStateOf(HapticPreset.entries.getOrElse(idx) { HapticPreset.BALANCED })
     }
+    // 5.2.7: 风格预设（与 DSP 参数一一对应）+ 强度百分比滑块。
+    var stylePreset by remember {
+        mutableStateOf(StylePreset.fromKey(prefs.getString("style_preset", "balanced")))
+    }
+    var intensityPct by remember {
+        mutableStateOf(prefs.getInt("haptic_intensity_pct", 75))
+    }
 
     var synthLraF0 by remember { mutableStateOf(prefs.getFloat("synth_lra_f0", HapticSynthesizer.LRA_F0)) }
     var synthLraQ by remember { mutableStateOf(prefs.getFloat("synth_lra_q", HapticSynthesizer.LRA_Q)) }
@@ -626,6 +635,9 @@ fun HapticDashboard() {
     var hardwareProfileId by remember { mutableStateOf(prefs.getString(RootHardwareProbe.PREF_PROFILE, "DEFAULT") ?: "DEFAULT") }
     var hardwareFingerprint by remember { mutableStateOf(prefs.getString(RootHardwareProbe.PREF_FINGERPRINT, "") ?: "") }
     var hardwareRefreshing by remember { mutableStateOf(false) }
+    // 5.2.7：硬件触觉适配详情默认收起（标题行的 Root 状态始终可见），
+    // 符合 iOS 设置里"次要信息默认折叠、常用信息常驻"的分级。
+    var hardwareCardExpanded by rememberSaveable { mutableStateOf(false) }
     var showRestartDialog by remember { mutableStateOf(false) }
     
     val scope = rememberCoroutineScope()
@@ -633,7 +645,8 @@ fun HapticDashboard() {
     val liquidGlassBackdrop = rememberLayerBackdrop()
  
 LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoost, hapticPreset,
-                 isForceDefaultAmpActive,
+                  stylePreset, intensityPct,
+                  isForceDefaultAmpActive,
                  synthLraF0, synthLraQ, synthRateHz, synthAttackImpact, synthDecayImpact, synthAttackContinuous, synthDecayContinuous,
                  synthReleaseTau, synthSustainLevel, synthThermalWarn, synthThermalCrit, synthThermalRth, synthThermalCth,
                  synthImpactGain, synthContinuousGain, synthTextureGain, synthMasterGain) {
@@ -646,6 +659,9 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
              putFloat("haptic_boost_level", customBassBoost)
              putInt("haptic_preset_id", hapticPreset.ordinal)
              putString("haptic_preset", hapticPreset.name)
+            // 5.2.7 风格预设与强度百分比
+            putString("style_preset", stylePreset.key)
+            putInt("haptic_intensity_pct", intensityPct)
              putFloat("synth_lra_f0", synthLraF0)
              putFloat("synth_lra_q", synthLraQ)
              putInt("synth_rate_hz", synthRateHz)
@@ -720,7 +736,9 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
             if (tab == DashboardTab.CONSOLE) {
         val scrollState = rememberScrollState()
         Column(
-            modifier = Modifier.fillMaxSize().verticalScroll(scrollState).padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 140.dp),
+            // 5.2.7：底部留白对齐新的 dock（64dp 栏体 + 18dp 底距 = 82dp），
+            // 留 18dp 余量，确保最后一张卡滚到底时不被压住。
+            modifier = Modifier.fillMaxSize().verticalScroll(scrollState).padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 100.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             IOSHeaderCard(onRestartScopedApps = { showRestartDialog = true }, onShowAbout = { dashboardTab = DashboardTab.ABOUT })
@@ -729,6 +747,8 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
                 profileId = hardwareProfileId,
                 fingerprint = hardwareFingerprint,
                 refreshing = hardwareRefreshing,
+                expanded = hardwareCardExpanded,
+                onToggleExpanded = { hardwareCardExpanded = !hardwareCardExpanded },
                 onRefresh = {
                     hardwareRefreshing = true
                     scope.launch {
@@ -739,6 +759,13 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
                         hardwareRefreshing = false
                     }
                 }
+            )
+            // 5.2.7 风格预设卡片：UI 与 DSP 参数一一对应，切换后效果必须明显。
+            IOSStylePresetCard(
+                selected = stylePreset,
+                intensityPct = intensityPct,
+                onPresetChange = { stylePreset = it },
+                onIntensityChange = { intensityPct = it },
             )
             IOSControlPanel(
                 selectedPreset, { selectedPreset = it },
@@ -810,6 +837,168 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
 private enum class DashboardTab { CONSOLE, APPS, ABOUT }
 private data class LaunchableApp(val packageName: String, val label: String, val icon: Drawable?)
 
+/**
+ * 5.2.7 风格预设卡片
+ *
+ * 六档风格预设与 [StylePreset] 的 DSP 参数一一对应；强度滑块在其上做乘算，
+ * 两者互不干扰 —— 这样"换风格"和"调强弱"都是立即可感知的变化。
+ */
+@Composable
+private fun IOSStylePresetCard(
+    selected: StylePreset,
+    intensityPct: Int,
+    onPresetChange: (StylePreset) -> Unit,
+    onIntensityChange: (Int) -> Unit,
+) {
+    val haptic = remember { HapticFeedbackEngine.create(LocalContext.current) }
+
+    // 用工程既有的液态玻璃容器承载，与其它卡片保持同一套材质语言
+    // （材料的统一性比"每张卡各自华丽"更重要）。
+    Column(
+        Modifier.fillMaxWidth().liquidGlass().padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("震感风格", color = textPrimary(), fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Text(
+                    "切换频段权重、锐度、包络与触发节奏",
+                    color = textSecondary(), fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            // 徽章：显示当前风格，与参考实现一致的"模式徽标"设计。
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(IOSColors.blue.copy(alpha = 0.14f))
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    selected.label.take(2),
+                    color = IOSColors.blue,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+
+        // 5.2.7：间距统一交给外层 Column 的 spacedBy(8.dp) 承担，
+        // 卡内不再插显式 Spacer —— 节奏统一比"局部多加几 dp"更重要。
+        // 六档预设：2 列网格，选中项带蓝色描边 + 勾选标记。
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            StylePreset.entries.chunked(2).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    row.forEach { preset ->
+                        StylePresetTile(
+                            preset = preset,
+                            active = preset == selected,
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                if (preset != selected) {
+                                    haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
+                                    onPresetChange(preset)
+                                }
+                            },
+                        )
+                    }
+                    if (row.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+
+        Text(
+            selected.description,
+            color = textTertiary(), fontSize = 11.sp,
+            modifier = Modifier.padding(horizontal = 2.dp),
+        )
+
+        // 强度滑块：在所选风格曲线上调整总体强弱。
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column {
+                Text("整体触感幅度", color = textPrimary(), fontWeight = FontWeight.Medium, fontSize = 15.sp)
+                Text("在所选风格曲线上调整总体强弱", color = textTertiary(), fontSize = 11.sp)
+            }
+            Text(
+                "$intensityPct%",
+                color = IOSColors.blue,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        Slider(
+            value = intensityPct.toFloat(),
+            onValueChange = { onIntensityChange(it.toInt()) },
+            valueRange = 10f..100f,
+            steps = 17,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        // 实时预览参数行：让"当前风格 = 什么数值"一目了然，也便于与日志对照。
+        Text(
+            "锐度 ${"%.2f".format(selected.sharpness)} · 起音 ×${"%.2f".format(selected.attackScale)} · " +
+                "频段 ${selected.lowCutHz.toInt()}–${selected.highCutHz.toInt()}Hz · " +
+                "冷却 ${selected.cooldownMs}ms · 增益 ×${"%.2f".format(selected.ampScale)}",
+            color = textTertiary(), fontSize = 10.sp,
+        )
+    }
+}
+
+@Composable
+private fun StylePresetTile(
+    preset: StylePreset,
+    active: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(14.dp)
+    Row(
+        modifier
+            .clip(shape)
+            .background(
+                if (active) IOSColors.blue.copy(alpha = 0.12f)
+                else Color(0xFF787880).copy(alpha = 0.07f)
+            )
+            .then(
+                if (active) Modifier.border(1.5.dp, IOSColors.blue.copy(alpha = 0.55f), shape)
+                else Modifier
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // 勾选标记：选中时显示，未选中时留白占位，避免文字左右跳动。
+        Box(
+            Modifier.size(16.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (active) {
+                Icon(
+                    Icons.Default.Check,
+                    contentDescription = null,
+                    tint = IOSColors.blue,
+                    modifier = Modifier.size(13.dp),
+                )
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(
+            preset.label,
+            color = if (active) IOSColors.blue else textPrimary(),
+            fontSize = 13.sp,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+        )
+    }
+}
+
 @Composable
 private fun LiquidGlassTabBar(
     selected: DashboardTab,
@@ -819,162 +1008,164 @@ private fun LiquidGlassTabBar(
 ) {
     val context = LocalContext.current
     val haptic = remember { HapticFeedbackEngine.create(context) }
-    
-    var pressedTab by remember { mutableStateOf<DashboardTab?>(null) }
-    var dragOffset by remember { mutableFloatStateOf(0f) }
-    val scope = rememberCoroutineScope()
-    val barShape = RoundedCornerShape(28.dp)
-    val lensShape = RoundedCornerShape(22.dp)
-    // Both colours come from @Composable helpers, so they must be resolved here
-    // in composable scope: the onDrawSurface lambdas below are plain DrawScope
-    // lambdas and cannot invoke @Composable functions.
-    val barGlass = glassColor()
-    val lensGlass =
-        if (isDark()) Color.White.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.70f)
+    val reducedMotion = LocalPrefersReducedMotion.current
 
-    BoxWithConstraints(
+    var pressedTab by remember { mutableStateOf<DashboardTab?>(null) }
+    // Apple：dock 的选中态是"图标微凸"，不是"滑块横移"。
+    // tab 是平级导航，滑动会暗示层级深度 —— 那是不存在的。故改为每项独立形变：
+    // 选中项放大微凸并抬高对比，未选中项缩小。二者都是 spring，可随时被打断。
+    val iconScaleSpec: FiniteAnimationSpec<Float> =
+        if (reducedMotion) snap() else spring(dampingRatio = 0.7f, stiffness = 500f)
+    val labelAlphaSpec: FiniteAnimationSpec<Float> =
+        if (reducedMotion) snap() else spring(dampingRatio = 1f, stiffness = 450f)
+
+    val barShape = RoundedCornerShape(32.dp)
+    val pillShape = RoundedCornerShape(24.dp)
+    // drawBackdrop 的 onDrawSurface 是普通 DrawScope lambda，不能调 @Composable，
+    // 所以玻璃色必须在这里解析好再传进去。
+    val barGlass = glassColor()
+    val pillGlass =
+        if (isDark()) Color.White.copy(alpha = 0.20f) else Color.White.copy(alpha = 0.78f)
+    val idleInk = if (isDark()) Color.White.copy(alpha = 0.58f) else Color(0xFF3C3C43).copy(alpha = 0.62f)
+
+    Box(
         modifier
-            .width(240.dp)
-            .height(58.dp)
-            .shadow(16.dp, barShape, ambientColor = Color.Black.copy(alpha = 0.08f), spotColor = Color.Black.copy(alpha = 0.12f))
+            .width(272.dp)
+            .height(64.dp)
+            .shadow(18.dp, barShape, ambientColor = Color.Black.copy(alpha = 0.10f), spotColor = Color.Black.copy(alpha = 0.16f))
             .drawBackdrop(
                 backdrop = backdrop,
                 shape = { barShape },
                 effects = {
                     vibrancy()
-                    blur(22.dp.toPx())
-                    lens(10f, 20f, depthEffect = true, chromaticAberration = false)
+                    blur(24.dp.toPx())
+                    lens(11f, 22f, depthEffect = true, chromaticAberration = false)
                 },
                 highlight = { Highlight.Default },
-                shadow = { Shadow(radius = 20.dp, alpha = 0.45f) },
-                onDrawSurface = { drawRoundRect(barGlass, cornerRadius = CornerRadius(28.dp.toPx())) }
+                shadow = { Shadow(radius = 22.dp, alpha = 0.45f) },
+                onDrawSurface = { drawRoundRect(barGlass, cornerRadius = CornerRadius(32.dp.toPx())) }
             )
-            .padding(5.dp)
+            .padding(horizontal = 8.dp, vertical = 7.dp)
     ) {
-        val computedTabWidth = maxWidth / 3
-        val computedTabWidthPx = with(LocalDensity.current) { computedTabWidth.toPx() }
-        
-        val baseOffset = when (selected) {
-            DashboardTab.CONSOLE -> 0f
-            DashboardTab.APPS -> computedTabWidthPx
-            DashboardTab.ABOUT -> computedTabWidthPx * 2
-        }
-    val lensOffsetPxState = animateFloatAsState(
-        targetValue = baseOffset + dragOffset,
-        animationSpec = PhysicsSpring.uiStandard(),  // critically-damped, no overshoot
-        label = "LensOffset"
-    )
-    
-    val isInteracting = pressedTab != null || dragOffset != 0f
-    val scaleState = animateFloatAsState(
-        targetValue = if (isInteracting) 0.97f else 1f,  // subtle press, was 0.92
-        animationSpec = PhysicsSpring.uiFast(),  // critically-damped
-        label = "LensScale"
-    )
-        
-        Box(
-            Modifier
-                .width(computedTabWidth)
-                .fillMaxHeight()
-                .graphicsLayer { 
-                    translationX = lensOffsetPxState.value
-                    scaleX = scaleState.value
-                    scaleY = scaleState.value
-                }
-                .shadow(if (isInteracting) 6.dp else 2.dp, lensShape, spotColor = Color.Black.copy(alpha = 0.1f))
-                .drawBackdrop(
-                    backdrop = backdrop,
-                    shape = { lensShape },
-                    effects = { vibrancy(); blur(12.dp.toPx()); lens(7f, 14f, depthEffect = true) },
-                    highlight = { Highlight.Default },
-                    shadow = { Shadow(radius = 10.dp, alpha = 0.30f) },
-                    onDrawSurface = { drawRoundRect(lensGlass, cornerRadius = CornerRadius(22.dp.toPx())) }
-                )
-        )
-        Row(Modifier.fillMaxSize()) {
-            listOf(DashboardTab.CONSOLE to "控制台", DashboardTab.APPS to "应用", DashboardTab.ABOUT to "关于").forEach { (tab, title) ->
+        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            listOf(
+                DashboardTab.CONSOLE to "控制台",
+                DashboardTab.APPS to "应用",
+                DashboardTab.ABOUT to "关于",
+            ).forEach { (tab, title) ->
                 val active = selected == tab
-                Column(
-                    Modifier.weight(1f).fillMaxHeight()
-                        .draggable(
-                            orientation = Orientation.Horizontal,
-                            state = rememberDraggableState { delta ->
-                                val newOffset = dragOffset + delta
-                                val maxOffset = computedTabWidthPx * 2 + 20f
-                                val minOffset = -20f
-                                when (selected) {
-                                    DashboardTab.CONSOLE -> dragOffset = newOffset.coerceIn(minOffset, maxOffset)
-                                    DashboardTab.APPS -> dragOffset = newOffset.coerceIn(-computedTabWidthPx - 20f, computedTabWidthPx + 20f)
-                                    DashboardTab.ABOUT -> dragOffset = newOffset.coerceIn(-maxOffset, 20f)
-                                }
-                            },
-                            onDragStarted = {
-                                pressedTab = tab
-                                haptic.perform(HapticFeedbackEngine.HapticStyle.LIGHT_TICK)
-                            },
-                            onDragStopped = {
-                                val switchThreshold = computedTabWidthPx / 2.5f
-                                when {
-                                    selected == DashboardTab.CONSOLE && dragOffset > computedTabWidthPx + switchThreshold -> {
-                                        onSelected(DashboardTab.ABOUT)
-                                        haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
-                                    }
-                                    selected == DashboardTab.CONSOLE && dragOffset > switchThreshold -> {
-                                        onSelected(DashboardTab.APPS)
-                                        haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
-                                    }
-                                    selected == DashboardTab.APPS && dragOffset > switchThreshold -> {
-                                        onSelected(DashboardTab.ABOUT)
-                                        haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
-                                    }
-                                    selected == DashboardTab.APPS && dragOffset < -switchThreshold -> {
-                                        onSelected(DashboardTab.CONSOLE)
-                                        haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
-                                    }
-                                    selected == DashboardTab.ABOUT && dragOffset < -computedTabWidthPx - switchThreshold -> {
-                                        onSelected(DashboardTab.CONSOLE)
-                                        haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
-                                    }
-                                    selected == DashboardTab.ABOUT && dragOffset < -switchThreshold -> {
-                                        onSelected(DashboardTab.APPS)
-                                        haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
-                                    }
-                                }
-                                pressedTab = null
-                                dragOffset = 0f
-                            }
-                        )
+                val isPressed = pressedTab == tab
+                // 选中微凸 1.14×，未选中 1.0×；按下再收 0.96×。
+                // 全部走 spring 而非 timing —— 因为按下/松开可以极快地反复触发，
+                // spring 能从当前值续上，timing 每次都从 0 重来。
+                val scale by animateFloatAsState(
+                    targetValue = when {
+                        isPressed -> 0.96f
+                        active -> 1.14f
+                        else -> 1f
+                    },
+                    animationSpec = iconScaleSpec,
+                    label = "DockScale_$title",
+                )
+                val iconLift by animateFloatAsState(
+                    targetValue = if (active && !reducedMotion) (-3).dp else 0.dp,
+                    animationSpec = if (reducedMotion) snap() else spring(dampingRatio = 0.7f, stiffness = 500f),
+                    label = "DockLift_$title",
+                )
+                val labelAlpha by animateFloatAsState(
+                    targetValue = if (active) 1f else 0f,
+                    animationSpec = labelAlphaSpec,
+                    label = "DockLabel_$title",
+                )
+                val ink by animateColorAsState(
+                    targetValue = if (active) IOSColors.blue else idleInk,
+                    animationSpec = if (reducedMotion) snap() else PhysicsSpring.colorBounce(),
+                    label = "DockInk_$title",
+                )
+
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            // 形变锚点落在底部（dock 里的图标是"站"在底边上的），
+                            // 不是默认中心 —— 否则放大时整组会往上飘，脱离 dock 的重心。
+                            transformOrigin = TransformOrigin(0.5f, 1f)
+                        }
+                        .clip(pillShape)
                         .pointerInput(tab) {
                             detectTapGestures(
                                 onPress = {
                                     pressedTab = tab
-                                    haptic.perform(HapticFeedbackEngine.HapticStyle.LIGHT_TICK)
                                     tryAwaitRelease()
                                     pressedTab = null
                                 },
                                 onTap = {
                                     if (!active) {
+                                        // 触觉与视觉同帧：在提交的那一刻发出，
+                                        // 不等图标形变走完，避免"延迟感"。
                                         haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
                                         onSelected(tab)
                                     }
-                                }
+                                },
                             )
                         },
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Icon(
-                        imageVector = when (tab) {
-                            DashboardTab.CONSOLE -> Icons.Default.Tune
-                            DashboardTab.APPS -> Icons.Default.Apps
-                            DashboardTab.ABOUT -> Icons.Default.MusicNote
-                        },
-                        contentDescription = title,
-                        tint = if (active) IOSColors.blue else Color(0xFF3C3C43).copy(alpha = .6f),
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(Modifier.height(1.dp))
-                    Text(title, color = if (active) IOSColors.blue else Color(0xFF3C3C43).copy(alpha = .6f), fontSize = 10.sp, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal)
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.offset(y = iconLift),
+                    ) {
+                        Icon(
+                            imageVector = when (tab) {
+                                DashboardTab.CONSOLE -> Icons.Default.Tune
+                                DashboardTab.APPS -> Icons.Default.Apps
+                                DashboardTab.ABOUT -> Icons.Default.MusicNote
+                            },
+                            contentDescription = title,
+                            tint = ink,
+                            modifier = Modifier.size(21.dp),
+                        )
+                        // 标签只在选中时出现：未选中时 alpha=0 但仍占位，
+                        // 这样切换时行高不变、图标不会上下跳动。
+                        Box(Modifier.height(13.dp), contentAlignment = Alignment.TopCenter) {
+                            Text(
+                                title,
+                                color = ink,
+                                fontSize = 9.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                modifier = Modifier.graphicsLayer { alpha = labelAlpha },
+                            )
+                        }
+                    }
+                    // 选中项在底部垫一枚同色的柔性指示点，锚点跟随形变，
+                    // 给出"这一项被按下去了"的实体感，而不是仅仅换了个颜色。
+                    if (active) {
+                        Box(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 1.dp)
+                                .width(16.dp)
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(ink.copy(alpha = 0.85f))
+                        )
+                    }
+                    // 选中项再垫一层更亮的玻璃衬底：它比 dock 本体更"厚"，
+                    // 符合"材料厚度编码层级"—— 越厚的表面层级越高（Apple §12）。
+                    if (active) {
+                        Box(
+                            Modifier
+                                .matchParentSize()
+                                .padding(2.dp)
+                                .clip(pillShape)
+                                .background(pillGlass.copy(alpha = pillGlass.alpha * 0.55f))
+                        )
+                    }
                 }
             }
         }
@@ -1176,9 +1367,12 @@ fun IOSHardwareProfileCard(
     profileId: String,
     fingerprint: String,
     refreshing: Boolean,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
 ) {
     val profile = detectDeviceProfile(persistedProfileId = profileId)
+    val hardwareHaptic = remember { HapticFeedbackEngine.create(LocalContext.current) }
     val statusColor = if (rootVerified) IOSColors.green else IOSColors.red
     val statusText = if (rootVerified) "Root 已验证 · 已使用板级指纹" else "Root 未授权 · 未验证"
     val compactFingerprint = fingerprint.lineSequence()
@@ -1187,11 +1381,34 @@ fun IOSHardwareProfileCard(
         .joinToString(" · ")
         .ifBlank { "尚未读取硬件指纹" }
 
+    // 5.2.7：折叠态在 composable 作用域解析，drawBehind 的 lambda 不能再调 @Composable。
+    val dividerColor = separatorColor().copy(alpha = 0.55f)
+    val headerShape = RoundedCornerShape(22.dp)
+    val reducedMotion = LocalPrefersReducedMotion.current
+    // Apple：折叠指示器应该在按下瞬间就反馈，所以箭头随展开状态做弹簧旋转，
+    // 而不是等动画结束再变。用近临界阻尼弹簧，一次极微过冲，可随时被打断。
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = if (reducedMotion) snap() else spring(dampingRatio = 0.9f, stiffness = 320f),
+        label = "HardwareChevron",
+    )
+    // Reduced motion 不是零反馈 —— 保留透明度过渡（它帮助理解"展开了"），
+    // 只丢掉高度与位移这类会移动的动画，避免前庭不适。
+    val foldExpandSpec: FiniteAnimationSpec<Int> =
+        if (reducedMotion) tween(160) else spring(dampingRatio = 0.9f, stiffness = 300f)
+    val foldFadeSpec: FiniteAnimationSpec<Float> =
+        if (reducedMotion) tween(160) else spring(dampingRatio = 1f, stiffness = 400f)
+    val foldShrinkSpec: FiniteAnimationSpec<Int> =
+        if (reducedMotion) tween(120) else spring(dampingRatio = 1f, stiffness = 400f)
+
     Column(
         Modifier.fillMaxWidth().liquidGlass().padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.fillMaxWidth().clip(headerShape),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Box(Modifier.size(34.dp).clip(RoundedCornerShape(11.dp))
                 .background(statusColor.copy(alpha = 0.13f)), contentAlignment = Alignment.Center) {
                 Icon(Icons.Default.Security, null, tint = statusColor, modifier = Modifier.size(19.dp))
@@ -1205,15 +1422,56 @@ fun IOSHardwareProfileCard(
                 if (refreshing) CircularProgressIndicator(Modifier.size(19.dp), strokeWidth = 2.dp, color = IOSColors.blue)
                 else Icon(Icons.Default.Refresh, "重新检测硬件", tint = IOSColors.blue)
             }
+            // 折叠开关：整块标题行可点，命中区远大于图标本身（约 44dp）。
+            Box(
+                Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {
+                            // 触觉与视觉同帧：状态一改，弹簧立刻起步，触觉此刻发出。
+                            hardwareHaptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
+                            onToggleExpanded()
+                        },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "收起硬件触觉适配详情" else "展开硬件触觉适配详情",
+                    tint = if (expanded) IOSColors.blue else textSecondary(),
+                    modifier = Modifier
+                        .size(20.dp)
+                        .graphicsLayer { rotationZ = chevronRotation },
+                )
+            }
         }
-        HorizontalDivider(color = separatorColor().copy(alpha = 0.55f))
-        Text(profile.name, color = textPrimary(), fontSize = 15.sp, fontWeight = FontWeight.Medium)
-        Text(
-            "f₀ ${profile.actuator.resonanceFreq.toInt()} Hz  ·  Q ${"%.1f".format(Locale.ROOT, profile.actuator.qFactor)}  ·  上升 ${"%.1f".format(Locale.ROOT, profile.actuator.riseTimeMs)} ms",
-            color = textSecondary(), fontSize = 12.sp
-        )
-        Text(compactFingerprint, color = textTertiary(), fontSize = 11.sp, maxLines = 2)
-        Text("重新检测后，请重启已启用的音乐 App，使 Hook 进程加载新参数", color = textTertiary(), fontSize = 11.sp)
+        // 折叠体：Materialize，不要只用淡入淡出 —— 高度与内容一起展开，
+        // 让它读起来像一块真实的材料落位，而不是一段半透明的淡入。
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(
+                animationSpec = foldExpandSpec,
+                expandFrom = Alignment.Top,
+            ) + fadeIn(foldFadeSpec),
+            exit = shrinkVertically(
+                animationSpec = foldShrinkSpec,
+                shrinkTowards = Alignment.Top,
+            ) + fadeOut(tween(if (reducedMotion) 120 else 140)),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                HorizontalDivider(color = dividerColor)
+                Text(profile.name, color = textPrimary(), fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    "f₀ ${profile.actuator.resonanceFreq.toInt()} Hz  ·  Q ${"%.1f".format(Locale.ROOT, profile.actuator.qFactor)}  ·  上升 ${"%.1f".format(Locale.ROOT, profile.actuator.riseTimeMs)} ms",
+                    color = textSecondary(), fontSize = 12.sp
+                )
+                Text(compactFingerprint, color = textTertiary(), fontSize = 11.sp, maxLines = 2)
+                Text("重新检测后，请重启已启用的音乐 App，使 Hook 进程加载新参数", color = textTertiary(), fontSize = 11.sp)
+            }
+        }
     }
 }
 @Composable
@@ -1411,38 +1669,120 @@ private fun ScopedAppsRestartDialog(onDismiss: () -> Unit, onConfirm: (List<Stri
         }
     }
     val selected = remember { mutableStateListOf<String>().apply { addAll(apps.map { it.packageName }) } }
+    val haptic = remember { HapticFeedbackEngine.create(context) }
+    val reducedMotion = LocalPrefersReducedMotion.current
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("重启作用域 App") },
-        text = {
+    // 5.2.7：改用液态玻璃面板承载，替换默认 Material AlertDialog。
+    // 空间一致性：它从触发它的顶部刷新按钮那一侧展开、也沿同一侧收回去，
+    // 而不是从屏幕正中央凭空出现。scrim 压暗背景，让面板成为焦点。
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.32f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss,
+            ),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        val enterSpec = if (reducedMotion) tween(180) else spring<Float>(dampingRatio = 0.85f, stiffness = 320f)
+        AnimatedVisibility(
+            visible = true,
+            enter = (if (reducedMotion) fadeIn(tween(180)) else fadeIn(tween(180)) + scaleIn(
+                initialScale = 0.92f,
+                animationSpec = enterSpec,
+                transformOrigin = TransformOrigin(0.5f, 0f),
+            )),
+            exit = fadeOut(tween(150)),
+        ) {
             Column(
-                modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                Modifier
+                    .padding(top = 96.dp, start = 16.dp, end = 16.dp)
+                    .widthIn(max = 520.dp)
+                    .fillMaxWidth()
+                    .liquidGlass(26.dp)
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                Text("重启作用域 App", color = textPrimary(), fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Text("勾选需要重新注入 Hook 并加载新设置的 App。", color = textSecondary(), fontSize = 14.sp)
-                Text("将尝试通过 Root 执行 force-stop；未获取 Root 权限时，请手动结束并重新打开所选 App。", color = IOSColors.orange, fontSize = 12.sp)
-                Spacer(Modifier.height(4.dp))
-                if (apps.isEmpty()) Text("未检测到已安装的作用域 App。", color = textSecondary())
-                apps.forEach { app ->
-                    Row(Modifier.fillMaxWidth().clickable {
-                        if (app.packageName in selected) selected.remove(app.packageName) else selected.add(app.packageName)
-                    }, verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = app.packageName in selected, onCheckedChange = { checked ->
-                            if (checked && app.packageName !in selected) selected.add(app.packageName)
-                            if (!checked) selected.remove(app.packageName)
-                        })
-                        Column {
-                            Text(app.label, color = textPrimary(), fontSize = 15.sp)
-                            Text(app.packageName, color = textTertiary(), fontSize = 11.sp)
+                Text(
+                    "将尝试通过 Root 执行 force-stop；未获取 Root 权限时，请手动结束并重新打开所选 App。",
+                    color = IOSColors.orange, fontSize = 12.sp,
+                )
+                Spacer(Modifier.height(2.dp))
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 380.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (apps.isEmpty()) Text("未检测到已安装的作用域 App。", color = textSecondary())
+                    apps.forEach { app ->
+                        // 5.2.7 修复：原实现把 Row.clickable 与 Checkbox.onCheckedChange 挂在同一次
+                        // 点击上，事件既被 Checkbox 的 handler 处理又冒泡到 Row 再切换一次，
+                        // 表现为"点了没反应"。现在整行是唯一点击源，Checkbox 只做状态呈现。
+                        val isChecked = app.packageName in selected
+                        val rowInteraction = remember { MutableInteractionSource() }
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(
+                                    if (isChecked) IOSColors.blue.copy(alpha = 0.12f)
+                                    else Color.White.copy(alpha = 0.05f)
+                                )
+                                .clickable(
+                                    interactionSource = rowInteraction,
+                                    indication = null,
+                                ) {
+                                    // 提交时才给触觉，与视觉同帧；不是每帧都给。
+                                    haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
+                                    if (isChecked) selected.remove(app.packageName)
+                                    else selected.add(app.packageName)
+                                }
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            // onCheckedChange = null —— 不参与点击，只呈现状态。
+                            Checkbox(
+                                checked = isChecked,
+                                onCheckedChange = null,
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = IOSColors.blue,
+                                    uncheckedColor = IOSColors.gray,
+                                    checkmarkColor = Color.White,
+                                ),
+                            )
+                            Column {
+                                Text(app.label, color = textPrimary(), fontSize = 15.sp)
+                                Text(app.packageName, color = textTertiary(), fontSize = 11.sp)
+                            }
                         }
                     }
                 }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IOSButton("取消", false, Modifier.weight(1f), HapticFeedbackEngine.HapticStyle.SOFT_TAP) {
+                        onDismiss()
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    IOSButton(
+                        "确定重启",
+                        selected.isNotEmpty(),
+                        Modifier.weight(1f),
+                        HapticFeedbackEngine.HapticStyle.SUCCESS,
+                    ) {
+                        onConfirm(selected.toList())
+                    }
+                }
             }
-        },
-        confirmButton = { TextButton(onClick = { onConfirm(selected.toList()) }, enabled = selected.isNotEmpty()) { Text("确定重启") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+        }
+    }
 }
 
 private fun forceStopSelectedAppsWithRoot(packages: List<String>): Boolean {

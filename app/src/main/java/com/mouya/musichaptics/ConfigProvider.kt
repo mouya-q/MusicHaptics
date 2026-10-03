@@ -14,6 +14,8 @@ class ConfigProvider : ContentProvider() {
         private val SAFE_KEYS = setOf(
             "master_switch", "haptic_amplitude", "haptic_boost_level",
             "haptic_preset_id", "selected_preset", "crossover_bypass",
+            // 5.2.7 风格预设与强度百分比：注入进程必须能读到，否则 UI 改了不生效。
+            "style_preset", "haptic_intensity_pct",
             "power_amplify", "silence_threshold", "energy_threshold",
             "min_amplitude", "force_default_amplitude", "visualizer_fallback_enabled",
             "synth_rate_hz", "synth_lra_f0", "synth_lra_q",

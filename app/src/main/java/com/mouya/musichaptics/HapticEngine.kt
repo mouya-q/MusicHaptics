@@ -50,6 +50,65 @@ internal data class BeatShape(
 }
 
 
+/**
+ * 5.2.7 风格预设（Style Preset）
+ *
+ * 设计要点：UI 的"震感预设"必须与 DSP 参数一一对应，否则用户调了看不出差别。
+ * 每档直接改写四组真实生效的量：
+ *   - cooldownMs  节拍冷却间隔（决定疏密）
+ *   - ampScale     幅度缩放（决定强弱）
+ *   - sharpness    LRA 锐度（决定清脆 / 绵长）
+ *   - attackScale  起音时间缩放（决定瞬态硬度）
+ *   - lowCut/highCut 频段权重（决定低频厚度 / 高频纹理）
+ *   - onsetThreshold onset 触发阈值（决定灵敏度）
+ *
+ * 强度滑块（haptic_amplitude）在上述曲线上做乘算，二者互不干扰。
+ */
+enum class StylePreset(
+    val key: String,
+    val label: String,
+    val description: String,
+    val cooldownMs: Long,
+    val ampScale: Float,
+    val sharpness: Float,
+    val attackScale: Float,
+    val lowCutHz: Float,
+    val highCutHz: Float,
+    val onsetThreshold: Float,
+    val accentScale: Float
+) {
+    BALANCED(
+        "balanced", "均衡自适应", "默认 · 兼顾低频厚度与节拍清晰度",
+        118L, 1.00f, 0.32f, 1.00f, 55f, 650f, 0.08f, 1.00f
+    ),
+    BASS(
+        "bass", "低频律动", "强化鼓点与贝斯，振感更厚、更绵长",
+        128L, 1.22f, 0.20f, 1.45f, 32f, 420f, 0.07f, 1.35f
+    ),
+    CRISP(
+        "crisp", "清脆节拍", "短促锐利，适合鼓点密集的音乐",
+        98L, 0.92f, 0.62f, 0.55f, 90f, 1400f, 0.11f, 0.85f
+    ),
+    SOFT(
+        "soft", "柔和氛围", "降低幅度和锐度，适合安静聆听",
+        142L, 0.66f, 0.14f, 1.80f, 45f, 520f, 0.06f, 0.60f
+    ),
+    IMMERSIVE(
+        "immersive", "强劲沉浸", "更宽动态范围，增强整体参与感",
+        108L, 1.35f, 0.42f, 0.78f, 38f, 900f, 0.05f, 1.55f
+    ),
+    PURE(
+        "pure", "纯净律动", "过滤连续微振，只保留清晰鼓点与强起音",
+        260L, 1.12f, 0.74f, 0.42f, 120f, 2200f, 0.19f, 1.25f
+    );
+
+    companion object {
+        fun fromKey(key: String?): StylePreset =
+            entries.firstOrNull { it.key == key } ?: BALANCED
+    }
+}
+
+
 class HapticEngine(
     private val context: Context,
     private val prefs: SharedPreferences,
@@ -196,6 +255,13 @@ class HapticEngine(
 
     @Volatile private var nativeSchedulerActive = false
     @Volatile private var nativeLastAudioTime = 0L
+    // 5.2.7: 记录上一次的风格快照，避免每 60 帧重复刷同一条日志。
+    @Volatile private var lastStyleSnapshot = ""
+    // 风格预设换算出的运行时参数，供 triggerBeatVibration / native 回调使用。
+    @Volatile private var activeStyle: StylePreset = StylePreset.BALANCED
+    @Volatile private var activeIntensityPct: Int = 75
+    // 5.2.7: beat 调试日志计数器（前 12 次全打，之后每 40 次打一条）。
+    private val beatLogCounter = java.util.concurrent.atomic.AtomicLong(0L)
 
     private var udpSocket: DatagramSocket? = null
     private var udpParcel: ParcelFileDescriptor? = null
@@ -532,19 +598,26 @@ class HapticEngine(
         if (now - previous < plan.cooldownMs) return
         if (!lastVibrationMs.compareAndSet(previous, now)) return
 
-        // Try Android 14+ DynamicEffect first (continuous ADSR envelope via OS haptic engine)
-        val ampNorm = (intensity / 255f).coerceIn(0.08f, 0.98f)
-        val durSec = plan.totalDurationMs / 1000f
-        val attackSec = hapticEventGenerator.profile.actuator.riseTimeMs / 1000f
-        val sharpness = (hapticEventGenerator.profile.actuator.qFactor / 30f).coerceIn(0.1f, 1.0f)
-        val usedDynamic = vibrateProxy.performDynamicEffect(ampNorm, sharpness, durSec, attackSec)
+        // 5.2.7: 风格预设真正作用于包络 —— 幅度按 intensity% × ampScale 三级乘算，
+        // 锐度与起音时间由预设改写，冷却间隔沿用预设的疏密节奏。
+        val style = activeStyle
+        val intensityPct = activeIntensityPct.coerceIn(10, 100)
+        val styleAmp = ((intensity / 255f) * (intensityPct / 100f) * style.ampScale * style.accentScale)
+            .coerceIn(0.08f, 0.98f)
+        val durSec = (plan.totalDurationMs * style.attackScale.coerceIn(0.4f, 2.0f) / 1000f)
+            .coerceIn(0.008f, 0.40f)
+        val attackSec = (hapticEventGenerator.profile.actuator.riseTimeMs / 1000f)
+            .coerceIn(0.001f, 0.08f) * style.attackScale.coerceIn(0.4f, 2.0f)
+        val sharpness = style.sharpness.coerceIn(0.05f, 1.0f)
+        val usedDynamic = vibrateProxy.performDynamicEffect(styleAmp, sharpness, durSec, attackSec)
 
         if (!usedDynamic) {
             val timings = LongArray(plan.segments.size)
             val amplitudes = IntArray(plan.segments.size)
+            val gain = (intensityPct / 100f) * style.ampScale
             plan.segments.forEachIndexed { index, segment ->
                 timings[index] = segment.durationMs
-                amplitudes[index] = segment.amplitude
+                amplitudes[index] = (segment.amplitude * gain).toInt().coerceIn(1, 255)
             }
             try {
                 vibrateProxy.performWaveform(timings, amplitudes)
@@ -553,6 +626,21 @@ class HapticEngine(
             }
         }
         lastBeatEvent = plan.event
+
+        // 5.2.7 调试日志：每次触发都打印（不受 verboseLogging 门控），并做限流，
+        // 便于核对"UI 预设 → DSP 参数 → 实际输出"三者是否一致。
+        val beatCounter = beatLogCounter.incrementAndGet()
+        if (beatCounter <= 12 || beatCounter % 40 == 0L) {
+            val dbg = "[BEAT] #${beatCounter} ${plan.event} rawInt=$intensity " +
+                    "style=${style.key} pct=${intensityPct}% amp=${"%.3f".format(styleAmp)} " +
+                    "sharp=${"%.2f".format(sharpness)} dur=${"%.3f".format(durSec)}s " +
+                    "atk=${"%.4f".format(attackSec)}s dyn=$usedDynamic " +
+                    "path=${if (usedDynamic) "DynamicEffect" else "Waveform"} " +
+                    "cooldown=${plan.cooldownMs}ms"
+            Log.i(TAG, dbg)
+            LogBroadcaster.sendLog(context, dbg)
+        }
+
         if (verboseLogging) {
             Log.d(TAG, "[HAPTIC] ${plan.event} intensity=$intensity duration=${plan.totalDurationMs}ms cooldown=${plan.cooldownMs}ms dynamic=$usedDynamic")
         }
@@ -706,10 +794,40 @@ class HapticEngine(
         val powerAmplify = try { prefs.getBoolean("power_amplify", false) } catch (e: Exception) { false }
         val uiPreset = try { prefs.getInt("selected_preset", 2) } catch (e: Exception) { 2 }
         val presetGain = floatArrayOf(0.70f, 0.90f, 1.00f, 1.20f).getOrElse(uiPreset) { 1.00f }
-        val outputAmp = (baseAmplitude * presetGain * if (powerAmplify) 1.15f else 1.0f).coerceIn(0.5f, 4.0f)
 
-        val lowCutoffFreq = if (crossoverBypass) 55.0f else 150.0f
-        val highCutoffFreq = if (crossoverBypass) 650.0f else 330.0f
+        // 5.2.7: 风格预设真正接管 DSP 参数。每档改写频段、幅度、锐度与阈值，
+        // 用户在 UI 切换后必须能明显听出/觉出差别，而不是只乘一个 0.7~1.2 的常数。
+        val styleKey = try { prefs.getString("style_preset", "balanced") } catch (e: Exception) { "balanced" }
+        val style = StylePreset.fromKey(styleKey)
+        val intensityPct = try { prefs.getInt("haptic_intensity_pct", 75) } catch (e: Exception) { 75 }
+        // 参考实现的三级乘算：onset 强度 × intensity% × preset.ampScale，
+        // 并保留 0.5 下限，保证弱起音也能被感知（与参考实现 0.08 下限同理）。
+        val intensityScale = (intensityPct.coerceIn(10, 100) / 100f) * style.ampScale
+        val outputAmp = (baseAmplitude * presetGain * intensityScale * if (powerAmplify) 1.15f else 1.0f)
+            .coerceIn(0.3f, 6.0f)
+
+        // 频段权重改由风格预设决定；crossover_bypass 仅作为未选预设时的兼容开关。
+        val lowCutoffFreq = if (prefs.contains("style_preset")) style.lowCutHz
+                            else if (crossoverBypass) 55.0f else 150.0f
+        val highCutoffFreq = if (prefs.contains("style_preset")) style.highCutHz
+                             else if (crossoverBypass) 650.0f else 330.0f
+
+        // 预设切换需要立刻可见：打印一行完整快照，便于核对 UI 与 DSP 是否一致。
+        val styleSnapshot = "[STYLE] preset=${style.key}(${style.label}) intensity=${intensityPct}% " +
+                "ampScale=${style.ampScale} effAmp=${"%.2f".format(outputAmp)} " +
+                "sharp=${style.sharpness} atkScale=${style.attackScale} " +
+                "band=${lowCutoffFreq.toInt()}-${highCutoffHz.toInt()}Hz " +
+                "onsetTh=${style.onsetThreshold} cooldown=${style.cooldownMs}ms"
+        if (styleSnapshot != lastStyleSnapshot) {
+            lastStyleSnapshot = styleSnapshot
+            activeStyle = style
+            activeIntensityPct = intensityPct
+            Log.i(TAG, styleSnapshot)
+            LogBroadcaster.sendLog(context, styleSnapshot)
+        } else {
+            activeStyle = style
+            activeIntensityPct = intensityPct
+        }
 
         nativeBridge.configure(
             sampleRate = sampleRate.toFloat(),

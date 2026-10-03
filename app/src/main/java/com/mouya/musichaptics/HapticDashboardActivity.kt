@@ -761,13 +761,8 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
                     }
                 }
             )
-            // 5.2.7 风格预设卡片：UI 与 DSP 参数一一对应，切换后效果必须明显。
-            IOSStylePresetCard(
-                selected = stylePreset,
-                intensityPct = intensityPct,
-                onPresetChange = { stylePreset = it },
-                onIntensityChange = { intensityPct = it },
-            )
+            // 5.2.8 风格预设与强度百分比已并入下方 IOSControlPanel 的
+            // "增益档位"与"风格预设"两处控件，不再单独占一张卡片。
             IOSControlPanel(
                 selectedPreset, { selectedPreset = it },
                 showAdvancedSettings, { showAdvancedSettings = !showAdvancedSettings },
@@ -791,6 +786,8 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
                 synthContinuousGain, { synthContinuousGain = it; prefs.edit().putFloat("synth_continuous_gain", it).apply() },
                 synthTextureGain, { synthTextureGain = it; prefs.edit().putFloat("synth_texture_gain", it).apply() },
                 synthMasterGain, { synthMasterGain = it; prefs.edit().putFloat("synth_master_gain", it).apply() },
+                stylePreset, { stylePreset = it },
+                intensityPct, { intensityPct = it },
                 isForceDefaultAmpActive, { isForceDefaultAmpActive = !isForceDefaultAmpActive },
             )
             IOSConsole(
@@ -806,7 +803,11 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
             )
 }
 
-        if (showRestartDialog) ScopedAppsRestartDialog(
+        // 5.2.8：对话框不再用 if 条件挂载 —— 那样组件一被移除，
+        // 退出动画就没有机会播完，关闭是瞬间消失。常驻挂载、只传 show，
+        // 进出会走同一条路径。
+        ScopedAppsRestartDialog(
+            show = showRestartDialog,
             onDismiss = { showRestartDialog = false },
             onConfirm = { selected ->
                 val rootGranted = forceStopSelectedAppsWithRoot(selected)
@@ -838,169 +839,6 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
 private enum class DashboardTab { CONSOLE, APPS, ABOUT }
 private data class LaunchableApp(val packageName: String, val label: String, val icon: Drawable?)
 
-/**
- * 5.2.7 风格预设卡片
- *
- * 六档风格预设与 [StylePreset] 的 DSP 参数一一对应；强度滑块在其上做乘算，
- * 两者互不干扰 —— 这样"换风格"和"调强弱"都是立即可感知的变化。
- */
-@Composable
-private fun IOSStylePresetCard(
-    selected: StylePreset,
-    intensityPct: Int,
-    onPresetChange: (StylePreset) -> Unit,
-    onIntensityChange: (Int) -> Unit,
-) {
-    // remember 的 lambda 不是 composable 上下文，LocalContext 必须先在外面取出来。
-    val context = LocalContext.current
-    val haptic = remember(context) { HapticFeedbackEngine.create(context) }
-    // 用工程既有的液态玻璃容器承载，与其它卡片保持同一套材质语言
-    // （材料的统一性比"每张卡各自华丽"更重要）。
-    Column(
-        Modifier.fillMaxWidth().liquidGlass().padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Top,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("震感风格", color = textPrimary(), fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                Text(
-                    "切换频段权重、锐度、包络与触发节奏",
-                    color = textSecondary(), fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
-            }
-            // 徽章：显示当前风格，与参考实现一致的"模式徽标"设计。
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(IOSColors.blue.copy(alpha = 0.14f))
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
-            ) {
-                Text(
-                    selected.label.take(2),
-                    color = IOSColors.blue,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-        }
-
-        // 5.2.7：间距统一交给外层 Column 的 spacedBy(8.dp) 承担，
-        // 卡内不再插显式 Spacer —— 节奏统一比"局部多加几 dp"更重要。
-        // 六档预设：2 列网格，选中项带蓝色描边 + 勾选标记。
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            StylePreset.entries.chunked(2).forEach { row ->
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    row.forEach { preset ->
-                        StylePresetTile(
-                            preset = preset,
-                            active = preset == selected,
-                            modifier = Modifier.weight(1f),
-                            onClick = {
-                                if (preset != selected) {
-                                    haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
-                                    onPresetChange(preset)
-                                }
-                            },
-                        )
-                    }
-                    if (row.size == 1) Spacer(Modifier.weight(1f))
-                }
-            }
-        }
-
-        Text(
-            selected.description,
-            color = textTertiary(), fontSize = 11.sp,
-            modifier = Modifier.padding(horizontal = 2.dp),
-        )
-
-        // 强度滑块：在所选风格曲线上调整总体强弱。
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column {
-                Text("整体触感幅度", color = textPrimary(), fontWeight = FontWeight.Medium, fontSize = 15.sp)
-                Text("在所选风格曲线上调整总体强弱", color = textTertiary(), fontSize = 11.sp)
-            }
-            Text(
-                "$intensityPct%",
-                color = IOSColors.blue,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-        Slider(
-            value = intensityPct.toFloat(),
-            onValueChange = { onIntensityChange(it.toInt()) },
-            valueRange = 10f..100f,
-            steps = 17,
-            modifier = Modifier.padding(top = 2.dp),
-        )
-        // 实时预览参数行：让"当前风格 = 什么数值"一目了然，也便于与日志对照。
-        Text(
-            "锐度 ${"%.2f".format(selected.sharpness)} · 起音 ×${"%.2f".format(selected.attackScale)} · " +
-                "频段 ${selected.lowCutHz.toInt()}–${selected.highCutHz.toInt()}Hz · " +
-                "冷却 ${selected.cooldownMs}ms · 增益 ×${"%.2f".format(selected.ampScale)}",
-            color = textTertiary(), fontSize = 10.sp,
-        )
-    }
-}
-
-@Composable
-private fun StylePresetTile(
-    preset: StylePreset,
-    active: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    val shape = RoundedCornerShape(14.dp)
-    Row(
-        modifier
-            .clip(shape)
-            .background(
-                if (active) IOSColors.blue.copy(alpha = 0.12f)
-                else Color(0xFF787880).copy(alpha = 0.07f)
-            )
-            .then(
-                if (active) Modifier.border(1.5.dp, IOSColors.blue.copy(alpha = 0.55f), shape)
-                else Modifier
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // 勾选标记：选中时显示，未选中时留白占位，避免文字左右跳动。
-        Box(
-            Modifier.size(16.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (active) {
-                Icon(
-                    Icons.Default.Check,
-                    contentDescription = null,
-                    tint = IOSColors.blue,
-                    modifier = Modifier.size(13.dp),
-                )
-            }
-        }
-        Spacer(Modifier.width(6.dp))
-        Text(
-            preset.label,
-            color = if (active) IOSColors.blue else textPrimary(),
-            fontSize = 13.sp,
-            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-            maxLines = 1,
-        )
-    }
-}
-
 @Composable
 private fun LiquidGlassTabBar(
     selected: DashboardTab,
@@ -1008,173 +846,134 @@ private fun LiquidGlassTabBar(
     backdrop: LayerBackdrop,
     modifier: Modifier = Modifier,
 ) {
+    // 5.2.8 回退：恢复 5.2.6 的胶囊 + 透镜横移滑块 + 可拖拽设计。
+    // 5.2.7 改成"每项独立微凸"，实际用起来图标大小跳变、标签忽隐忽现，
+    // 与界面对不齐，也不好拖。横移滑块更稳、更好按，故回退。
     val context = LocalContext.current
     val haptic = remember { HapticFeedbackEngine.create(context) }
-    val reducedMotion = LocalPrefersReducedMotion.current
 
     var pressedTab by remember { mutableStateOf<DashboardTab?>(null) }
-    // Apple：dock 的选中态是"图标微凸"，不是"滑块横移"。
-    // tab 是平级导航，滑动会暗示层级深度 —— 那是不存在的。故改为每项独立形变：
-    // 选中项放大微凸并抬高对比，未选中项缩小。二者都是 spring，可随时被打断。
-    val iconScaleSpec: FiniteAnimationSpec<Float> =
-        if (reducedMotion) snap() else spring(dampingRatio = 0.7f, stiffness = 500f)
-    val labelAlphaSpec: FiniteAnimationSpec<Float> =
-        if (reducedMotion) snap() else spring(dampingRatio = 1f, stiffness = 450f)
+    var dragOffset by remember { mutableFloatStateOf(0f) }
 
-    val barShape = RoundedCornerShape(32.dp)
-    val pillShape = RoundedCornerShape(24.dp)
-    // drawBackdrop 的 onDrawSurface 是普通 DrawScope lambda，不能调 @Composable，
-    // 所以玻璃色必须在这里解析好再传进去。
+    val tabs = listOf(
+        DashboardTab.CONSOLE to ("控制台" to Icons.Default.Tune),
+        DashboardTab.APPS to ("应用" to Icons.Default.Apps),
+        DashboardTab.ABOUT to ("关于" to Icons.Default.MusicNote),
+    )
+    val barShape = RoundedCornerShape(30.dp)
+    val pillShape = RoundedCornerShape(22.dp)
     val barGlass = glassColor()
-    val pillGlass =
-        if (isDark()) Color.White.copy(alpha = 0.20f) else Color.White.copy(alpha = 0.78f)
-    val idleInk = if (isDark()) Color.White.copy(alpha = 0.58f) else Color(0xFF3C3C43).copy(alpha = 0.62f)
 
     Box(
         modifier
-            .width(272.dp)
-            .height(64.dp)
-            .shadow(18.dp, barShape, ambientColor = Color.Black.copy(alpha = 0.10f), spotColor = Color.Black.copy(alpha = 0.16f))
+            .width(240.dp)
+            .height(58.dp)
+            .shadow(16.dp, barShape, ambientColor = Color.Black.copy(alpha = 0.10f), spotColor = Color.Black.copy(alpha = 0.16f))
             .drawBackdrop(
                 backdrop = backdrop,
                 shape = { barShape },
                 effects = {
                     vibrancy()
-                    blur(24.dp.toPx())
-                    lens(11f, 22f, depthEffect = true, chromaticAberration = false)
+                    blur(20.dp.toPx())
+                    lens(10f, 20f, depthEffect = true, chromaticAberration = false)
                 },
                 highlight = { Highlight.Default },
-                shadow = { Shadow(radius = 22.dp, alpha = 0.45f) },
-                onDrawSurface = { drawRoundRect(barGlass, cornerRadius = CornerRadius(32.dp.toPx())) }
+                shadow = { Shadow(radius = 20.dp, alpha = 0.42f) },
+                onDrawSurface = { drawRoundRect(barGlass, cornerRadius = CornerRadius(30.dp.toPx())) }
             )
-            .padding(horizontal = 8.dp, vertical = 7.dp)
+            .padding(4.dp)
     ) {
-        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            listOf(
-                DashboardTab.CONSOLE to "控制台",
-                DashboardTab.APPS to "应用",
-                DashboardTab.ABOUT to "关于",
-            ).forEach { (tab, title) ->
-                val active = selected == tab
-                val isPressed = pressedTab == tab
-                // 选中微凸 1.14×，未选中 1.0×；按下再收 0.96×。
-                // 全部走 spring 而非 timing —— 因为按下/松开可以极快地反复触发，
-                // spring 能从当前值续上，timing 每次都从 0 重来。
-                val scale by animateFloatAsState(
-                    targetValue = when {
-                        isPressed -> 0.96f
-                        active -> 1.14f
-                        else -> 1f
-                    },
-                    animationSpec = iconScaleSpec,
-                    label = "DockScale_$title",
-                )
-                // 抬起量是 Dp，必须走 animateDpAsState —— animateFloatAsState 的目标值是 Float。
-                val iconLift by animateDpAsState(
-                    targetValue = if (active && !reducedMotion) (-3).dp else 0.dp,
-                    animationSpec = if (reducedMotion) snap() else spring(dampingRatio = 0.7f, stiffness = 500f),
-                    label = "DockLift_$title",
-                )
-                val labelAlpha by animateFloatAsState(
-                    targetValue = if (active) 1f else 0f,
-                    animationSpec = labelAlphaSpec,
-                    label = "DockLabel_$title",
-                )
-                val ink by animateColorAsState(
-                    targetValue = if (active) IOSColors.blue else idleInk,
-                    animationSpec = if (reducedMotion) snap() else PhysicsSpring.colorBounce(),
-                    label = "DockInk_$title",
-                )
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val itemWidth = maxWidth / tabs.size
+            val itemWidthPx = with(LocalDensity.current) { itemWidth.toPx() }
+            val baseOffset = itemWidthPx * tabs.indexOfFirst { it.first == selected }
+            val lensOffsetPx by animateFloatAsState(
+                targetValue = baseOffset + dragOffset,
+                animationSpec = PhysicsSpring.elasticSelect(),
+                label = "DockLensOffset",
+            )
 
-                Box(
-                    Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .graphicsLayer {
-                            scaleX = scale
-                            scaleY = scale
-                            // 形变锚点落在底部（dock 里的图标是"站"在底边上的），
-                            // 不是默认中心 —— 否则放大时整组会往上飘，脱离 dock 的重心。
-                            transformOrigin = TransformOrigin(0.5f, 1f)
-                        }
-                        .clip(pillShape)
-                        .pointerInput(tab) {
-                            detectTapGestures(
-                                onPress = {
-                                    pressedTab = tab
-                                    tryAwaitRelease()
-                                    pressedTab = null
-                                },
-                                onTap = {
-                                    if (!active) {
-                                        // 触觉与视觉同帧：在提交的那一刻发出，
-                                        // 不等图标形变走完，避免"延迟感"。
-                                        haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
-                                        onSelected(tab)
-                                    }
-                                },
-                            )
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
-                        modifier = Modifier.offset(y = iconLift),
-                    ) {
-                        Icon(
-                            imageVector = when (tab) {
-                                DashboardTab.CONSOLE -> Icons.Default.Tune
-                                DashboardTab.APPS -> Icons.Default.Apps
-                                DashboardTab.ABOUT -> Icons.Default.MusicNote
+            // 透镜滑块：跟随选中项与拖拽位移横移。
+            Box(
+                Modifier
+                    .offset { androidx.compose.ui.unit.IntOffset(lensOffsetPx.toInt(), 0) }
+                    .width(itemWidth)
+                    .fillMaxHeight()
+                    .clip(pillShape)
+                    .background(if (isDark()) Color(0xFF48484A) else Color.White)
+            )
+
+            Row(Modifier.fillMaxSize()) {
+                tabs.forEach { (tab, meta) ->
+                    val (title, icon) = meta
+                    val active = selected == tab
+                    val ink by animateColorAsState(
+                        targetValue = if (active) IOSColors.blue else textSecondary(),
+                        animationSpec = PhysicsSpring.colorBounce(),
+                        label = "DockInk_$title",
+                    )
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .pointerInput(tab) {
+                                detectDragGestures(
+                                    onDragStart = { pressedTab = tab },
+                                    onDragEnd = {
+                                        val targetIndex = ((baseOffset + dragOffset) / itemWidthPx)
+                                            .roundToInt().coerceIn(0, tabs.size - 1)
+                                        val target = tabs[targetIndex].first
+                                        if (target != selected) {
+                                            haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
+                                            onSelected(target)
+                                        }
+                                        pressedTab = null
+                                        dragOffset = 0f
+                                    },
+                                    onDragCancel = { pressedTab = null; dragOffset = 0f },
+                                ) { change, amount ->
+                                    change.consume()
+                                    dragOffset += amount.x
+                                }
+                            }
+                            .pointerInput(tab, "tap") {
+                                detectTapGestures(
+                                    onPress = {
+                                        pressedTab = tab
+                                        tryAwaitRelease()
+                                        pressedTab = null
+                                    },
+                                    onTap = {
+                                        if (!active) {
+                                            haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
+                                            onSelected(tab)
+                                        }
+                                    },
+                                )
                             },
-                            contentDescription = title,
-                            tint = ink,
-                            modifier = Modifier.size(21.dp),
-                        )
-                        // 标签只在选中时出现：未选中时 alpha=0 但仍占位，
-                        // 这样切换时行高不变、图标不会上下跳动。
-                        Box(Modifier.height(13.dp), contentAlignment = Alignment.TopCenter) {
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = title,
+                                tint = ink,
+                                modifier = Modifier.size(20.dp),
+                            )
                             Text(
                                 title,
                                 color = ink,
-                                fontSize = 9.5.sp,
+                                fontSize = 10.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
-                                modifier = Modifier.graphicsLayer { alpha = labelAlpha },
                             )
                         }
-                    }
-                    // 选中项在底部垫一枚同色的柔性指示点，锚点跟随形变，
-                    // 给出"这一项被按下去了"的实体感，而不是仅仅换了个颜色。
-                    if (active) {
-                        Box(
-                            Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(bottom = 1.dp)
-                                .width(16.dp)
-                                .height(3.dp)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(ink.copy(alpha = 0.85f))
-                        )
-                    }
-                    // 选中项再垫一层更亮的玻璃衬底：它比 dock 本体更"厚"，
-                    // 符合"材料厚度编码层级"—— 越厚的表面层级越高（Apple §12）。
-                    if (active) {
-                        Box(
-                            Modifier
-                                .matchParentSize()
-                                .padding(2.dp)
-                                .clip(pillShape)
-                                .background(pillGlass.copy(alpha = pillGlass.alpha * 0.55f))
-                        )
                     }
                 }
             }
         }
     }
 }
-
 @Composable
 private fun ScopedAppsScreen() {
     val context = LocalContext.current
@@ -1504,38 +1303,76 @@ fun IOSControlPanel(
     synthContinuousGain: Float, onSynthContinuousGainChange: (Float) -> Unit,
     synthTextureGain: Float, onSynthTextureGainChange: (Float) -> Unit,
     synthMasterGain: Float, onSynthMasterGainChange: (Float) -> Unit,
+    // 5.2.8：六档风格与强度百分比并入本控件，复用既有的“增益档位 / 风格预设”两处，
+    // 不再另起卡片，避免同一件事在界面上有两个入口。
+    stylePreset: StylePreset, onStylePresetChange: (StylePreset) -> Unit,
+    intensityPct: Int, onIntensityPctChange: (Int) -> Unit,
     isForceDefaultAmpActive: Boolean = false, onForceDefaultAmpClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val hapticEngine = remember { HapticFeedbackEngine.create(context) }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            // 5.2.8：强度百分比并入"增益档位"。它与既有的四档基础增益是同一件事
+            // 的粗细两档 —— 档位定基准、百分比做连续微调，界面只应有一个入口。
             Text("增益档位", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
             IOSSegmentedControl(items = Preset.entries.toList(), selected = selectedPreset, onSelect = onPresetChange, label = { it.label })
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("整体触感幅度", color = textPrimary(), fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                Text("$intensityPct%", color = IOSColors.blue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Slider(
+                value = intensityPct.toFloat(),
+                onValueChange = { onIntensityPctChange(it.roundToInt()) },
+                valueRange = 10f..100f,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "在所选风格曲线上做连续微调；档位决定基准，增度决定手感。",
+                color = textTertiary(), fontSize = 10.sp,
+            )
 
+            // 5.2.8：六档风格并入"风格预设"。每档改写的是一组真实 DSP 参数
+            // （频段 / 锐度 / 起音 / 冷却 / 阈值 / 重音），不是常数倍率。
             Text("风格预设", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                HapticPreset.entries.forEach { preset ->
-                    val isSelected = hapticPreset == preset
-                    Box(
-                        modifier = Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
-                            .background(if (isSelected) IOSColors.blue.copy(alpha = 0.12f) else Color.Transparent)
-                            .border(if (isSelected) 1.dp else 0.dp, if (isSelected) IOSColors.blue else Color.Transparent, RoundedCornerShape(12.dp))
-                            .clickable {
-                                if (hapticPreset != preset) {
-                                    onHapticPresetChange(preset)
-                                    hapticEngine.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                StylePreset.entries.chunked(3).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        row.forEach { preset ->
+                            val isSelected = stylePreset == preset
+                            Box(
+                                modifier = Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
+                                    .background(if (isSelected) IOSColors.blue.copy(alpha = 0.12f) else Color.Transparent)
+                                    .border(if (isSelected) 1.dp else 0.dp, if (isSelected) IOSColors.blue else Color.Transparent, RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        if (!isSelected) {
+                                            onStylePresetChange(preset)
+                                            hapticEngine.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
+                                        }
+                                    }.padding(vertical = 10.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(preset.label, color = if (isSelected) IOSColors.blue else textSecondary(), fontSize = 12.sp, fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
+                                    Text(preset.description, color = if (isSelected) IOSColors.blue.copy(alpha = 0.7f) else textTertiary(), fontSize = 9.sp, maxLines = 1)
                                 }
-                            }.padding(vertical = 10.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(preset.label, color = if (isSelected) IOSColors.blue else textSecondary(), fontSize = 12.sp, fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal)
-                            Text(preset.description, color = if (isSelected) IOSColors.blue.copy(alpha = 0.7f) else textTertiary(), fontSize = 9.sp, maxLines = 1)
+                            }
                         }
+                        repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
                     }
                 }
             }
+            // 实时参数预览：与 [STYLE] 日志逐项对照，便于确认 UI 与 DSP 一致。
+            Text(
+                "锐度 ${"%.2f".format(stylePreset.sharpness)} · 起音 x${"%.2f".format(stylePreset.attackScale)} · " +
+                    "频段 ${stylePreset.lowCutHz.toInt()}-${stylePreset.highCutHz.toInt()}Hz · " +
+                    "冷却 ${stylePreset.cooldownMs}ms · 增益 x${"%.2f".format(stylePreset.ampScale)}",
+                color = textTertiary(), fontSize = 10.sp,
+            )
         }
 
         AnimatedVisibility(
@@ -1658,7 +1495,7 @@ fun AboutScreen(onBack: () -> Unit) {
 private data class ScopedApp(val packageName: String, val label: String)
 
 @Composable
-private fun ScopedAppsRestartDialog(onDismiss: () -> Unit, onConfirm: (List<String>) -> Unit) {
+private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConfirm: (List<String>) -> Unit) {
     val context = LocalContext.current
     val scopedPackages = remember { listOf(
         "tv.danmaku.bili", "com.kugou.android", "com.kugou.android.lite", "cn.kuwo.player",
@@ -1681,6 +1518,14 @@ private fun ScopedAppsRestartDialog(onDismiss: () -> Unit, onConfirm: (List<Stri
     // 5.2.7：改用液态玻璃面板承载，替换默认 Material AlertDialog。
     // 空间一致性：它从触发它的顶部刷新按钮那一侧展开、也沿同一侧收回去，
     // 而不是从屏幕正中央凭空出现。scrim 压暗背景，让面板成为焦点。
+    // 5.2.8：整层是否绘制与命中，都由 show 决定。
+    // 组件改为常驻挂载（否则退出动画没机会播完），
+    // 若 scrim 仍无条件铺满，关闭状态下它会继续吃掉整屏点击。
+    AnimatedVisibility(
+        visible = show,
+        enter = fadeIn(tween(180)),
+        exit = fadeOut(tween(140)),
+    ) {
     Box(
         Modifier
             .fillMaxSize()
@@ -1700,13 +1545,25 @@ private fun ScopedAppsRestartDialog(onDismiss: () -> Unit, onConfirm: (List<Stri
                 animationSpec = enterSpec,
                 transformOrigin = TransformOrigin(0.5f, 0f),
             )),
-            exit = fadeOut(tween(150)),
+            // 与进入对称：沿同一条路径缩回顶部锚点，而不是凭空淡出。
+            exit = if (reducedMotion) fadeOut(tween(140)) else fadeOut(tween(150)) + scaleOut(
+                targetScale = 0.94f,
+                animationSpec = tween(150),
+                transformOrigin = TransformOrigin(0.5f, 0f),
+            ),
         ) {
             Column(
                 Modifier
                     .padding(top = 96.dp, start = 16.dp, end = 16.dp)
                     .widthIn(max = 520.dp)
                     .fillMaxWidth()
+                    // 5.2.8：面板必须消费自己的点击。scrim 挂在最外层 Box 上，
+                    // 若面板不拦截，点标题或说明文字就会冒泡上去把整个对话框关掉。
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {},
+                    )
                     .liquidGlass(26.dp)
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -1788,6 +1645,7 @@ private fun ScopedAppsRestartDialog(onDismiss: () -> Unit, onConfirm: (List<Stri
                 }
             }
         }
+    }
     }
 }
 

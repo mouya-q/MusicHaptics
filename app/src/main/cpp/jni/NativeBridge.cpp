@@ -345,7 +345,7 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
         bool attached = false;
         if (g_jvm) {
             if (g_jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
-                if (g_jvm->AttachCurrentThread(reinterpret_cast<void**>(&env), nullptr) == JNI_OK) {
+                if (g_jvm->AttachCurrentThread(reinterpret_cast<JNIEnv**>(&env), nullptr) == JNI_OK) {
                     attached = true;
                 }
             }
@@ -531,7 +531,7 @@ static void* scheduler_thread_func(void* arg) {
     JNIEnv* env = nullptr;
     char threadName[] = "HapticScheduler";
     JavaVMAttachArgs attachArgs = {JNI_VERSION_1_6, threadName, nullptr};
-    if (g_jvm->AttachCurrentThread(reinterpret_cast<void**>(&env), &attachArgs) != JNI_OK) {
+    if (g_jvm->AttachCurrentThread(reinterpret_cast<JNIEnv**>(&env), &attachArgs) != JNI_OK) {
         return nullptr;
     }
 

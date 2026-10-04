@@ -203,6 +203,10 @@ class HapticEngine(
     @Volatile private var nativeLastAudioTime = 0L
     @Volatile private var lastStyleSnapshot = ""
     @Volatile private var activeStyle: StylePreset = StylePreset.BALANCED
+    // Runtime amplitude state, refreshed by synchronizeParameters() and read
+    // from the beat-dispatch path on another thread.
+    @Volatile private var activeOutputLevel: Float = 1.0f
+    @Volatile private var activeBassBoost: Float = 1.0f
     private val beatLogCounter = java.util.concurrent.atomic.AtomicLong(0L)
 
     private var udpSocket: DatagramSocket? = null

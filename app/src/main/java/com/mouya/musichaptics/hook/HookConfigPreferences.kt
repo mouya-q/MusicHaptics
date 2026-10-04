@@ -5,10 +5,10 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import com.mouya.musichaptics.BuildConfig
 
-/**
- * Read-only SharedPreferences view for an injected target process.
- * Settings are owned by the module process and exposed through ConfigProvider.
- */
+
+
+
+
 internal class HookConfigPreferences(
     private val context: Context,
     private val targetPackage: String
@@ -30,9 +30,9 @@ internal class HookConfigPreferences(
             )
         }.getOrNull()
 
-        // 5.2.6: 此前 provider 查询失败会静默 return，导致 values 永远停在
-        // emptyMap，所有 get* 都返回默认值 —— UI 层的设置在注入进程里
-        // 完全读不到，且没有任何日志可查。这里补上可见性。
+        
+        
+        
         if (bundle == null) {
             if (!refreshWarned.compareAndSet(false, true)) return
             android.util.Log.w(
@@ -59,10 +59,10 @@ internal class HookConfigPreferences(
 
     private val refreshWarned = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    // SharedPreferences.getAll() must be overridden as a *function*. Kotlin does
-    // not expose it as an `all` synthetic property here, so writing
-    // `override val all: ...` fails with "'all' overrides nothing" while the
-    // interface still reports "does not implement abstract member 'getAll'".
+    
+    
+    
+    
     override fun getAll(): Map<String, *> = values.toMutableMap()
 
     override fun getString(key: String?, defValue: String?): String? =

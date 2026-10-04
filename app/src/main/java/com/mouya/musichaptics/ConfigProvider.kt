@@ -7,17 +7,13 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Bundle
 
-/** Read-only bridge shared with injected target processes. */
+
 class ConfigProvider : ContentProvider() {
     companion object {
         private val PACKAGE_RE = Regex("^[a-zA-Z0-9_]+(\\.[a-zA-Z0-9_]+)+$")
         private val SAFE_KEYS = setOf(
-            "master_switch", "haptic_amplitude", "haptic_boost_level",
-            "haptic_preset_id", "selected_preset", "crossover_bypass",
-            // 5.2.7 风格预设与强度百分比：注入进程必须能读到，否则 UI 改了不生效。
-            "style_preset", "haptic_intensity_pct",
-            "power_amplify", "silence_threshold", "energy_threshold",
-            "min_amplitude", "force_default_amplitude", "visualizer_fallback_enabled",
+            "master_switch", "haptic_amplitude", "selected_preset",
+            "style_preset", "haptic_bass_boost", "force_default_amplitude", "visualizer_fallback_enabled",
             "synth_rate_hz", "synth_lra_f0", "synth_lra_q",
             "synth_attack_impact", "synth_decay_impact", "synth_attack_continuous",
             "synth_decay_continuous", "synth_release", "synth_sustain",
@@ -39,12 +35,12 @@ class ConfigProvider : ContentProvider() {
         val packageOk = targetPackage.isNotBlank() && PACKAGE_RE.matches(targetPackage)
         if (!packageOk) return null
 
-        // 5.2.9: 白名单已经由 MainHook/HookCoordinator 在安装阶段把关，
-        // 这里再用 callingPackage 做二次校验会引入新的失效面：
-        // 某些 ROM 上 ContentProvider.call 的 callingPackage 可能是
-        // 共享 uid 的宿主名甚至 null，导致整条配置链路静默返回 null，
-        // 表现就是「所有设置都没变化」。这里只对明确的陌生包拒绝，
-        // caller 不可知时按允许处理（读操作本身不修改任何数据）。
+        
+        
+        
+        
+        
+        
         val callerMismatch = caller != null && caller != ownPackage && caller != targetPackage
         if (callerMismatch && !WhitelistManager().isPackageAllowed(caller)) return null
 

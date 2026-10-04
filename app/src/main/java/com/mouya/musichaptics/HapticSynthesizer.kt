@@ -1,29 +1,22 @@
 package com.mouya.musichaptics
 
-import android.util.Log
-import kotlin.math.*
+import android.os.SystemClock
+import kotlin.math.exp
+import kotlin.math.max
+import kotlin.math.pow
+import kotlin.math.sqrt
 
-class HapticSynthesizer(
-    private val profile: DeviceProfile
-) {
+class HapticSynthesizer(private val profile: DeviceProfile) {
     companion object {
-        private const val TAG = "HapticSynthesizer"
-
         const val SYNTHESIS_RATE_HZ = 60
-        const val FRAME_DURATION_MS = 1000L / SYNTHESIS_RATE_HZ
-
         const val LRA_F0 = 190f
         const val LRA_Q = 15f
-        const val LRA_W0 = 2f * Math.PI.toFloat() * LRA_F0
-        const val LRA_ZETA = 1f / (2f * LRA_Q)
-
         const val ATTACK_TAU_IMPACT = 0.0015f
         const val DECAY_TAU_IMPACT = 0.008f
         const val ATTACK_TAU_CONTINUOUS = 0.008f
         const val DECAY_TAU_CONTINUOUS = 0.025f
         const val RELEASE_TAU = 0.025f
         const val SUSTAIN_LEVEL = 0.05f
-
         const val THERMAL_WARN = 70f
         const val THERMAL_CRIT = 90f
         const val THERMAL_RTH = 25f
@@ -44,538 +37,109 @@ class HapticSynthesizer(
         val thermalCrit: Float = THERMAL_CRIT,
         val thermalRth: Float = THERMAL_RTH,
         val thermalCth: Float = THERMAL_CTH,
-        val impactGain: Float = 1.0f,
-        val continuousGain: Float = 1.0f,
-        val textureGain: Float = 1.0f,
-        val masterGain: Float = 1.0f,
+        val impactGain: Float = 1f,
+        val continuousGain: Float = 1f,
+        val textureGain: Float = 1f,
+        val masterGain: Float = 1f,
     )
 
-    @Volatile private var currentConfig = SynthConfig()
+    data class SculptedImpact(
+        val timings: LongArray,
+        val amplitudes: IntArray,
+        val peakAmplitude: Int,
+        val totalDurationMs: Long
+    )
 
-    private val actuatorF0: Float = profile.actuator.resonanceFreq
-    private val actuatorDamping: Float = profile.actuator.dampingRatio
-    private val actuatorW0: Float = profile.actuator.angularFreq
-    private val actuatorRiseScale: Float = profile.actuator.riseScale
-    private val actuatorFallScale: Float = profile.actuator.fallScale
-
-    fun updateParameters(config: SynthConfig) {
-        currentConfig = config
-        Log.i(TAG, "SynthConfig updated | lraF0=${config.lraF0}Hz actuator=${actuatorF0}Hz rise=${profile.actuator.riseTimeMs}ms fall=${profile.actuator.fallTimeMs}ms")
-    }
-
-    private var impactAdsr = AdsrState()
-    private var continuousAdsr = AdsrState()
-    private var textureAdsr = AdsrState()
-
-    private var lraPhase = 0f
-    private var lraDisplacement = 0f
-    private var lraVelocity = 0f
-    private var lraLastTimeMs = 0L
-
+    @Volatile private var config = SynthConfig()
     private var coilTemp = 25f
-    private var thermalGain = 1f
-
-    private val pendingImpacts = mutableListOf<PendingImpact>()
-    private val pendingTextures = mutableListOf<PendingTexture>()
-
-    private var continuousFreq = 0f  // Initialize from the selected actuator profile.
-    private var continuousAmp = 0f
-    private var continuousTargetAmp = 0f
-
-    private var textureNoisePhase = 0f
-    private var textureNextEventTime = 0L
-
-    init {
-        continuousFreq = actuatorF0 * 0.9f
-    }
-
-    @Volatile var lastDisplacement = 0f
-    @Volatile var lastVelocity = 0f
-    @Volatile var lastForce = 0f
-    @Volatile var lastPhase = 0f
-    @Volatile var lastEnvelope = 0f
-    @Volatile var lastTemperature = 25f
-    @Volatile var lastThermalGain = 1f
-    @Volatile var lastTotalDrive = 0f
-    @Volatile var lastImpactEnvelope = 0f
-    @Volatile var lastContinuousEnvelope = 0f
-    @Volatile var lastTextureEnvelope = 0f
-
-    fun forceDecay() {
-        impactAdsr.state = 4
-        continuousAdsr.state = 4
-        textureAdsr.state = 4
-        pendingImpacts.clear()
-        pendingTextures.clear()
-        continuousTargetAmp = 0f
-    }
-
-    private data class AdsrState(
-        var value: Float = 0f,
-        var state: Int = 0,
-        var targetDrive: Float = 0f,
-        var attackTau: Float = ATTACK_TAU_IMPACT,
-        var decayTau: Float = DECAY_TAU_IMPACT
-    )
-
-    private data class PendingImpact(
-        val amplitude: Float,
-        val frequency: Float,
-        val sharpness: Float,
-        val semantic: KeyStrikeSemantic,
-        val startTimeMs: Long,
-        val durationMs: Long
-    )
-
-    private data class PendingTexture(
-        val amplitude: Float,
-        val frequency: Float,
-        val density: Float,
-        val startTimeMs: Long,
-        val durationMs: Long
-    )
-
-    /**
-     * Build a short, actuator-aware impact envelope for Android Vibrator output.
-     *
-     * This intentionally does not reuse solveLraPhysics(): that integrator runs at
-     * a low control rate and is meant for telemetry/modeling, not for driving a real
-     * LRA. The renderer instead uses measured rise/fall/Q characteristics to sculpt
-     * a compact transient that survives vendor vibrator quantisation.
-     */
-    fun sculptImpact(
-        event: String,
-        intensity01: Float,
-        sharpness: Float,
-        attackScale: Float = 1f
-    ): WaveformSegment {
-        val cfg = currentConfig
-        val i = intensity01.coerceIn(0.03f, 1f)
-        val sharp = sharpness.coerceIn(0f, 1f)
-        val q = profile.actuator.qFactor.coerceIn(7f, 24f)
-        val rise = (profile.actuator.riseTimeMs * attackScale.coerceIn(0.65f, 1.45f)).coerceIn(1.2f, 14f)
-        val fall = (profile.actuator.fallTimeMs * (0.80f + 0.28f * (q / 16f)).coerceIn(0.72f, 1.32f)).coerceIn(5f, 45f)
-        val tail = (1.08f - 0.34f * sharp - 0.10f * ((q - 12f) / 10f)).coerceIn(0.58f, 1.10f)
-        val gain = cfg.masterGain.coerceIn(0.60f, 1.25f) * cfg.impactGain.coerceIn(0.60f, 1.50f)
-
-        fun ms(value: Float): Long = value.roundToInt().coerceAtLeast(1).toLong()
-        fun amp(level: Float): Int = (255f * i * gain * level.pow(0.86f)).roundToInt().coerceIn(1, 255)
-
-        val segments = when (event.uppercase()) {
-            "KICK" -> listOf(
-                ms(rise * 0.26f) to amp(0.26f),
-                ms(rise * 0.46f) to amp(0.92f),
-                ms(fall * 0.42f) to amp(0.57f),
-                ms(fall * 0.70f * tail) to amp(0.22f),
-                ms(fall * 0.26f * tail) to amp(0.055f)
-            )
-            "SNARE" -> listOf(
-                ms(rise * 0.22f) to amp(0.18f),
-                ms(rise * 0.52f) to amp(0.80f),
-                ms(fall * 0.36f) to amp(0.44f),
-                ms(fall * 0.48f * tail) to amp(0.13f),
-                ms(fall * 0.18f * tail) to amp(0.035f)
-            )
-            "TICK" -> listOf(
-                ms(rise * 0.20f) to amp(0.10f),
-                ms(rise * 0.40f) to amp(0.62f),
-                ms(fall * 0.24f) to amp(0.18f),
-                ms(fall * 0.12f) to amp(0.025f)
-            )
-            "VOCAL" -> listOf(
-                ms(rise * 0.34f) to amp(0.07f),
-                ms(rise * 0.72f) to amp(0.34f),
-                ms(fall * 0.45f) to amp(0.20f),
-                ms(fall * 0.30f * tail) to amp(0.06f)
-            )
-            else -> listOf(
-                ms(rise * 0.30f) to amp(0.12f),
-                ms(rise * 0.66f) to amp(0.56f),
-                ms(fall * 0.50f) to amp(0.36f),
-                ms(fall * 0.62f * tail) to amp(0.14f),
-                ms(fall * 0.20f * tail) to amp(0.035f)
-            )
-        }
-        val timings = LongArray(segments.size) { segments[it].first }
-        val amplitudes = IntArray(segments.size) { segments[it].second }
-        return WaveformSegment(timings, amplitudes)
-    }
-
-    fun synthesizeFrame(
-        subBass: Float,
-        midBass: Float,
-        texture: Float,
-        pitch: Float,
-        events: List<HapticSynthesizerEvent>,
-        timestampMs: Long
-    ): WaveformSegment {
-
-        val dt = if (lraLastTimeMs > 0) (timestampMs - lraLastTimeMs) / 1000f else (currentConfig.synthesisRateHz.toFloat().let { 1000f / it })
-        lraLastTimeMs = timestampMs
-
-        processInputEvents(events, timestampMs, subBass, midBass, texture, pitch)
-
-        updateContinuousTarget(subBass, pitch)
-
-        updateTextureTarget(texture, pitch, timestampMs)
-
-        val impactAttack = currentConfig.attackTauImpact * actuatorRiseScale
-        val impactDecay = currentConfig.decayTauImpact * actuatorFallScale
-        val contAttack = currentConfig.attackTauContinuous * actuatorRiseScale
-        val contDecay = currentConfig.decayTauContinuous * actuatorFallScale
-
-        advanceAdsr(impactAdsr, dt, impactAttack, impactDecay)
-        advanceAdsr(continuousAdsr, dt, contAttack, contDecay)
-        advanceAdsr(textureAdsr, dt, impactAttack, impactDecay)
-
-        updateThermalModel(dt)
-
-        val totalDrive = computeTotalDrive()
-        solveLraPhysics(totalDrive, dt)
-        lastTotalDrive = totalDrive
-
-        val segment = generateWaveformSegment(dt)
-
-        updateTelemetry()
-
-        return segment
-    }
-
-private fun processInputEvents(
-    events: List<HapticSynthesizerEvent>,
-    timestampMs: Long,
-    subBass: Float,
-    midBass: Float,
-    texture: Float,
-    pitch: Float
-) {
-    for (event in events) {
-        when (event.type) {
-            HapticSynthesizerEvent.Type.IMPACT -> {
-
-                val params = resolveImpactParams(event.semantic, subBass, midBass, texture, pitch)
-                pendingImpacts.add(PendingImpact(
-                    amplitude = params.amplitude,
-                    frequency = params.frequency,
-                    sharpness = params.sharpness,
-                    semantic = event.semantic,
-                    startTimeMs = timestampMs,
-                    durationMs = params.durationMs
-                ))
-
-                impactAdsr.state = 1
-                impactAdsr.value = 0f
-                impactAdsr.targetDrive = params.amplitude
-            }
-
-            HapticSynthesizerEvent.Type.TEXTURE_BURST -> {
-
-                val density = (texture * 2f).coerceIn(0.1f, 1f)
-                pendingTextures.add(PendingTexture(
-                    amplitude = texture.coerceIn(0.1f, 1f),
-                    frequency = (actuatorF0 * 1.5f).coerceIn(300f, 800f),
-                    density = density,
-                    startTimeMs = timestampMs,
-                    durationMs = 80L
-                ))
-                textureAdsr.state = 1
-                textureAdsr.value = 0f
-                textureAdsr.targetDrive = texture
-            }
-
-            HapticSynthesizerEvent.Type.CONTINUOUS_ON -> {
-
-                continuousAdsr.state = 1
-                continuousAdsr.value = 0f
-            }
-
-            HapticSynthesizerEvent.Type.CONTINUOUS_OFF -> {
-
-                if (continuousAdsr.state != 0) {
-                    continuousAdsr.state = 4
-                }
-            }
-        }
-    }
-
-    val cutoff = timestampMs - 500L
-    pendingImpacts.removeAll { it.startTimeMs < cutoff }
-    pendingTextures.removeAll { it.startTimeMs < cutoff }
-}
-
-    private fun resolveImpactParams(
-        semantic: KeyStrikeSemantic,
-        subBass: Float,
-        midBass: Float,
-        texture: Float,
-        pitch: Float
-    ): ImpactParams {
-        return when (semantic) {
-            KeyStrikeSemantic.SUB_STRIKE -> {
-                ImpactParams(1.0f, actuatorF0 * 0.8f, 0.3f, (180L * actuatorRiseScale).toLong())
-            }
-            KeyStrikeSemantic.KICK_DRUM -> {
-                ImpactParams(0.9f, actuatorF0 * 1.05f, 0.6f, (80L * actuatorRiseScale).toLong())
-            }
-            KeyStrikeSemantic.SNARE_ACCENT -> {
-                ImpactParams(0.85f, actuatorF0 * 1.3f, 0.9f, (120L * actuatorRiseScale).toLong())
-            }
-            KeyStrikeSemantic.RHYTHM_PATTERN -> {
-                ImpactParams(0.8f, actuatorF0, 0.5f, (100L * actuatorRiseScale).toLong())
-            }
-            KeyStrikeSemantic.BASS_GHOST -> {
-                ImpactParams(0.4f, actuatorF0 * 0.7f, 0.1f, (200L * actuatorRiseScale).toLong())
-            }
-            else -> {
-                val freq = if (subBass > midBass) actuatorF0 * 0.85f else actuatorF0 * 1.1f
-                val amp = maxOf(subBass, midBass, texture).coerceIn(0.3f, 1f)
-                ImpactParams(amp, freq, 0.5f, (100L * actuatorRiseScale).toLong())
-            }
-        }
-    }
-
-    private fun updateContinuousTarget(subBass: Float, pitch: Float) {
-
-        continuousTargetAmp = (subBass * 1.2f).coerceIn(0f, 1f)
-
-        if (pitch > 0f && pitch < 200f) {
-            continuousFreq = pitch.coerceIn(60f, 180f)
-        } else {
-            continuousFreq = actuatorF0 * 0.9f
-        }
-    }
-
-    private fun updateTextureTarget(textureEnergy: Float, pitch: Float, timestampMs: Long) {
-        if (textureEnergy > 0.02f) {
-
-            val intervalMs = (100f / (textureEnergy * 10f + 1f)).toLong().coerceIn(10L, 200L)
-            textureNextEventTime = timestampMs + intervalMs
-        }
-    }
-
-    private fun advanceAdsr(adsr: AdsrState, dt: Float, attackTau: Float, decayTau: Float) {
-        when (adsr.state) {
-            0 -> {  }
-            1 -> {
-                val alpha = 1f - exp(-dt / attackTau)
-                adsr.value += (1f - adsr.value) * alpha
-                if (adsr.value >= 0.98f) {
-                    adsr.value = 1f
-                    adsr.state = 2
-                }
-            }
-            2 -> {
-                val alpha = exp(-dt / decayTau)
-                adsr.value = currentConfig.sustainLevel + (adsr.value - currentConfig.sustainLevel) * alpha
-                if (abs(adsr.value - currentConfig.sustainLevel) < 0.01f) {
-                    adsr.value = currentConfig.sustainLevel
-                    adsr.state = 3
-                }
-            }
-            3 -> {
-                adsr.value = adsr.value * 0.90f  // Pure decay, no floor
-                if (adsr.targetDrive < 0.02f) {
-                    adsr.state = 4
-                }
-            }
-            4 -> {
-                val alpha = exp(-dt / currentConfig.releaseTau)
-                adsr.value *= alpha
-                if (adsr.value <= 0.001f) {
-                    adsr.value = 0f
-                    adsr.state = 0
-                }
-            }
-        }
-    }
-
-    private fun updateThermalModel(dt: Float) {
-
-        val power = (impactAdsr.value + continuousAdsr.value + textureAdsr.value).coerceIn(0f, 3f)
-        val powerSquared = power * power
-        val deltaTemp = (powerSquared * currentConfig.thermalRth - (coilTemp - 25f)) * dt / currentConfig.thermalCth
-        coilTemp += deltaTemp
-        coilTemp = coilTemp.coerceIn(25f, 120f)
-
-        thermalGain = when {
-            coilTemp <= currentConfig.thermalWarn -> 1f
-            coilTemp >= currentConfig.thermalCrit -> 0f
-            else -> {
-                val t = (coilTemp - currentConfig.thermalWarn) / (currentConfig.thermalCrit - currentConfig.thermalWarn)
-                (1f - t).coerceIn(0f, 1f)
-            }
-        }
-    }
-
-    private fun computeTotalDrive(): Float {
-        var drive = 0f
-
-        for (impact in pendingImpacts) {
-            val ageMs = System.currentTimeMillis() - impact.startTimeMs
-            if (ageMs < impact.durationMs) {
-                val progress = ageMs / impact.durationMs.toFloat()
-
-                val env = (1f - progress).coerceIn(0f, 1f) * exp(-progress * 8f)
-                drive += impact.amplitude * env * impactAdsr.value * currentConfig.impactGain
-            }
-        }
-
-        drive += continuousAdsr.value * continuousTargetAmp * currentConfig.continuousGain
-
-        if (textureAdsr.value > 0f) {
-            textureNoisePhase += 0.3f
-            val noise = sin(textureNoisePhase * 7.3f) * 0.5f + sin(textureNoisePhase * 11.7f) * 0.5f
-            drive += textureAdsr.value * (0.5f + noise * 0.5f) * 0.55f * currentConfig.textureGain
-        }
-
-        return (drive * thermalGain * currentConfig.masterGain).coerceIn(0f, 2.5f)
-    }
-
-    private fun solveLraPhysics(drive: Float, dt: Float) {
-        val w = actuatorW0
-        val zeta = actuatorDamping
-
-        val acceleration = drive - 2f * zeta * w * lraVelocity - w * w * lraDisplacement
-
-        lraVelocity += acceleration * dt
-        lraDisplacement += lraVelocity * dt
-
-        lraPhase += w * dt
-        lraPhase = lraPhase % (2f * Math.PI.toFloat())
-
-        val maxDisp = 1.5f
-        if (abs(lraDisplacement) > maxDisp) {
-            lraDisplacement = maxDisp * sign(lraDisplacement)
-            lraVelocity *= 0.5f
-        }
-    }
-
-    private fun generateWaveformSegment(dt: Float): WaveformSegment {
-
-        val drive = lastTotalDrive
-        val impactEnv = impactAdsr.value
-        val continuousEnv = continuousAdsr.value
-        val textureEnv = textureAdsr.value
-        val envelope = maxOf(impactEnv, continuousEnv, textureEnv)
-
-        val frameDurationMs = (dt * 1000f).toLong().coerceIn(1L, 50L)
-
-        if (drive < 0.005f && envelope < 0.005f) {
-            return WaveformSegment(
-                timings = longArrayOf(frameDurationMs),
-                amplitudes = intArrayOf(0),
-                repeat = -1
-            )
-        }
-
-        val instantaneousFreq = actuatorF0 + sin(lraPhase * 0.5f) * 10f
-        val periodMs = (1000f / instantaneousFreq).toLong().coerceAtLeast(1L)
-        val cycles = (instantaneousFreq * dt).toInt().coerceAtLeast(1)
-
-        val timings = LongArray(cycles)
-        val amps = IntArray(cycles)
-
-        for (i in 0 until cycles) {
-            val phaseInCycle = (i.toFloat() / cycles) * 2f * Math.PI.toFloat()
-
-            val impactAmp = if (impactEnv > 0.01f) {
-                val impactShape = exp(-phaseInCycle * 1.2f) * (1f - cos(phaseInCycle * 0.5f)) * 0.5f
-                (impactEnv * impactShape * 380f).toInt().coerceIn(1, 255)
-            } else 0
-
-            val continuousAmp = if (continuousEnv > 0.01f) {
-                val swell = (sin(phaseInCycle) * 0.30f + 0.70f)
-                val pulseMod = 1f + sin(lraPhase + phaseInCycle * 0.3f) * 0.12f
-                (continuousEnv * swell * pulseMod * 255f).toInt().coerceIn(1, 255)
-            } else 0
-
-            val textureAmp = if (textureEnv > 0.01f) {
-                val flutter = sin(phaseInCycle * 4f) * cos(phaseInCycle * 7f + textureNoisePhase * 3f)
-                val burst = abs(sin(phaseInCycle * 2f + textureNoisePhase * 5f))
-                (textureEnv * (0.35f + flutter * 0.25f + burst * 0.55f) * 220f).toInt().coerceIn(1, 255)
-            } else 0
-
-            val compositeAmp = maxOf(impactAmp, continuousAmp, textureAmp)
-
-            timings[i] = periodMs
-            amps[i] = compositeAmp.coerceIn(0, 255)
-        }
-
-        return WaveformSegment(
-            timings = timings,
-            amplitudes = amps,
-            repeat = -1
+    private var lastThermalMs = 0L
+
+    fun updateParameters(value: SynthConfig) {
+        config = value.copy(
+            synthesisRateHz = value.synthesisRateHz.coerceIn(30, 120),
+            lraF0 = value.lraF0.coerceIn(150f, 250f),
+            lraQ = value.lraQ.coerceIn(5f, 30f),
+            attackTauImpact = value.attackTauImpact.coerceIn(0.0001f, 0.05f),
+            decayTauImpact = value.decayTauImpact.coerceIn(0.0005f, 0.2f),
+            attackTauContinuous = value.attackTauContinuous.coerceIn(0.001f, 0.1f),
+            decayTauContinuous = value.decayTauContinuous.coerceIn(0.005f, 0.3f),
+            releaseTau = value.releaseTau.coerceIn(0.005f, 0.3f),
+            sustainLevel = value.sustainLevel.coerceIn(0.02f, 0.8f),
+            thermalWarn = value.thermalWarn.coerceIn(40f, 100f),
+            thermalCrit = max(value.thermalCrit, value.thermalWarn + 2f).coerceIn(50f, 120f),
+            thermalRth = value.thermalRth.coerceIn(10f, 60f),
+            thermalCth = value.thermalCth.coerceIn(0.25f, 8f),
+            impactGain = value.impactGain.coerceIn(0.1f, 3f),
+            continuousGain = value.continuousGain.coerceIn(0.1f, 3f),
+            textureGain = value.textureGain.coerceIn(0.1f, 3f),
+            masterGain = value.masterGain.coerceIn(0.1f, 3f),
         )
     }
 
-    private fun updateTelemetry() {
-        lastDisplacement = lraDisplacement
-        lastVelocity = lraVelocity
-        lastForce = lraDisplacement * actuatorW0 * actuatorW0
-        lastPhase = lraPhase
-        lastEnvelope = maxOf(impactAdsr.value, continuousAdsr.value, textureAdsr.value)
-        lastImpactEnvelope = impactAdsr.value
-        lastContinuousEnvelope = continuousAdsr.value
-        lastTextureEnvelope = textureAdsr.value
-        lastTemperature = coilTemp
-        lastThermalGain = thermalGain
+    fun sculptImpact(
+        event: String,
+        intensity: Float,
+        levelScale: Float,
+        durationMs: Long,
+        sharpness: Float,
+        bassBoost: Float,
+        thermalInput: Float = 1f,
+    ): SculptedImpact {
+        val now = SystemClock.elapsedRealtime()
+        val dt = if (lastThermalMs == 0L) 0f else ((now - lastThermalMs) / 1000f).coerceIn(0f, 2f)
+        lastThermalMs = now
+        val cooling = exp(-dt / (config.thermalCth * 0.9f).coerceAtLeast(0.2f))
+        coilTemp = 25f + (coilTemp - 25f) * cooling
+
+        val normalizedEvent = event.uppercase()
+        val continuous = normalizedEvent == "BODY" || normalizedEvent == "VOCAL"
+        val eventGain = when (normalizedEvent) {
+            "KICK", "SUB" -> bassBoost * config.impactGain
+            "TICK" -> config.textureGain
+            "BODY", "VOCAL" -> config.continuousGain
+            else -> config.impactGain
+        }
+        val sharp = sharpness.coerceIn(0.05f, 1f)
+        val resonanceScale = sqrt((LRA_F0 / config.lraF0).coerceIn(0.6f, 1.7f))
+        val peak = (intensity.pow(0.78f) * levelScale * eventGain * config.masterGain * thermalInput * 255f).coerceIn(10f, 255f)
+        val qTail = (config.lraQ / profile.actuator.qFactor.coerceAtLeast(5f)).coerceIn(0.65f, 1.65f)
+        val attackSource = if (continuous) config.attackTauContinuous else config.attackTauImpact
+        val decaySource = if (continuous) config.decayTauContinuous else config.decayTauImpact
+        val attackMs = (attackSource * 1000f * profile.actuator.riseScale / resonanceScale).coerceIn(1f, durationMs * 0.32f)
+        val decayMs = (decaySource * 1000f * profile.actuator.fallScale * qTail * resonanceScale / sharp.pow(0.35f)).coerceIn(4f, durationMs * 0.62f)
+        val releaseMs = (config.releaseTau * 1000f).coerceIn(4f, durationMs * 0.45f)
+        val quantum = (1000f / config.synthesisRateHz).coerceAtLeast(1f)
+        fun snap(v: Float): Long = (v / quantum).toInt().coerceAtLeast(1).let { (it * quantum).toLong() }
+
+        val attack = snap(attackMs)
+        val tail = snap(decayMs + releaseMs)
+        val total = durationMs.coerceIn(12L, 220L)
+        val body = (total - attack - tail).coerceAtLeast(1L)
+        val sustain = if (continuous) config.sustainLevel else config.sustainLevel * (1f - sharp * 0.55f)
+        val releaseLevel = (0.08f + (1f - sharp) * 0.18f).coerceIn(0.06f, 0.3f)
+        val peakInt = peak.toInt().coerceIn(1, 255)
+        val bodyInt = (peak * sustain).toInt().coerceIn(1, peakInt)
+        val tailInt = (peak * releaseLevel).toInt().coerceIn(1, peakInt)
+
+        val energy = (peak / 255f).pow(2f) * 0.18f * profile.actuator.maxDisplacement
+        coilTemp += energy * config.thermalRth / config.thermalCth
+        val thermalGain = when {
+            coilTemp <= config.thermalWarn -> 1f
+            coilTemp >= config.thermalCrit -> 0.45f
+            else -> 1f - 0.55f * ((coilTemp - config.thermalWarn) / (config.thermalCrit - config.thermalWarn))
+        }.coerceIn(0.45f, 1f)
+        val scaled = intArrayOf(
+            (peakInt * thermalGain).toInt().coerceIn(1, 255),
+            (bodyInt * thermalGain).toInt().coerceIn(1, 255),
+            (tailInt * thermalGain).toInt().coerceIn(1, 255),
+        )
+        return SculptedImpact(longArrayOf(attack, body, tail), scaled, scaled.maxOrNull() ?: 1, attack + body + tail)
     }
 
-    fun reset() {
-        impactAdsr = AdsrState()
-        continuousAdsr = AdsrState()
-        textureAdsr = AdsrState()
-        lraPhase = 0f
-        lraDisplacement = 0f
-        lraVelocity = 0f
-        lraLastTimeMs = 0L
+    fun forceDecay() {
         coilTemp = 25f
-        thermalGain = 1f
-        pendingImpacts.clear()
-        pendingTextures.clear()
-        continuousAmp = 0f
-        continuousTargetAmp = 0f
-        textureNoisePhase = 0f
-        textureNextEventTime = 0L
-        lastTotalDrive = 0f
-        lastImpactEnvelope = 0f
-        lastContinuousEnvelope = 0f
-        lastTextureEnvelope = 0f
-    }
-}
-
-data class HapticSynthesizerEvent(
-    val type: Type,
-    val semantic: KeyStrikeSemantic = KeyStrikeSemantic.NONE,
-    val intensity: Float = 1f,
-    val timestampMs: Long = System.currentTimeMillis()
-) {
-    enum class Type {
-        IMPACT,
-        TEXTURE_BURST,
-        CONTINUOUS_ON,
-        CONTINUOUS_OFF
-    }
-}
-
-data class ImpactParams(
-    val amplitude: Float,
-    val frequency: Float,
-    val sharpness: Float,
-    val durationMs: Long
-)
-
-data class WaveformSegment(
-    val timings: LongArray,
-    val amplitudes: IntArray,
-    val repeat: Int = -1
-) {
-
-    fun toVibrationEffect(): android.os.VibrationEffect {
-        return android.os.VibrationEffect.createWaveform(timings, amplitudes, repeat)
+        lastThermalMs = 0L
     }
 
-    override fun toString(): String {
-        return "WaveformSegment(frames=${amplitudes.size}, totalMs=${timings.sum()}, amps=${amplitudes.joinToString(",")})"
-    }
+    fun reset() = forceDecay()
 }

@@ -10,19 +10,19 @@ object PhiraChart {
 
     private const val TAG = "PhiraChart"
 
-    // RPE note type
+    
     const val TAP = 1
     const val HOLD = 2
     const val FLICK = 3
     const val DRAG = 4
 
-    /**
-     * note 类型 → MusicHapticsX 的 beat 事件（对应 HapticEngine.BEAT_SHAPES 的 key）
-     *  Tap   → KICK   干脆冲击
-     *  Hold  → BODY   温暖持续
-     *  Flick → SNARE  中频扫击
-     *  Drag  → TICK   最轻的高频针
-     */
+    
+
+
+
+
+
+
     fun eventOf(noteType: Int): String? = when (noteType) {
         TAP -> "KICK"
         HOLD -> "BODY"
@@ -31,7 +31,7 @@ object PhiraChart {
         else -> null
     }
 
-    /** 同刻多 note 时保留最重的那个 */
+    
     fun priorityOf(event: String): Int = when (event) {
         "KICK" -> 4
         "SNARE" -> 3
@@ -40,7 +40,7 @@ object PhiraChart {
         else -> 0
     }
 
-    /** 一个原始 note：绝对秒数 + 类型 + 持续秒数（非 hold 为 0） */
+    
     data class Note(val sec: Double, val type: Int, val durSec: Double)
 
     data class Meta(
@@ -53,13 +53,13 @@ object PhiraChart {
 
     data class Parsed(val notes: List<Note>, val meta: Meta)
 
-    // ── BPM 段表 ──────────────────────────────────────────────────────
-    /**
-     * 多段 BPM → (起始拍, 起始秒, bpm) 的积分表。
-     *
-     * 不能直接 `beat * 60 / bpm`：变速谱里前面每一段的时长要按**那一段自己的**
-     * bpm 累加，从换速那一拍起才用新 bpm。样本里 c66701 有 4 段、c16437 有 2 段。
-     */
+    
+    
+
+
+
+
+
     private class BpmTable(segs: List<Pair<Double, Double>>) {
         val startBeat = DoubleArray(segs.size)
         val startSec = DoubleArray(segs.size)
@@ -91,23 +91,23 @@ object PhiraChart {
     private fun buildBpmTable(raw: List<Pair<Double, Double>>): BpmTable {
         if (raw.isEmpty()) return BpmTable(listOf(0.0 to 120.0))
         val sorted = raw.sortedBy { it.first }.toMutableList()
-        // 首段不是从 0 拍起就用它的 bpm 往前补，否则开头的 note 会算错
+        
         if (sorted[0].first > 0.0) sorted.add(0, 0.0 to sorted[0].second)
         return BpmTable(sorted)
     }
 
-    /** RPE 时间 [小节, 分子, 分母] → 绝对拍数 */
+    
     private fun beatOf(bar: Double, num: Double, den: Double): Double =
         if (den == 0.0) bar else bar + num / den
 
-    // ── RPE JSON ─────────────────────────────────────────────────────
+    
     fun parseRpe(file: File): Parsed {
         var bpmRaw: List<Pair<Double, Double>> = emptyList()
         var name = file.nameWithoutExtension
         var durationSec = 0.0
         var offsetSec = 0.0
 
-        // 第一遍：BPMList + META（judgeLineList 直接 skip
+        
         readJson(file) { reader ->
             reader.beginObject()
             while (reader.hasNext()) {
@@ -135,7 +135,7 @@ object PhiraChart {
         val notes = ArrayList<Note>(4096)
         var fake = 0
 
-        // 第二遍：只读 notes
+        
         readJson(file) { reader ->
             reader.beginObject()
             while (reader.hasNext()) {
@@ -180,16 +180,16 @@ object PhiraChart {
         return out
     }
 
-    /** 返回该判定线剔除的 fake note 数 */
+    
     private fun readJudgeLine(
         reader: JsonReader,
         table: BpmTable,
         offsetSec: Double,
         out: MutableList<Note>,
     ): Int {
-        // bpmfactor 会缩放这条线的拍速。样本里全是 1.0，但格式允许非 1，
-        // 而且这会直接决定 note 落在第几秒 —— 不能想当然当 1 处理。
-        // notes 可能出现在 bpmfactor 之前，所以先收原始拍数，读完整条线再换算。
+        
+        
+        
         var factor = 1.0
         var fake = 0
         data class Raw(val startBeat: Double, val endBeat: Double, val type: Int)
@@ -222,7 +222,7 @@ object PhiraChart {
                         }
                         reader.endObject()
                         when {
-                            isFake -> fake++          // 假 note 不参与判定，也就不该有触感
+                            isFake -> fake++          
                             eventOf(type) != null -> raw.add(Raw(sb, eb, type))
                         }
                     }
@@ -243,7 +243,7 @@ object PhiraChart {
 
     private fun readBeatTriple(reader: JsonReader): Double {
         if (reader.peek() != JsonToken.BEGIN_ARRAY) {
-            // 极少数谱把拍数写成裸数字
+            
             return reader.nextDouble()
         }
         val v = DoubleArray(3)
@@ -257,7 +257,7 @@ object PhiraChart {
         return beatOf(v[0], v[1], v[2])
     }
 
-    /** isFake 在不同导出器里可能是 bool 或 0/1 */
+    
     private fun readBoolish(reader: JsonReader): Boolean = when (reader.peek()) {
         JsonToken.BOOLEAN -> reader.nextBoolean()
         JsonToken.NUMBER -> reader.nextInt() != 0
@@ -271,13 +271,13 @@ object PhiraChart {
         }
     }
 
-    // ── PEC 文本 ──────────────────────────────────────────────────────
-    /**
-     * PEC：首行是 offset(ms)，`bp <beat> <bpm>` 是变速事件，note 行形如
-     *   n1/n3/n4 <line> <beat> <x> <above> <fake>
-     *   n2       <line> <beat> <endBeat> <x> <above> <fake>
-     * 最后一列 1 = fake。样本 18175 里 n1 是 6 列、n2 是 7 列
-     */
+    
+    
+
+
+
+
+
     fun parsePec(file: File): Parsed {
         var offsetSec = 0.0
         val bpmRaw = ArrayList<Pair<Double, Double>>(4)
@@ -334,7 +334,7 @@ object PhiraChart {
         return Parsed(notes, Meta(file.name, 0.0, table.size, fake, notes.size))
     }
 
-    /** 按扩展名分派；失败返回 null 而不抛，调用方要能退回实时 DSP */
+    
     fun parse(file: File): Parsed? = try {
         if (file.extension.equals("pec", true)) parsePec(file) else parseRpe(file)
     } catch (t: Throwable) {

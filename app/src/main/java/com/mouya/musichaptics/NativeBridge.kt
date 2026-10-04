@@ -84,6 +84,36 @@ class NativeBridge {
         }
     }
 
+    fun configureOutput(
+        styleAmpScale: Float,
+        sharpness: Float,
+        attackScale: Float,
+        accentScale: Float,
+        bassBoost: Float,
+        impactGain: Float,
+        continuousGain: Float,
+        textureGain: Float,
+        masterGain: Float,
+        onsetThreshold: Float,
+        attackImpactMs: Float,
+        decayImpactMs: Float,
+        attackContinuousMs: Float,
+        decayContinuousMs: Float,
+        releaseMs: Float,
+        sustainLevel: Float,
+        lraF0: Float,
+        lraQ: Float
+    ) {
+        if (nativePtr != 0L) {
+            nativeConfigureOutput(
+                nativePtr, styleAmpScale, sharpness, attackScale, accentScale, bassBoost,
+                impactGain, continuousGain, textureGain, masterGain, onsetThreshold,
+                attackImpactMs, decayImpactMs, attackContinuousMs, decayContinuousMs,
+                releaseMs, sustainLevel, lraF0, lraQ
+            )
+        }
+    }
+
     fun configureProfile(profile: DeviceProfile) {
         if (nativePtr != 0L) {
             try {
@@ -95,19 +125,11 @@ class NativeBridge {
                     profile.dspSnareMult,
                     profile.dspTickMult,
                     profile.dspBodyMult,
-                    profile.dspRefractoryScale,
-                    com.mouya.musichaptics.haptic.DeviceTuningRegistry.current(profile).minIntervalMs.toFloat()
+                    profile.dspRefractoryScale
                 )
             } catch (t: Throwable) {
                 Log.w("NativeBridge", "configureProfile failed: ${t.javaClass.simpleName}: ${t.message}")
             }
-        }
-    }
-
-    fun configureStyle(onsetThreshold: Float) {
-        if (nativePtr != 0L) {
-            try { nativeConfigureStyle(nativePtr, onsetThreshold) }
-            catch (t: Throwable) { Log.w("NativeBridge", "configureStyle failed: ${t.javaClass.simpleName}: ${t.message}") }
         }
     }
 
@@ -184,14 +206,6 @@ class NativeBridge {
         return false
     }
 
-    fun isDirectDriveStrikeOnly(): Boolean {
-        if (nativePtr != 0L) {
-            try { return nativeIsDirectDriveStrikeOnly() }
-            catch (e: Exception) { Log.e("NativeBridge", "isDirectDriveStrikeOnly failed: ${e.message}") }
-        }
-        return false
-    }
-
     fun isDirectDriveAvailable(): Boolean {
         if (nativePtr != 0L) {
             try {
@@ -228,7 +242,7 @@ class NativeBridge {
     }
 
     fun initUdpHaptic(port: Int): Boolean {
-        // Seccomp blocks socket() in C++. Use initUdpHapticFromFd instead.
+        
         Log.w("NativeBridge", "initUdpHaptic: socket() blocked by seccomp, use initUdpHapticFromFd")
         return false
     }
@@ -302,8 +316,13 @@ class NativeBridge {
     private external fun nativeCreateEngine(): Long
     private external fun nativeDestroyEngine(ptr: Long)
     private external fun nativeConfigure(ptr: Long, sampleRate: Float, lowCut: Float, highCut: Float, amplitude: Float, presetId: Int)
-    private external fun nativeConfigureStyle(ptr: Long, onsetThreshold: Float)
-    private external fun nativeConfigureProfile(ptr: Long, dspFloor: Float, subMult: Float, kickMult: Float, snareMult: Float, tickMult: Float, bodyMult: Float, refractoryScale: Float, minIntervalMs: Float)
+    private external fun nativeConfigureProfile(ptr: Long, dspFloor: Float, subMult: Float, kickMult: Float, snareMult: Float, tickMult: Float, bodyMult: Float, refractoryScale: Float)
+    private external fun nativeConfigureOutput(
+        ptr: Long, styleAmpScale: Float, sharpness: Float, attackScale: Float, accentScale: Float, bassBoost: Float,
+        impactGain: Float, continuousGain: Float, textureGain: Float, masterGain: Float, onsetThreshold: Float,
+        attackImpactMs: Float, decayImpactMs: Float, attackContinuousMs: Float, decayContinuousMs: Float,
+        releaseMs: Float, sustainLevel: Float, lraF0: Float, lraQ: Float
+    )
     private external fun nativeProcessAudioDirect(ptr: Long, directBuffer: ByteBuffer, size: Int, outTelemetry: FloatArray)
     private external fun nativeGetSemanticFrames(ptr: Long, outFrames: FloatArray, maxFrames: Int): Int
     private external fun nativeClearHapticBuffer(ptr: Long)
@@ -313,7 +332,6 @@ class NativeBridge {
     private external fun nativeSetDirectDriveNodes(nodes: String): Boolean
     private external fun nativeSetDirectDriveFd(enableFd: Int, amplitudeFd: Int, enablePath: String, amplitudePath: String): Boolean
     private external fun nativeTriggerDirectDriveStrike(durationMs: Int, amplitude: Int): Boolean
-    private external fun nativeIsDirectDriveStrikeOnly(): Boolean
     private external fun nativeIsDirectDriveAvailable(): Boolean
     private external fun nativeInitRootPipe(pipeFd: Int, enablePath: String, amplitudePath: String): Boolean
     private external fun nativeIsRootPipeAvailable(): Boolean
@@ -327,11 +345,11 @@ class NativeBridge {
 
     @Volatile private var _rootPipeCb: ((Int, Int) -> Unit)? = null
 
-    /**
-     * Beat-triggered vibration callback.
-     * Called when the C++ scheduler detects a significant onset event (kick, snare, etc.).
-     * The Kotlin side uses Android Vibrator API with predefined effects for reliable vibration.
-     */
+    
+
+
+
+
     @Volatile var beatTriggerCallback: ((String, Int) -> Unit)? = null
 
     fun enableRootPipe(cb: (Int, Int) -> Unit) {
@@ -355,7 +373,7 @@ class NativeBridge {
         _rootPipeCb?.invoke(amplitude, duration)
     }
 
-    /** Called from C++ via JNI when a beat/onset is detected */
+    
     fun onBeatTrigger(event: String, intensity: Int) {
         beatTriggerCallback?.invoke(event, intensity)
     }

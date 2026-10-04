@@ -9,7 +9,7 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam
 
-/** Thin Xposed entry point. All method hooks live in HookCoordinator. */
+
 class MainHook : IXposedHookLoadPackage {
     companion object {
         private const val TAG = "MusicHapticsX-Hook"

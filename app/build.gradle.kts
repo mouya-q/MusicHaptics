@@ -12,35 +12,27 @@ android {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
         targetSdk = 35
-        versionCode = 50300
-        versionName = "5.3.0"
+        versionCode = 50302
+        versionName = "5.3.2"
         ndkVersion = "27.0.12077973"
-        // 云编译（GitHub Actions）环境下由 Gradle 直接驱动 CMake 编译 C++，
-        // 使用 c++_static 静态链接 libc++，避免注入宿主进程时与旧版 libc++_shared.so 符号冲突。
-        // DSP 引擎使用 ARM NEON SIMD 指令，仅支持 ARM 架构（arm64-v8a / armeabi-v7a）。
-        // x86/x86_64 设备在现代 Android 生态中极少，且本项目目标设备（小米 10）为 arm64。
+
+
+
+
         ndk {
-            // Only arm64-v8a for the supported target-device set.
-            // This keeps the injected Native DSP binary small and matches the current profiles.
+            // Build only for arm64 devices.
             abiFilters += listOf("arm64-v8a")
         }
     }
 
     buildTypes {
         debug {
-            // Uses the default debug signing config.
+            // Use the default debug signing config.
         }
         release {
-            // Sign the release build with the debug keystore so CI can emit an
-            // installable artifact without storing secrets. The APK is signed
-            // but NOT debuggable, which is what removes the "you are testing a
-            // debuggable app" system warning. AGP creates ~/.android/debug.keystore
-            // on demand, so no keystore file needs to be committed.
+            // Use the local debug keystore for release signing.
             signingConfig = signingConfigs.getByName("debug")
-            // R8 full-mode shrinking + resource shrinking: the module APK is
-            // downloaded/installed per device and its classes are loaded into
-            // every hooked process, so a smaller dex measurably cuts inject
-            // time. Entry points are protected in proguard-rules.pro.
+            // Shrink the release APK and resources.
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -110,13 +102,10 @@ dependencies {
     implementation("androidx.compose.foundation:foundation-layout")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
-    implementation("androidx.compose.runtime:runtime-livedata")
     implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.animation:animation-core")
     implementation("androidx.compose.ui:ui-text")
-    implementation("androidx.interpolator:interpolator:1.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
     implementation(project(":liquidglass"))
 
     configurations.all {

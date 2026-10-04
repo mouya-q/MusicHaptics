@@ -23,11 +23,11 @@ import java.util.Collections
 import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * All Xposed entry points live here. The coordinator deliberately avoids a
- * broad hook surface: audio data + playback lifecycle are enough for the
- * engine, while unrelated setters stay untouched.
- */
+
+
+
+
+
 class HookCoordinator(
     private val contextProvider: () -> Context?,
     private val targetPackage: String,
@@ -65,7 +65,7 @@ class HookCoordinator(
     private var visualizer: Visualizer? = null
     private var lastAudioWriteAtMs = 0L
     private var lastWriteLogAtMs = 0L
-    // 5.2.9: 必须持有强引用，否则 GC 可能在设置生效前把 receiver 收走。
+    
     @Volatile private var configRefreshReceiver: ConfigRefreshReceiver? = null
 
     fun install(lpparam: LoadPackageParam) {
@@ -93,8 +93,8 @@ class HookCoordinator(
         handler.post { initializeEngine() }
         handler.post(whitelistRefresh)
 
-        // 5.2.9: 注册配置刷新接收器。Context 尚未绑定时无法注册，
-        // 因此首次 adopt() 时补一次；重复注册会被 context 自身去重保护。
+        
+        
         registerConfigRefreshWhenPossible()
         Log.i(TAG, "[$targetPackage] hooks registered (context not yet bound)")
         contextProvider()?.let { LogBroadcaster.sendLog(it, "Hook ready: $targetPackage") }
@@ -117,10 +117,10 @@ class HookCoordinator(
 
     private fun engineOrNull(): HapticEngine? = engine
 
-    /**
-     * 5.2.9: ACTION_REFRESH_CONFIG 的接收端。此前工程只有发送方，
-     * 注入进程永远不会重新拉取配置，UI 改动因此完全无法生效。
-     */
+    
+
+
+
     private fun registerConfigRefreshWhenPossible() {
         if (configRefreshReceiver != null) return
         val ctx = attachedContext ?: return
@@ -138,14 +138,14 @@ class HookCoordinator(
         val applicationClass = runCatching { XposedHelpers.findClass("android.app.Application", classLoader) }
             .getOrElse { Application::class.java }
 
-        // Context acquisition strategy:
-        //   1. android.app.Application#attach(Context)      — legacy (removed on A14+)
-        //   2. android.app.Application#attach(Context, ActivityThread) — legacy overload
-        //   3. android.app.Application#attachForCreate / #attachBaseContext — A14+ replaces #attach
-        //   4. ActivityThread.currentActivityThread().getApplication() — fallback probe
-        // Every hook records the Context it saw; the engine is initialized as soon as any
-        // of them fires. Registration failures are logged instead of silently dropped so a
-        // missing entry point is diagnosable from logcat alone.
+        
+        
+        
+        
+        
+        
+        
+        
         val attached = java.util.concurrent.atomic.AtomicBoolean(false)
 
         fun adopt(context: Context?) {
@@ -188,7 +188,7 @@ class HookCoordinator(
         hookFirst("attachForCreate", Context::class.java)
         hookFirst("attachBaseContext", Context::class.java)
 
-        // Last-resort: poll ActivityThread for the Application object once it exists.
+        
         handler.postDelayed(object : Runnable {
             override fun run() {
                 if (attached.get()) return

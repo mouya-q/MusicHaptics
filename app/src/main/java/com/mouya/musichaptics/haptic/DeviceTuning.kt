@@ -2,14 +2,14 @@ package com.mouya.musichaptics.haptic
 
 import com.mouya.musichaptics.DeviceProfile
 
-/**
- * Per-profile output tuning.
- *
- * These values are empirical rendering parameters, not vendor actuator
- * specifications. The actuator model in DeviceProfile remains the physical
- * model; this layer controls how aggressively MusicHapticsX renders events on
- * top of it.
- */
+
+
+
+
+
+
+
+
 data class DeviceTuning(
     val profileId: String = "DEFAULT",
     val impactGain: Float = 1.00f,
@@ -29,15 +29,10 @@ data class DeviceTuning(
         (profile.maxAmplitude * amplitudeCeilingScale)
             .toInt()
             .coerceIn(1, profile.maxAmplitude)
-
-    fun scaleImpactAmplitude(raw: Int, profile: DeviceProfile): Int =
-        (raw * impactGain)
-            .toInt()
-            .coerceIn(1, cappedAmplitude(profile))
 }
 
 object DeviceTuningRegistry {
-    /** Resolve tuning from the already detected DeviceProfile, not Build.DEVICE again. */
+    
     fun current(profile: DeviceProfile): DeviceTuning = when (profile) {
         DeviceProfile.DEFAULT -> DeviceTuning(
             profileId = "DEFAULT",
@@ -454,7 +449,7 @@ object DeviceTuningRegistry {
         else -> fallback(profile)
     }
 
-    /** Kept as a compatibility overload for small callers/tests. */
+    
     fun current(): DeviceTuning = DeviceTuning()
 
     private fun fallback(profile: DeviceProfile): DeviceTuning {

@@ -51,9 +51,6 @@ private fun textTertiary() = if (isDark()) Color(0xFFEBEBF5).copy(alpha = 0.3f) 
 @Composable
 private fun separatorColor() = if (isDark()) Color(0xFF38383A) else Color(0xFFC6C6C8)
 @Composable
-private fun cardAltColor() = if (isDark()) Color(0xFF2C2C2E) else Color(0xFFF2F2F7)
-
-@Composable
 fun IOSConsole(
     modifier: Modifier = Modifier,
     isExpanded: Boolean,
@@ -64,7 +61,7 @@ fun IOSConsole(
 ) {
     val chevronRotation by animateFloatAsState(
         targetValue = if (isExpanded) 90f else 0f,
-        animationSpec = PhysicsSpring.uiFast(),  // critically-damped, ~150ms
+        animationSpec = PhysicsSpring.uiFast(),  
         label = "ChevronRotation"
     )
 
@@ -81,7 +78,7 @@ fun IOSConsole(
         border = BorderStroke(0.5.dp, if (isDark()) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f)),
         shadowElevation = 0.dp
     ) {
-        Column(modifier = Modifier.fillMaxWidth().animateContentSize(tween(250, easing = LinearOutSlowInEasing))) {  // ease-out for enter
+        Column(modifier = Modifier.fillMaxWidth().animateContentSize(tween(250, easing = LinearOutSlowInEasing))) {  
             Row(
                 modifier = Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 16.dp).clickable(
                     interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onToggle
@@ -99,8 +96,8 @@ fun IOSConsole(
 
             AnimatedVisibility(
                 visible = isExpanded,
-                enter = expandVertically(tween(250, easing = LinearOutSlowInEasing), Alignment.Top) + fadeIn(tween(200)),  // ease-out
-                exit = shrinkVertically(tween(250, easing = FastOutLinearInEasing), Alignment.Top) + fadeOut(tween(180))  // ease-in for exit
+                enter = expandVertically(tween(250, easing = LinearOutSlowInEasing), Alignment.Top) + fadeIn(tween(200)),  
+                exit = shrinkVertically(tween(250, easing = FastOutLinearInEasing), Alignment.Top) + fadeOut(tween(180))  
             ) {
                 Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
                     HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)

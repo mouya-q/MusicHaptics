@@ -48,21 +48,21 @@ data class DeviceProfile(
 
     val actuator: ActuatorProfile = ActuatorProfile.DEFAULT,
 
-    // ═══════════════════════════════════════════════════════════════════
-    // DSP-domain thresholds (separate quantity from energyThreshold!)
-    //
-    // `energyThreshold` above lives in the HapticEventGenerator domain — it is
-    // compared against *accumulated* energy over many frames (values 0.003-0.09).
-    // the DSP path instead compares against a *single-frame* RMS (typical
-    // real values on music: rmsLow ≈ 0.02-0.05, rmsHigh ≈ 0.003-0.01), so it
-    // needs its own, far smaller floor. Feeding energyThreshold into the DSP
-    // path is what made every non-Xiaomi-10 device silent: e.g. OnePlus 13's
-    // 0.05 → subThreshold 0.09, which single-frame low-band RMS never reaches.
-    //
-    // Leave the overrides null to auto-derive the floor from the actuator's
-    // physics (speed /振量 / Q). The derivation is calibrated so that the
-    // Xiaomi 10 0809 reference reproduces its known-good value (~0.004).
-    // ═══════════════════════════════════════════════════════════════════
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     val dspEnergyFloorOverride: Float? = null,
     val dspSubMultOverride: Float? = null,
     val dspKickMultOverride: Float? = null,
@@ -70,18 +70,18 @@ data class DeviceProfile(
     val dspTickMultOverride: Float? = null,
     val dspBodyMultOverride: Float? = null,
 ) {
-    /**
-     * Single-frame RMS floor for native beat detection.
-     *
-     * Reference point (measured on real logs): Xiaomi 10 / 0809 LRA —
-     * responseTime 5.75 ms, maxDisplacement 0.95, Q 16 → 0.0040.
-     *
-     * - Fast motors (ESA1016: 3.25 ms) can retrigger sooner → lower floor,
-     *   more events, denser texture.
-     * - Weak motors (small 振量) need a higher floor, otherwise quiet frames
-     *   produce vibrations too faint to feel and just waste refractory time.
-     * - Low-Q motors smear successive pulses together → higher floor.
-     */
+    
+
+
+
+
+
+
+
+
+
+
+
     val dspEnergyFloor: Float
         get() = dspEnergyFloorOverride ?: run {
             val a = actuator
@@ -95,37 +95,37 @@ data class DeviceProfile(
             floor.coerceIn(0.0015f, 0.0085f)
         }
 
-    /** SUB band multiplier — low-resonance wideband motors reproduce deep bass better. */
+    
     val dspSubMult: Float
         get() = dspSubMultOverride
             ?: (1.8f * (actuator.resonanceFreq / 200f).coerceIn(0.75f, 1.10f))
 
-    /** KICK band multiplier — high-Q motors need lower kick gain (longer decay). */
+    
     val dspKickMult: Float
         get() = dspKickMultOverride
             ?: (0.8f * (10f / actuator.qFactor.coerceIn(8f, 20f)).coerceIn(0.50f, 1.00f))
 
-    /** SNARE band multiplier — mid transients, mostly actuator-agnostic. */
+    
     val dspSnareMult: Float
         get() = dspSnareMultOverride
             ?: (0.7f * (15f / actuator.qFactor.coerceIn(8f, 20f)).coerceIn(0.85f, 1.30f))
 
-    /** TICK band multiplier — only crisp (high-Q) motors can render fine needles. */
+    
     val dspTickMult: Float
         get() = dspTickMultOverride
             ?: (0.4f * (15f / actuator.qFactor.coerceIn(8f, 20f)).coerceIn(0.75f, 1.40f))
 
-    /** BODY band multiplier — slow motors need more body, high-Q motors need less. */
+    
     val dspBodyMult: Float
         get() = dspBodyMultOverride
             ?: (1.2f * (10f / actuator.qFactor.coerceIn(8f, 20f)).coerceIn(0.60f, 1.20f))
 
-    /** Refractory scale — slow motors need longer gaps, fast ones can go denser. */
+    
     val dspRefractoryScale: Float
         get() = (actuator.responseTimeMs / 5.75f).coerceIn(0.50f, 2.00f)
 
     companion object {
-        /** Calibrated against the Xiaomi 10 0809 reference (known-good in real logs). */
+        
         private const val DSP_FLOOR_REF = 0.0040f
 
         private fun pow(base: Float, exp: Float): Float =
@@ -203,10 +203,10 @@ data class DeviceProfile(
             fillerDurationMs = 6L,
             fillerAmplitude = 35,
             bassBoost = 1.2f,
-            // Q=16 high-Q motor needs shorter decay and lower kick/body gain
-            // to avoid "constant vibration" feeling
-            dspKickMultOverride = 0.65f,  // Lower kick gain for crisp transient
-            dspBodyMultOverride = 0.80f,  // Lower body gain to avoid continuous rumble
+            
+            
+            dspKickMultOverride = 0.65f,  
+            dspBodyMultOverride = 0.80f,  
             actuator = ActuatorProfile.XIAOMI_10_0809,
         )
 
@@ -287,23 +287,23 @@ data class DeviceProfile(
             name = "OPPO Reno8 Pro · ELA0809 X-axis",
             description = "OPPO Reno8 Pro mid-range X-axis LRA, ELA0809 170 Hz, 252mm³, ~10ms rise/fall, ColorOS 4D haptics",
             minGuaranteedAmplitude = 30,
-            maxAmplitude = 220,  // 小体积马达, 降低上限防止失真
-            boostExponent = 0.55f,  // 较低boost, 入门级马达不耐高增益
+            maxAmplitude = 220,  
+            boostExponent = 0.55f,  
             subDur1Min = 16, subDur1Max = 38,
             subGap1Min = 6,  subGap1Max = 14,
             subDur2Min = 8,  subDur2Max = 20,
             subGap2Min = 3,  subGap2Max = 10,
             subDur3Min = 5,  subDur3Max = 15,
-            subAmpDecay2 = 0.60f,  // 更快衰减, 防止余震重叠
+            subAmpDecay2 = 0.60f,  
             subAmpDecay3 = 0.30f,
             minIntervalMs = 4L,
             maxIntervalMs = 40L,
-            silenceThreshold = 0.0025f,  // 稍高阈值滤除底噪
+            silenceThreshold = 0.0025f,  
             energyThreshold = 0.07f,
             fillerFrameThreshold = 8,
             fillerDurationMs = 3L,
             fillerAmplitude = 1,
-            bassBoost = 1.1f,  // 低频稍增补偿小体积不足
+            bassBoost = 1.1f,  
             actuator = ActuatorProfile.OPPO_RENO8_PRO,
         )
 
@@ -330,7 +330,7 @@ data class DeviceProfile(
             actuator = ActuatorProfile.ONEPLUS_15,
         )
 
-        // OnePlus 全系 + 拯救者Y700 + 澎湃Ultra 适配
+        
 
         val ONEPLUS_11 = DeviceProfile(
             name = "OnePlus 11 · CSA0916 X-axis LRA",
@@ -383,7 +383,7 @@ data class DeviceProfile(
             description = "OnePlus 13 CSA+0916, 602mm³, ColorOS 15, 72 O-Haptics effects, ultra-fast",
             minGuaranteedAmplitude = 10,
             maxAmplitude = 255,
-            boostExponent = 0.30f,  // 旗舰最强马达, 增益可更低
+            boostExponent = 0.30f,  
             subDur1Min = 8, subDur1Max = 22,
             subGap1Min = 3,  subGap1Max = 9,
             subDur2Min = 4,  subDur2Max = 12,
@@ -429,7 +429,7 @@ data class DeviceProfile(
             description = "OnePlus Ace3/Ace5 0809A mid-range X-axis, moderate volume and speed",
             minGuaranteedAmplitude = 25,
             maxAmplitude = 255,
-            boostExponent = 0.45f,  // 小马达需要更多增益
+            boostExponent = 0.45f,  
             subDur1Min = 14, subDur1Max = 35,
             subGap1Min = 5,  subGap1Max = 14,
             subDur2Min = 7,  subDur2Max = 18,
@@ -500,7 +500,7 @@ data class DeviceProfile(
             description = "Xiaomi 14/15 Ultra ESA1016, 10-500Hz, 4ms start/stop, HyperOS Haptic 2.0",
             minGuaranteedAmplitude = 10,
             maxAmplitude = 255,
-            boostExponent = 0.30f,  // 超宽频马达自身灵敏, 低增益
+            boostExponent = 0.30f,  
             subDur1Min = 8, subDur1Max = 22,
             subGap1Min = 3,  subGap1Max = 9,
             subDur2Min = 4,  subDur2Max = 12,
@@ -541,7 +541,7 @@ data class DeviceProfile(
             actuator = ActuatorProfile.SAMSUNG_S25,
         )
 
-        // Xiaomi 11/12/14 series + Redmi K70U 新增适配
+        
 
         val XIAOMI11 = DeviceProfile(
             name = "Xiaomi 11 Series · X-axis LRA",
@@ -667,19 +667,19 @@ data class DeviceProfile(
         val XIAOMI_17_PRO = DeviceProfile(
             name = "Xiaomi 17 Pro · ESA1016 Ultra",
             description = "Xiaomi 17 Pro ESA1016 130Hz, 600mm³+, 10-500Hz超宽频, HyperOS 3.0, 旗舰级低频纹理",
-            minGuaranteedAmplitude = 6,  // ESA1016 可更低
+            minGuaranteedAmplitude = 6,  
             maxAmplitude = 255,
-            boostExponent = 0.18f,  // 极低增益，马达自身灵敏
-            subDur1Min = 4, subDur1Max = 12,  // 极短脉冲
-            subGap1Min = 1,  subGap1Max = 5,  // 极窄间隙
+            boostExponent = 0.18f,  
+            subDur1Min = 4, subDur1Max = 12,  
+            subGap1Min = 1,  subGap1Max = 5,  
             subDur2Min = 2,  subDur2Max = 6,
             subGap2Min = 1,  subGap2Max = 3,
             subDur3Min = 1,  subDur3Max = 4,
-            subAmpDecay2 = 0.28f,  // 更快衰减
+            subAmpDecay2 = 0.28f,  
             subAmpDecay3 = 0.08f,
             minIntervalMs = 1L,
             maxIntervalMs = 20L,
-            silenceThreshold = 0.0008f,  // 更敏感
+            silenceThreshold = 0.0008f,  
             energyThreshold = 0.025f,
             fillerFrameThreshold = 4,
             fillerDurationMs = 1L,
@@ -711,14 +711,14 @@ data class DeviceProfile(
             actuator = ActuatorProfile.VIVO_FLAGSHIP,
         )
 
-        // 全机型适配扩展 — 小米/红米/一加全系
+        
 
         val XIAOMI_13PRO = DeviceProfile(
             name = "Xiaomi 13 Pro · ESA1016 CyberEngine",
             description = "Mi 13Pro ESA1016 130Hz, 560mm³, 50-500Hz超宽频, 低频纹理丰富",
             minGuaranteedAmplitude = 8,
             maxAmplitude = 255,
-            boostExponent = 0.28f,  // 超大马达, 低增益
+            boostExponent = 0.28f,  
             subDur1Min = 8, subDur1Max = 22,
             subGap1Min = 3,  subGap1Max = 9,
             subDur2Min = 4,  subDur2Max = 12,
@@ -788,7 +788,7 @@ data class DeviceProfile(
             description = "K50 Gaming CyberEngine 130Hz, 560mm³, 50-500Hz超宽频, 低频纹理丰富",
             minGuaranteedAmplitude = 8,
             maxAmplitude = 255,
-            boostExponent = 0.28f,  // 超大马达, 低增益
+            boostExponent = 0.28f,  
             subDur1Min = 8, subDur1Max = 22,
             subGap1Min = 3,  subGap1Max = 9,
             subDur2Min = 4,  subDur2Max = 12,
@@ -1011,16 +1011,16 @@ fun detectDeviceProfile(
             return DeviceProfile.XIAOMI_ULTRA
         }
 
-        // Xiaomi 14 family: houji (14), shennong (14 Pro).
-        // Xiaomi 14 Ultra is handled by the dedicated rich-feel branch above;
-        // 14/14 Pro share the XIAOMI14 actuator profile but keep distinct codenames.
+        
+        
+        
         if (device.contains("houji") || device.contains("shennong") ||
             model.contains("23127PN") || model.contains("23116PN")) {
             return DeviceProfile.XIAOMI14
         }
 
-        // Xiaomi 15 / 15 Pro: current upstream codenames are haotai / haotian.
-        // Keep shenni as a legacy ROM alias because older ports used it.
+        
+        
         if (device.contains("haotian") || device.contains("shenni") ||
             model.contains("2410DPN6")) {
             return DeviceProfile.XIAOMI_15PRO
@@ -1062,9 +1062,9 @@ fun detectDeviceProfile(
             return DeviceProfile.REDMI_K70
         }
 
-        // Redmi/POCO often report a different manufacturer string but retain the
-        // same Xiaomi actuator family; use the generic flagship profile only after
-        // all known named profiles have been exhausted.
+        
+        
+        
         if (device.contains("houbi") || Build.VERSION.SDK_INT >= 33) {
             return DeviceProfile.FLAGSHIP_XAXIS
         }
@@ -1073,7 +1073,7 @@ fun detectDeviceProfile(
     if (manufacturer.contains("lenovo")) {
         val m = model.lowercase()
         val d = device.lowercase()
-        // Y700 Gen2/Gen3 — multiple model variants
+        
         if (m.contains("tb320") || m.contains("tb321") ||
             d.contains("tb320") || d.contains("tb321") ||
             m.contains("y700_2023") || m.contains("y700_2024") ||

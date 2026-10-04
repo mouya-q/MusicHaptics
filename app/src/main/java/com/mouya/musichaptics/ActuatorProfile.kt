@@ -260,7 +260,7 @@ data class ActuatorProfile(
             dampingRatio = 0.033f,
             riseTimeMs = 4.5f,
             fallTimeMs = 6.5f,
-            maxDisplacement = 0.92f,  // 360mm³
+            maxDisplacement = 0.92f,  
             qFactor = 15f,
             thermalResistance = 23f
         )

@@ -18,7 +18,7 @@ class VibrateProxy(private val context: Context) {
     companion object {
         private const val TAG = "VibrateProxy"
 
-        /** Per-call vibration logging; off in release builds. */
+        
         @Volatile var verboseLogging: Boolean = BuildConfig.DEBUG
     }
 
@@ -313,14 +313,14 @@ class VibrateProxy(private val context: Context) {
             }
         }
     }
-    /**
-     * Android 14+ DynamicEffect path: continuous ADSR envelope driven by OS haptic engine.
-     * Falls back to false when SDK < 34 or reflection fails; caller should use performWaveform.
-     */
+    
+
+
+
     fun performDynamicEffect(amplitude: Float, sharpness: Float, durationSec: Float, attackSec: Float): Boolean {
         if (paused) return false
         if (Build.VERSION.SDK_INT < 34) return false
-        // Brand gate: RichTap DynamicEffect only for Xiaomi / Redmi
+        
         val mfr = Build.MANUFACTURER.lowercase(Locale.ROOT)
         val brand = Build.BRAND.lowercase(Locale.ROOT)
         if (mfr !in setOf("xiaomi", "redmi") && brand !in setOf("xiaomi", "redmi")) return false
@@ -367,17 +367,25 @@ class VibrateProxy(private val context: Context) {
 
         
         if (!hasAmplitudeControl) {
-            if (verboseLogging) Log.d(TAG, "performWaveform: no ampCtrl fallback, proxy=$useProxy primitives CLICK=$primitiveClickSupported THUD=$primitiveHeavyClickSupported")
-            val maxAmp = amplitudes.maxOrNull() ?: 0
-            if (primitiveHeavyClickSupported) {
-                performComposition(listOf(Triple(VibrationEffect.Composition.PRIMITIVE_THUD, (maxAmp / 255f).coerceIn(0f, 1f), 0)))
-            } else if (primitiveClickSupported) {
-                performComposition(listOf(Triple(VibrationEffect.Composition.PRIMITIVE_CLICK, (maxAmp / 255f).coerceIn(0f, 1f), 0)))
+            val usable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                (primitiveHeavyClickSupported || primitiveClickSupported || primitiveTickSupported)
+            if (usable) {
+                val parts = mutableListOf<Triple<Int, Float, Int>>()
+                var delay = 0
+                val primitives = listOf(
+                    VibrationEffect.Composition.PRIMITIVE_THUD to primitiveHeavyClickSupported,
+                    VibrationEffect.Composition.PRIMITIVE_CLICK to primitiveClickSupported,
+                    VibrationEffect.Composition.PRIMITIVE_TICK to primitiveTickSupported,
+                )
+                for (i in timings.indices) {
+                    val amp = (amplitudes.getOrElse(i) { amplitudes.lastOrNull() ?: 128 } / 255f).coerceIn(0.08f, 1f)
+                    val primitive = primitives.firstOrNull { it.second }?.first ?: break
+                    parts += Triple(primitive, amp, delay)
+                    delay += timings[i].coerceAtMost(80L).toInt()
+                }
+                if (parts.isNotEmpty()) performComposition(parts) else performOneShot(timings.sum().coerceAtMost(100L), VibrationEffect.DEFAULT_AMPLITUDE)
             } else {
-                
-                val totalDuration = timings.sum()
-                if (verboseLogging) Log.i(TAG, "performWaveform: no amp ctrl, no primitives → performOneShot($totalDuration, DEFAULT)")
-                performOneShot(totalDuration.coerceAtMost(100L), VibrationEffect.DEFAULT_AMPLITUDE)
+                performOneShot(timings.sum().coerceAtMost(100L), VibrationEffect.DEFAULT_AMPLITUDE)
             }
             return
         }
@@ -620,18 +628,18 @@ class VibrateProxy(private val context: Context) {
 
     fun performComposition(
         primitives: List<Triple<Int, Float, Int>>
-    ): Boolean {
-        if (paused) return false
-        if (primitives.isEmpty()) return false
+    ) {
+        if (paused) return
+        if (primitives.isEmpty()) return
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             primitives.forEach { (_, scale, _) ->
-                performOneShot(12L, (scale * 255).toInt().coerceIn(1, 255))
+                performOneShot(15L, (scale * 255).toInt().coerceIn(1, 255))
             }
-            return true
+            return
         }
 
         if (useProxy) {
-            val b = remoteBinder ?: return false
+            val b = remoteBinder ?: return
             try {
                 val data = Parcel.obtain()
                 val reply = Parcel.obtain()
@@ -644,15 +652,11 @@ class VibrateProxy(private val context: Context) {
                     }
                     b.transact(VibrateProxyService.CODE_PERFORM_COMPOSITION, data, reply, 0)
                     reply.readException()
-                    return true
                 } finally {
                     data.recycle()
                     reply.recycle()
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "IPC performComposition: ${e.message}")
-                return false
-            }
+            } catch (e: Exception) { Log.w(TAG, "IPC performComposition: ${e.message}") }
         } else {
             val vib = directVibrator
             if (vib != null && hasDirectVibrator) {
@@ -664,66 +668,13 @@ class VibrateProxy(private val context: Context) {
                         totalDelay += delay
                     }
                     vib.vibrate(composition.compose())
-                    return true
                 } catch (e: Exception) {
                     Log.w(TAG, "Composition failed, fallback to one-shot: ${e.message}")
                     val avgScale = primitives.map { it.second }.avg()
-                    performOneShot(16L, (avgScale * 255).toInt().coerceIn(1, 255))
-                    return true
+                    performOneShot(20L, (avgScale * 255).toInt().coerceIn(1, 255))
                 }
             }
         }
-        return false
-    }
-
-    /**
-     * Prefer calibrated Android primitives when the device exposes them; otherwise
-     * use the custom multi-segment envelope from the DSP/synthesizer layer.
-     */
-    fun performPremiumImpact(
-        event: String,
-        intensity: Float,
-        timings: LongArray,
-        amplitudes: IntArray,
-        accent: Float = 1f
-    ): String {
-        if (paused) return "PAUSED"
-        val scale = (intensity * accent).coerceIn(0.04f, 1f)
-        val key = event.uppercase(Locale.ROOT)
-        val primitives = when (key) {
-            "KICK" -> when {
-                primitiveHeavyClickSupported -> listOf(Triple(VibrationEffect.Composition.PRIMITIVE_THUD, scale, 0))
-                primitiveClickSupported -> listOf(Triple(VibrationEffect.Composition.PRIMITIVE_CLICK, scale, 0))
-                else -> emptyList()
-            }
-            "SNARE" -> when {
-                primitiveClickSupported && primitiveTickSupported -> listOf(
-                    Triple(VibrationEffect.Composition.PRIMITIVE_CLICK, scale, 0),
-                    Triple(VibrationEffect.Composition.PRIMITIVE_TICK, scale * 0.28f, 3)
-                )
-                primitiveClickSupported -> listOf(Triple(VibrationEffect.Composition.PRIMITIVE_CLICK, scale, 0))
-                else -> emptyList()
-            }
-            "TICK" -> when {
-                primitiveLowTickSupported -> listOf(Triple(VibrationEffect.Composition.PRIMITIVE_LOW_TICK, scale, 0))
-                primitiveTickSupported -> listOf(Triple(VibrationEffect.Composition.PRIMITIVE_TICK, scale, 0))
-                else -> emptyList()
-            }
-            "VOCAL" -> when {
-                primitiveLowTickSupported -> listOf(Triple(VibrationEffect.Composition.PRIMITIVE_LOW_TICK, scale * 0.45f, 0))
-                primitiveTickSupported -> listOf(Triple(VibrationEffect.Composition.PRIMITIVE_TICK, scale * 0.38f, 0))
-                else -> emptyList()
-            }
-            else -> when {
-                primitiveHeavyClickSupported -> listOf(Triple(VibrationEffect.Composition.PRIMITIVE_THUD, scale * 0.70f, 0))
-                primitiveClickSupported -> listOf(Triple(VibrationEffect.Composition.PRIMITIVE_CLICK, scale * 0.72f, 0))
-                else -> emptyList()
-            }
-        }
-        val preferPrimitive = !hasAmplitudeControl || forceDefaultAmplitude
-        if (preferPrimitive && primitives.isNotEmpty() && performComposition(primitives)) return "PRIMITIVE"
-        performWaveform(timings, amplitudes)
-        return "WAVEFORM"
     }
 
     fun performTextureTick(intensity: Float) {
@@ -761,8 +712,7 @@ class VibrateProxy(private val context: Context) {
             else null
         }
         if (primitive != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val primitiveId: Int = primitive
-            performComposition(listOf(Triple(primitiveId, scale, 0)))
+            performComposition(listOf(Triple(primitive, scale, 0)))
         } else {
             performOneShot(12L, (scale * 200).toInt().coerceIn(1, 255))
         }

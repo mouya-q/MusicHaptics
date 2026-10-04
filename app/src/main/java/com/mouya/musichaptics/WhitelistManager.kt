@@ -4,18 +4,18 @@ import android.util.Log
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 
-/**
- * Runtime application filter. Injection is controlled by LSPosed scope; this
- * file is the second gate that decides whether the hooked process is active.
- *
- * Format:
- *   mode=whitelist
- *   com.netease.cloudmusic
- *   com.tencent.qqmusic
- *
- * Set mode=all to accept every injected package. An empty whitelist never
- * means "allow all"; it means no application is enabled in whitelist mode.
- */
+
+
+
+
+
+
+
+
+
+
+
+
 class WhitelistManager {
     companion object {
         private const val TAG = "MusicHapticsX-Whitelist"

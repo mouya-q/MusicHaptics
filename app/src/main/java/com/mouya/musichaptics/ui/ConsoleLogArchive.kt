@@ -18,9 +18,9 @@ object ConsoleLogArchive {
     private const val FLUSH_INTERVAL_MS = 750L
     private const val FLUSH_CHAR_THRESHOLD = 4096
 
-    // Lines are buffered in memory and flushed in batches; the old code issued
-    // a file open/write/close per log line, which shows up as UI-process I/O
-    // storms when the hooked apps stream diagnostics.
+    
+    
+    
     private val pending = StringBuilder()
     private var lastFlushMs = 0L
     private var flushesSinceSizeCheck = 0
@@ -54,7 +54,7 @@ object ConsoleLogArchive {
         } catch (_: Exception) { }
     }
 
-    /** Persists any buffered lines; safe to call from lifecycle onStop(). */
+    
     @Synchronized
     fun flush(context: Context) {
         try {
@@ -68,8 +68,8 @@ object ConsoleLogArchive {
         target.appendText(pending.toString())
         pending.setLength(0)
         lastFlushMs = nowMs
-        // Size capping is amortized: checking length on every line is a syscall
-        // per log entry, so only re-trim every 16 flushes.
+        
+        
         if (++flushesSinceSizeCheck >= 16) {
             flushesSinceSizeCheck = 0
             if (target.length() > MAX_BYTES) {

@@ -4,166 +4,111 @@ import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+APP = ROOT / "app" / "src" / "main"
+JAVA = APP / "java"
+CPP = APP / "cpp"
 errors = []
 
 required = [
-    ROOT / "README.md",
-    ROOT / "CHANGED.md",
-    ROOT / "THIRD_PARTY_NOTICES.md",
-    ROOT / "LICENSE",
-    ROOT / "docs" / "ARCHITECTURE.md",
-    ROOT / "app" / "src" / "main" / "cpp" / "jni" / "NativeBridge.cpp",
+    ROOT / "README.md", ROOT / "CHANGED.md", ROOT / "CONTRIBUTING.md",
+    ROOT / "SECURITY.md", ROOT / "THIRD_PARTY_NOTICES.md", ROOT / "docs" / "ARCHITECTURE.md",
+    ROOT / "LICENSE", CPP / "jni" / "NativeBridge.cpp",
 ]
 for path in required:
-    if not path.exists():
-        errors.append(f"missing required file: {path.relative_to(ROOT)}")
+    if not path.exists(): errors.append(f"missing: {path.relative_to(ROOT)}")
 
 for path in ROOT.rglob("*"):
-    if not path.is_file():
-        continue
-    rel = path.relative_to(ROOT).as_posix().lower()
-    if any(token in rel for token in ("pingfang", "pingfangsc", "pingfang_hack")):
-        errors.append(f"unapproved font path remains: {rel}")
+    if not path.is_file(): continue
+    rel = path.relative_to(ROOT).as_posix()
+    low = rel.lower()
+    if any(token in low for token in ("pingfang", "pingfangsc", "pingfang_hack")):
+        errors.append(f"font residue: {rel}")
     if path.suffix.lower() in {".bak", ".orig", ".patch", ".tmp", ".apk", ".aab"}:
-        errors.append(f"generated/temp artifact remains: {path.relative_to(ROOT)}")
+        errors.append(f"temporary artifact: {rel}")
 
-for directory in (
-    ROOT / "app" / "src" / "main" / "cpp" / "cpp",
-    ROOT / "app" / "src" / "main" / "cpp_disabled",
-    ROOT / "app" / "build",
-):
-    if directory.exists():
-        errors.append(f"obsolete/generated directory remains: {directory.relative_to(ROOT)}")
+for rel in ("app/src/main/cpp/cpp", "app/src/main/cpp_disabled", "app/build"):
+    if (ROOT / rel).exists(): errors.append(f"obsolete directory: {rel}")
 
-native = (ROOT / "app" / "src" / "main" / "java").rglob("*.kt")
-kotlin_names = set()
-for path in native:
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    kotlin_names.update(re.findall(r"external fun (native[A-Za-z0-9_]+)", text))
+legacy = [
+    "RootActivationActivity.kt", "HapticEventGenerator.kt", "HapticComposer.kt",
+    "HapticPrimitive.kt", "MusicStructureAnalyzer.kt", "InstrumentFeatures.kt", "TelemetryHub.kt",
+]
+for rel in legacy:
+    if (JAVA / "com" / "mouya" / "musichaptics" / rel).exists():
+        errors.append(f"legacy file remains: {rel}")
 
-cpp_text = "\n".join(
-    p.read_text(encoding="utf-8", errors="ignore")
-    for p in (ROOT / "app" / "src" / "main" / "cpp").rglob("*.cpp")
-)
-cpp_names = set(re.findall(r"Java_com_mouya_musichaptics_NativeBridge_(native[A-Za-z0-9_]+)", cpp_text))
-missing = sorted(kotlin_names - cpp_names)
-extra = sorted(cpp_names - kotlin_names)
-for name in missing:
-    errors.append(f"JNI declaration has no native implementation: {name}")
-# Extra C++ JNI functions are allowed only if the name is part of an intentionally
-# legacy bridge; report them as warnings rather than failing the tree check.
-if extra:
-    print("warning: native functions not declared in Kotlin:", ", ".join(extra))
+kt_files = list(JAVA.rglob("*.kt"))
+kt_text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in kt_files)
+cpp_text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in CPP.rglob("*.cpp"))
 
-# Every named DeviceProfile should have an explicit DeviceTuning branch.
-profile_text = (ROOT / "app" / "src" / "main" / "java" / "com" / "mouya" / "musichaptics" / "DeviceProfile.kt").read_text(encoding="utf-8", errors="ignore")
-tuning_text = (ROOT / "app" / "src" / "main" / "java" / "com" / "mouya" / "musichaptics" / "haptic" / "DeviceTuning.kt").read_text(encoding="utf-8", errors="ignore")
-profile_names = set(re.findall(r"\bval\s+([A-Z0-9_]+)\s*=\s*DeviceProfile\(", profile_text)) - {"DEFAULT"}
-explicit_tuning_names = set(re.findall(r"DeviceProfile\.([A-Z0-9_]+)\s*->\s*DeviceTuning", tuning_text))
-for name in sorted(profile_names - explicit_tuning_names):
-    errors.append(f"DeviceProfile has no explicit DeviceTuning branch: {name}")
+kt_jni = set(re.findall(r"external fun (native[A-Za-z0-9_]+)", kt_text))
+cpp_jni = set(re.findall(r"Java_com_mouya_musichaptics_NativeBridge_(native[A-Za-z0-9_]+)", cpp_text))
+for name in sorted(kt_jni - cpp_jni): errors.append(f"missing JNI implementation: {name}")
 
-# ── Vendored com.kyant.backdrop source invariants ───────────────────────────
-# The :liquidglass module is a copy of a Compose Multiplatform library running
-# on plain AndroidX Compose. Three things silently break that port and each of
-# them costs a full CI cycle to rediscover, so fail fast here instead:
-#   1. AndroidX Compose has no androidx.compose.ui.graphics.RuntimeShader — the
-#      interface must be declared locally.
-#   2. Kotlin context parameters need Kotlin 2.2+; this project is on 2.0.21.
-#   3. AndroidX ships TWO same-named classes and they are NOT interchangeable:
-#        androidx.compose.ui.graphics.CompositingStrategy       (module ui-android)
-#        androidx.compose.ui.graphics.layer.CompositingStrategy (module ui-graphics)
-#      GraphicsLayerScope declares the former, layer.GraphicsLayer declares the
-#      latter. Verified against ui-android-1.7.8.aar / ui-graphics-android-1.7.8.aar
-#      bytecode, so the rule below is host-aware rather than blanket-banning one.
-backdrop_root = ROOT / "liquidglass" / "src"
-if backdrop_root.is_dir():
-    runtime_shader = backdrop_root / "main" / "kotlin" / "com" / "kyant" / "backdrop" / "RuntimeShader.kt"
-    if not runtime_shader.exists():
-        errors.append("liquidglass: RuntimeShader.kt is missing")
-    elif "interface RuntimeShader" not in runtime_shader.read_text(encoding="utf-8", errors="ignore"):
-        errors.append("liquidglass: RuntimeShader.kt no longer declares interface RuntimeShader")
+profile_text = (JAVA / "com/mouya/musichaptics/DeviceProfile.kt").read_text(encoding="utf-8")
+tuning_text = (JAVA / "com/mouya/musichaptics/haptic/DeviceTuning.kt").read_text(encoding="utf-8")
+profiles = set(re.findall(r"\bval\s+([A-Z0-9_]+)\s*=\s*DeviceProfile\(", profile_text)) - {"DEFAULT"}
+tuning = set(re.findall(r"DeviceProfile\.([A-Z0-9_]+)\s*->\s*DeviceTuning", tuning_text))
+for name in sorted(profiles - tuning): errors.append(f"device tuning missing: {name}")
 
-    for path in sorted(backdrop_root.rglob("*.kt")):
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        rel = path.relative_to(ROOT).as_posix()
-        # Only inspect real code, not doc comments that explain these pitfalls.
-        code = "\n".join(
-            line for line in text.splitlines()
-            if not line.lstrip().startswith(("//", "*", "/*"))
-        )
-        if re.search(r"^\s*import\s+androidx\.compose\.ui\.graphics\.RuntimeShader\b", code, re.MULTILINE):
-            errors.append(f"liquidglass: AndroidX has no graphics.RuntimeShader: {rel}")
-        if re.search(r"^\s*context\s*\(", code, re.MULTILINE):
-            errors.append(f"liquidglass: Kotlin context parameters need Kotlin 2.2+: {rel}")
-        # Host-aware CompositingStrategy check: an assignment inside a
-        # GraphicsLayerScope block must use the ui-android class, while an
-        # assignment to a layer.GraphicsLayer must use the ui-graphics one.
-        # A fully-qualified wrong-package assignment is always an error.
-        for lineno, line in enumerate(code.splitlines(), 1):
-            if "compositingStrategy" not in line:
-                continue
-            if "androidx.compose.ui.graphics.layer.CompositingStrategy" in line and \
-                    "GraphicsLayerScope" in text and rel.endswith("DrawBackdropModifier.kt"):
-                errors.append(
-                    f"liquidglass: GraphicsLayerScope.compositingStrategy needs "
-                    f"graphics.CompositingStrategy (ui-android), not layer.*: {rel}:{lineno}"
-                )
-        imports_layer = re.search(
-            r"^\s*import\s+androidx\.compose\.ui\.graphics\.layer\.CompositingStrategy\b",
-            code, re.MULTILINE)
-        imports_graphics = re.search(
-            r"^\s*import\s+androidx\.compose\.ui\.graphics\.CompositingStrategy\b",
-            code, re.MULTILINE)
-        if imports_layer and imports_graphics:
-            errors.append(f"liquidglass: both CompositingStrategy classes imported: {rel}")
+settings = [
+    "master_switch", "selected_preset", "haptic_amplitude", "haptic_bass_boost", "style_preset",
+    "force_default_amplitude", "synth_lra_f0", "synth_lra_q", "synth_rate_hz",
+    "synth_attack_impact", "synth_decay_impact", "synth_attack_continuous",
+    "synth_decay_continuous", "synth_release", "synth_sustain", "synth_thermal_warn",
+    "synth_thermal_crit", "synth_thermal_rth", "synth_thermal_cth", "synth_impact_gain",
+    "synth_continuous_gain", "synth_texture_gain", "synth_master_gain",
+]
+dash = (JAVA / "com/mouya/musichaptics/HapticDashboardActivity.kt").read_text(encoding="utf-8")
+engine = (JAVA / "com/mouya/musichaptics/HapticEngine.kt").read_text(encoding="utf-8")
+proxy = (JAVA / "com/mouya/musichaptics/VibrateProxy.kt").read_text(encoding="utf-8")
+provider = (JAVA / "com/mouya/musichaptics/ConfigProvider.kt").read_text(encoding="utf-8")
+for key in settings:
+    if key not in dash: errors.append(f"setting missing from dashboard: {key}")
+    if key not in provider: errors.append(f"setting missing from provider: {key}")
+    consumer = proxy if key == "force_default_amplitude" else engine
+    if key not in consumer: errors.append(f"setting missing runtime consumer: {key}")
 
-# ── app module invariants ───────────────────────────────────────────────────
-# HapticComposer.kt is the command vocabulary shared by HapticEventGenerator and
-# HapticSynthesizer. It was lost while the 5.x tree was rebuilt and cost a full
-# CI cycle to rediscover (78 errors, all cascading from this one missing file).
-composer = (ROOT / "app" / "src" / "main" / "java" / "com" / "mouya" / "musichaptics"
-            / "HapticComposer.kt")
-if not composer.exists():
-    errors.append("app: HapticComposer.kt is missing (HapticCommand/KeyStrikeSemantic/SemanticType)")
-else:
-    composer_text = composer.read_text(encoding="utf-8", errors="ignore")
-    for decl in ("enum class KeyStrikeSemantic", "enum class SemanticType",
-                 "data class HapticCommand"):
-        if decl not in composer_text:
-            errors.append(f"app: HapticComposer.kt no longer declares '{decl}'")
+# Per-app settings must share keys with the engine.
+scoped = dash[dash.find("private fun ScopedAppSettings"):]
+for key in ("master_switch", "haptic_amplitude", "haptic_bass_boost"):
+    if key not in scoped: errors.append(f"scoped setting missing: {key}")
 
-app_src = ROOT / "app" / "src" / "main" / "java" / "com" / "mouya" / "musichaptics"
-if app_src.is_dir():
-    for path in sorted(app_src.rglob("*.kt")):
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        rel = path.relative_to(ROOT).as_posix()
-        code = "\n".join(
-            line for line in text.splitlines()
-            if not line.lstrip().startswith(("//", "*", "/*"))
-        )
-        # kotlin.text.isNullOrEmpty has no ByteArray? overload: it only covers
-        # CharSequence? / Array<out T>? / Collection? / Map?. Calling it on a
-        # ByteArray? is an unresolved reference.
-        if re.search(r"ByteArray\?[^\n]*\.isNullOrEmpty\(\)", code):
-            errors.append(f"app: isNullOrEmpty has no ByteArray? overload: {rel}")
-        # SharedPreferences.getAll() must be implemented as a *function*: Kotlin does
-        # not expose it as an overridable `all` synthetic property on a Kotlin
-        # implementation of the Java interface. Writing `override val all: ...`
-        # yields "'all' overrides nothing" plus
-        # "does not implement abstract member 'getAll'".
-        if re.search(r"^\s*override\s+val\s+all\b", code, re.MULTILINE):
-            errors.append(
-                f"app: SharedPreferences.getAll() must be 'override fun getAll(): Map<String, *>': {rel}")
-        if ": SharedPreferences {" in code and "override fun getAll(" not in code:
-            errors.append(
-                f"app: SharedPreferences impl is missing 'override fun getAll()': {rel}")
+if "点击复制" in kt_text: errors.append("QQ copy hint remains")
+if "RootActivationActivity" in kt_text: errors.append("root onboarding symbol remains")
+if any(x in kt_text for x in ("HapticEventGenerator", "MusicStructureAnalyzer", "InstrumentFeatures")):
+    errors.append("legacy runtime symbol remains")
+if "runtime-livedata" in (ROOT / "app/build.gradle.kts").read_text(encoding="utf-8"):
+    errors.append("unused runtime-livedata dependency remains")
+
+def comment_cjk(text):
+    block = False
+    for n, line in enumerate(text.splitlines(), 1):
+        if block:
+            if "*/" in line:
+                block=False
+            if re.search(r"[\u3400-\u9fff]", line): return n
+            continue
+        if "/*" in line:
+            block=True
+            if re.search(r"[\u3400-\u9fff]", line.split("/*",1)[1]): return n
+        if "//" in line:
+            if re.search(r"[\u3400-\u9fff]", line.split("//",1)[1]): return n
+    return None
+for path in list(JAVA.rglob("*.kt")) + list(CPP.rglob("*.cpp")) + list(CPP.rglob("*.hpp")) + list(CPP.rglob("*.h")):
+    hit = comment_cjk(path.read_text(encoding="utf-8", errors="ignore"))
+    if hit: errors.append(f"non-English comment: {path.relative_to(ROOT)}:{hit}")
+
+cmake = (CPP / "CMakeLists.txt").read_text(encoding="utf-8", errors="ignore")
+for flag in ("max-page-size=16384", "common-page-size=16384"):
+    if flag not in cmake: errors.append(f"missing 16KB flag: {flag}")
 
 if errors:
     print("repository check failed")
-    for error in errors:
-        print(f"- {error}")
+    for error in errors: print("-", error)
     sys.exit(1)
 
 print("repository check passed")
-print(f"JNI declarations checked: {len(kotlin_names)}")
+print(f"JNI declarations checked: {len(kt_jni)}")
+print(f"Device profiles checked: {len(profiles)}")
+print(f"Runtime settings checked: {len(settings)}")

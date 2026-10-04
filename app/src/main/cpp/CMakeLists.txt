@@ -5,12 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Android 15+ devices may run a 16 KB page-size kernel, and Android 16 warns
-# (and refuses to load) shared libraries whose LOAD segments are only 4 KB
-# aligned. NDK r27 still defaults to 4 KB, so opt in explicitly here.
-#   -Wl,-z,max-page-size=16384 : emit PT_LOAD with p_align = 0x4000
-#   -Wl,-z,common-page-size=16384 : keep the segment layout consistent with it
-# NDK r28+ does this by default; setting it unconditionally is harmless there.
+# Keep PT_LOAD segments 16 KB aligned.
 add_link_options(-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384)
 
 add_library(native-bridge SHARED
@@ -29,11 +24,9 @@ target_compile_options(native-bridge PRIVATE
     -ffast-math
     -fvisibility=hidden
     -fvisibility-inlines-hidden
-    # Frame pointers are debug aids; omitting them frees a register on every
-    # DSP hot-path call. Symbolicated debugging still works via .eh_frame.
+    # Remove frame pointers from hot paths.
     -fomit-frame-pointer
-    # Let the linker strip unreferenced code (LTO + gc-sections shrink the
-    # .so that gets injected into every hooked process).
+    # Strip unused code and data.
     -ffunction-sections
     -fdata-sections
     -flto

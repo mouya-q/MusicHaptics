@@ -5,7 +5,6 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.net.Uri
@@ -18,19 +17,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.BackEventCompat
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
-import androidx.compose.animation.core.Spring
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import kotlin.math.roundToInt
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -40,7 +33,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Refresh
@@ -55,19 +47,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.*
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
@@ -76,14 +62,11 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import com.mouya.musichaptics.ui.ConsoleLogState
 import com.mouya.musichaptics.ui.rememberConsoleLogState
 import com.mouya.musichaptics.ui.IOSConsole
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -99,10 +82,7 @@ import com.kyant.backdrop.shadow.Shadow
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.foundation.isSystemInDarkTheme
 import java.util.Locale
-import kotlin.math.PI
-import kotlin.math.sin
 import kotlin.math.max
-import kotlin.math.abs
 
 
 private object IOSColors {
@@ -134,7 +114,6 @@ private object IOSColors {
 @Composable private fun isDark() = isSystemInDarkTheme()
 @Composable private fun bgPrimary() = if (isDark()) IOSColors.darkBg else IOSColors.lightBg
 @Composable private fun cardColor() = if (isDark()) IOSColors.darkCard else IOSColors.lightCard
-@Composable private fun cardAltColor() = if (isDark()) IOSColors.darkCardAlt else IOSColors.lightCardAlt
 @Composable private fun glassColor() = if (isDark()) IOSColors.glassDark else IOSColors.glassLight
 @Composable private fun textPrimary() = if (isDark()) IOSColors.darkTextPrimary else IOSColors.lightTextPrimary
 @Composable private fun textSecondary() = if (isDark()) IOSColors.darkTextSecondary else IOSColors.lightTextSecondary
@@ -147,8 +126,8 @@ private val LocalLiquidGlassBackdrop = staticCompositionLocalOf<LayerBackdrop?> 
 fun Modifier.liquidGlass(corner: Dp = 22.dp): Modifier {
     val backdrop = LocalLiquidGlassBackdrop.current
     val shape = RoundedCornerShape(corner)
-    // glassColor() is @Composable, so it must be read in composable scope; the
-    // onDrawSurface lambda below is a plain DrawScope lambda and cannot call it.
+    
+    
     val glass = glassColor()
     return if (backdrop != null) {
         this.then(Modifier.drawBackdrop(
@@ -226,7 +205,7 @@ fun <T> IOSSegmentedControl(
         val baseOffset = itemWidthPx * items.indexOf(selected)
         val lensOffsetPx by animateFloatAsState(
             targetValue = baseOffset + dragOffset,
-            animationSpec = PhysicsSpring.elasticSelect(),  // near-critical damping
+            animationSpec = PhysicsSpring.elasticSelect(),  
             label = "LensOffset"
         )
 
@@ -235,7 +214,7 @@ fun <T> IOSSegmentedControl(
                 .offset { androidx.compose.ui.unit.IntOffset(lensOffsetPx.toInt(), 0) }
                 .width(itemWidth)
                 .fillMaxHeight()
-                // no scale spring — flat, clean indicator
+                
                 .shadow(if (isInteracting) 6.dp else 0.dp, RoundedCornerShape(8.dp), ambientColor = IOSColors.blue.copy(alpha=0.4f), spotColor = IOSColors.blue.copy(alpha=0.3f))
                 .clip(RoundedCornerShape(8.dp))
                 .background(if (isDark()) Color(0xFF48484A) else Color.White)
@@ -253,7 +232,7 @@ fun <T> IOSSegmentedControl(
                                     val targetIndex = (totalOffset / itemWidthPx).roundToInt().coerceIn(0, items.size - 1)
                                     val targetItem = items[targetIndex]
                                     if (targetItem != selected) {
-                                        hapticEngine.perform(HapticFeedbackEngine.HapticStyle.SELECTION)  // commit haptic only
+                                        hapticEngine.perform(HapticFeedbackEngine.HapticStyle.SELECTION)  
                                         onSelect(targetItem)
                                     }
                                     pressedItem = null
@@ -352,17 +331,17 @@ fun IOSSettingSliderRow(
                     }
                     detectDragGestures(
                         onDragStart = { offset ->
-                            coroutineScope.launch { thumbScale.animateTo(1.25f, PhysicsSpring.uiFast()) }  // v3.14
+                            coroutineScope.launch { thumbScale.animateTo(1.25f, PhysicsSpring.uiFast()) }  
                             val v = xToValue(offset.x)
                             onValueChange(v)
-                            hapticEngine.perform(HapticFeedbackEngine.HapticStyle.CONTINUOUS_HUM)  // start continuous
+                            hapticEngine.perform(HapticFeedbackEngine.HapticStyle.CONTINUOUS_HUM)  
                         },
                         onDragEnd = {
-                            coroutineScope.launch { thumbScale.animateTo(1f, PhysicsSpring.uiStandard()) }  // v3.14
-                            hapticEngine.perform(HapticFeedbackEngine.HapticStyle.KICK)  // commit tick
+                            coroutineScope.launch { thumbScale.animateTo(1f, PhysicsSpring.uiStandard()) }  
+                            hapticEngine.perform(HapticFeedbackEngine.HapticStyle.KICK)  
                         },
                         onDragCancel = {
-                            coroutineScope.launch { thumbScale.animateTo(1f, PhysicsSpring.uiStandard()) }  // v3.14
+                            coroutineScope.launch { thumbScale.animateTo(1f, PhysicsSpring.uiStandard()) }  
                         }
                     ) { change, _ ->
                         change.consume()
@@ -448,54 +427,6 @@ fun IOSButton(
 
 class HapticDashboardActivity : ComponentActivity() {
 
-    private val telemetryReceiver = object : android.content.BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            // Unpack the packed telemetry format
-            val floats = intent.getFloatArrayExtra("floats")
-            val longs = intent.getLongArrayExtra("longs")
-            val ints = intent.getIntArrayExtra("ints")
-            val bundle = android.os.Bundle().apply {
-                if (floats != null && floats.size >= 16) {
-                    putFloat("sub", floats[0])
-                    putFloat("mid", floats[1])
-                    putFloat("pres", floats[2])
-                    putFloat("f0", floats[3])
-                    putFloat("temp", floats[4])
-                    putFloat("atten", floats[5])
-                    putFloat("loFreq", floats[6])
-                    putFloat("hiFreq", floats[7])
-                    putFloat("ampScale", floats[8])
-                    putFloat("lraDisp", floats[9])
-                    putFloat("lraVel", floats[10])
-                    putFloat("lraForce", floats[11])
-                    putFloat("lraPhase", floats[12])
-                    putFloat("adsrEnv", floats[13])
-                    putFloat("thermalGain", floats[14])
-                    putFloat("gammaValue", floats[15])
-                }
-                if (longs != null && longs.size >= 5) {
-                    putLong("latency", longs[0])
-                    putLong("overruns", longs[1])
-                    putLong("subCount", longs[2])
-                    putLong("midCount", longs[3])
-                    putLong("texCount", longs[4])
-                }
-                if (ints != null && ints.size >= 2) {
-                    putInt("primitiveIntensity", ints[0])
-                    putInt("primitiveDuration", ints[1])
-                }
-                putBoolean("keyStrikeActive", intent.getBooleanExtra("ksActive", false))
-                putString("keyStrikeSemantic", intent.getStringExtra("ksSem") ?: "NONE")
-                putString("semanticType", intent.getStringExtra("semType") ?: "BALANCED")
-                putString("personaName", intent.getStringExtra("persona") ?: "POP")
-                putString("primitiveType", intent.getStringExtra("primType") ?: "")
-                putString("primitiveSemantic", intent.getStringExtra("primSem") ?: "")
-                putLong("time", intent.getLongExtra("time", System.currentTimeMillis()))
-            }
-            TelemetryHub.applySnapshot(bundle)
-        }
-    }
-
     private val logReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val msg = intent.getStringExtra(LogBroadcaster.EXTRA_LOG_MSG)
@@ -513,12 +444,6 @@ class HapticDashboardActivity : ComponentActivity() {
             isAppearanceLightNavigationBars = true
         }
 
-        val telemetryFilter = IntentFilter(LogBroadcaster.ACTION_TELEMETRY)
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU)
-            registerReceiver(telemetryReceiver, telemetryFilter, ContextCompat.RECEIVER_EXPORTED)
-        else
-            registerReceiver(telemetryReceiver, telemetryFilter)
-
         val logFilter = IntentFilter(LogBroadcaster.ACTION_LOG)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU)
             registerReceiver(logReceiver, logFilter, ContextCompat.RECEIVER_EXPORTED)
@@ -530,7 +455,6 @@ class HapticDashboardActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        try { unregisterReceiver(telemetryReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(logReceiver) } catch (_: Exception) {}
     }
 }
@@ -538,50 +462,15 @@ class HapticDashboardActivity : ComponentActivity() {
 
 @Composable
 fun HapticDashboard() {
-    var telemetry by remember { mutableStateOf(TelemetrySnapshot()) }
     val consoleLogState = rememberConsoleLogState()
     var consoleExpanded by remember { mutableStateOf(false) }
 
-    // ── Primitive hold: prevents texture flicker ──
+    
     var heldPrimitiveType by remember { mutableStateOf("") }
     var heldPrimitiveSemantic by remember { mutableStateOf("") }
     var heldPrimitiveIntensity by remember { mutableStateOf(0) }
     var heldPrimitiveDuration by remember { mutableStateOf(0) }
     var lastPrimitiveTime by remember { mutableStateOf(0L) }
-
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(25)
-            val fftEnergy = (TelemetryHub.subBassLevel + TelemetryHub.midBassLevel + TelemetryHub.presenceLevel) / 3f
-            val physicsEnergy = TelemetryHub.adsrEnvelope + TelemetryHub.lraForce * 0.5f
-            telemetry = TelemetrySnapshot(
-                subBass = TelemetryHub.subBassLevel, midBass = TelemetryHub.midBassLevel,
-                presence = TelemetryHub.presenceLevel,
-                intensity = maxOf(fftEnergy, physicsEnergy).coerceIn(0f, 1f),
-                latencyMs = TelemetryHub.frameLatencyMs.toFloat(),
-                temperature = TelemetryHub.coilTemperature,
-                f0Hz = TelemetryHub.fundamentalFrequencyHz.toInt(),
-                adsrEnv = TelemetryHub.adsrEnvelope, lraForce = TelemetryHub.lraForce,
-                lraPhase = TelemetryHub.lraPhase, lraDisp = TelemetryHub.lraDisplacement,
-                thermalAttenuation = TelemetryHub.thermalAttenuation,
-            )
-
-            val now = System.currentTimeMillis()
-            val currentType = TelemetryHub.primitiveType
-            if (currentType.isNotEmpty()) {
-                heldPrimitiveType = currentType
-                heldPrimitiveSemantic = TelemetryHub.primitiveSemantic
-                heldPrimitiveIntensity = TelemetryHub.primitiveIntensity
-                heldPrimitiveDuration = TelemetryHub.primitiveDuration
-                lastPrimitiveTime = now
-            } else if (now - lastPrimitiveTime > 800) {
-                heldPrimitiveType = ""
-                heldPrimitiveSemantic = ""
-                heldPrimitiveIntensity = 0
-                heldPrimitiveDuration = 0
-            }
-        }
-    }
 
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("haptics_config", Context.MODE_PRIVATE) }
@@ -592,8 +481,8 @@ fun HapticDashboard() {
         mutableStateOf(Preset.entries.getOrElse(idx) { Preset.HIGH })
     }
     var showAdvancedSettings by remember { mutableStateOf(false) }
-    // 强制满驱动 toggle. Defaults on for 小米10 系列 (umi/cmi/thyme), whose HAL
-    // reports amplitude control but ignores the value — matches VibrateProxy detection.
+    
+    
     val forceDefaultAmpAutoDefault = remember {
         val d = android.os.Build.DEVICE.lowercase(java.util.Locale.ROOT)
         android.os.Build.MANUFACTURER.lowercase(java.util.Locale.ROOT) == "xiaomi" &&
@@ -602,17 +491,13 @@ fun HapticDashboard() {
     var isForceDefaultAmpActive by remember {
         mutableStateOf(prefs.getBoolean("force_default_amplitude", forceDefaultAmpAutoDefault))
     }
-    var customAmplitude by remember { mutableStateOf(prefs.getFloat("haptic_amplitude", 2.0f)) }
+    var customAmplitude by remember { mutableStateOf(prefs.getFloat("haptic_amplitude", 2.3f)) }
     var customBassBoost by remember { mutableStateOf(prefs.getFloat("haptic_bass_boost", 1.6f)) }
-    var hapticPreset by remember {
-        val idx = prefs.getInt("haptic_preset_id", HapticPreset.BALANCED.ordinal)
-        mutableStateOf(HapticPreset.entries.getOrElse(idx) { HapticPreset.BALANCED })
-    }
-    // 5.2.7: 风格预设（与 DSP 参数一一对应）+ 强度百分比滑块。
+    
     var stylePreset by remember {
         mutableStateOf(StylePreset.fromKey(prefs.getString("style_preset", "balanced")))
     }
-    // 5.2.9: intensityPct 不再暴露为独立滑块。保留默认值用于 DSP 乘算。
+    
 
     var synthLraF0 by remember { mutableStateOf(prefs.getFloat("synth_lra_f0", HapticSynthesizer.LRA_F0)) }
     var synthLraQ by remember { mutableStateOf(prefs.getFloat("synth_lra_q", HapticSynthesizer.LRA_Q)) }
@@ -635,8 +520,8 @@ fun HapticDashboard() {
     var hardwareProfileId by remember { mutableStateOf(prefs.getString(RootHardwareProbe.PREF_PROFILE, "DEFAULT") ?: "DEFAULT") }
     var hardwareFingerprint by remember { mutableStateOf(prefs.getString(RootHardwareProbe.PREF_FINGERPRINT, "") ?: "") }
     var hardwareRefreshing by remember { mutableStateOf(false) }
-    // 5.2.7：硬件触觉适配详情默认收起（标题行的 Root 状态始终可见），
-    // 符合 iOS 设置里"次要信息默认折叠、常用信息常驻"的分级。
+    
+    
     var hardwareCardExpanded by rememberSaveable { mutableStateOf(false) }
     var showRestartDialog by remember { mutableStateOf(false) }
     
@@ -644,7 +529,7 @@ fun HapticDashboard() {
     var dashboardTab by rememberSaveable { mutableStateOf(DashboardTab.CONSOLE) }
     val liquidGlassBackdrop = rememberLayerBackdrop()
  
-LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoost, hapticPreset,
+LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoost,
                   stylePreset,
                   isForceDefaultAmpActive,
                  synthLraF0, synthLraQ, synthRateHz, synthAttackImpact, synthDecayImpact, synthAttackContinuous, synthDecayContinuous,
@@ -656,12 +541,10 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
              putInt("selected_preset", selectedPreset.ordinal)
              putFloat("haptic_amplitude", customAmplitude)
              putFloat("haptic_bass_boost", customBassBoost)
-             putFloat("haptic_boost_level", customBassBoost)
-             putInt("haptic_preset_id", hapticPreset.ordinal)
-             putString("haptic_preset", hapticPreset.name)
-            // 5.2.7 风格预设与强度百分比
+             
+            
             putString("style_preset", stylePreset.key)
-            // 5.2.9: intensity_pct 不再由 UI 独立写入；由风格预设 ampScale 隐式承担。
+            
              putFloat("synth_lra_f0", synthLraF0)
              putFloat("synth_lra_q", synthLraQ)
              putInt("synth_rate_hz", synthRateHz)
@@ -693,21 +576,21 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
         .statusBarsPadding()
         .navigationBarsPadding()
     ) {
-        // The backdrop layer must record only what lives *behind* the glass.
-        // Applying layerBackdrop() to a node that also contains the glass
-        // children makes the RenderNode reference itself: the layer's display
-        // list ends up drawing the glass, which in turn drawLayer()s this same
-        // layer. RenderNode::prepareTreeImpl then recurses into
-        // SkiaDisplayList::prepareListAndChildren and back without a base
-        // case, overflowing the RenderThread stack (SIGSEGV, "stack pointer is
-        // not in a rw map"). So record a dedicated background-only layer and
-        // keep the glass content as a sibling drawn on top of it.
+        
+        
+        
+        
+        
+        
+        
+        
+        
         Box(
             modifier = Modifier
                 .matchParentSize()
                 .layerBackdrop(liquidGlassBackdrop)
         ) {
-            // Backdrop content: a decorative gradient, no glass children.
+            
             Box(
                 modifier = Modifier
                     .matchParentSize()
@@ -736,8 +619,8 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
             if (tab == DashboardTab.CONSOLE) {
         val scrollState = rememberScrollState()
         Column(
-            // 5.2.7：底部留白对齐新的 dock（64dp 栏体 + 18dp 底距 = 82dp），
-            // 留 18dp 余量，确保最后一张卡滚到底时不被压住。
+            
+            
             modifier = Modifier.fillMaxSize().verticalScroll(scrollState).padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 100.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -760,14 +643,13 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
                     }
                 }
             )
-            // 5.2.8 风格预设与强度百分比已并入下方 IOSControlPanel 的
-            // "增益档位"与"风格预设"两处控件，不再单独占一张卡片。
+            
+            
             IOSControlPanel(
                 selectedPreset, { selectedPreset = it },
                 showAdvancedSettings, { showAdvancedSettings = !showAdvancedSettings },
                 customAmplitude, { customAmplitude = it },
                 customBassBoost, { customBassBoost = it },
-                hapticPreset, { hapticPreset = it },
                 synthLraF0, { synthLraF0 = it; prefs.edit().putFloat("synth_lra_f0", it).apply() },
                 synthLraQ, { synthLraQ = it; prefs.edit().putFloat("synth_lra_q", it).apply() },
                 synthRateHz, { synthRateHz = it; prefs.edit().putInt("synth_rate_hz", it).apply() },
@@ -802,9 +684,9 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
             )
 }
 
-        // 5.2.8：对话框不再用 if 条件挂载 —— 那样组件一被移除，
-        // 退出动画就没有机会播完，关闭是瞬间消失。常驻挂载、只传 show，
-        // 进出会走同一条路径。
+        
+        
+        
         ScopedAppsRestartDialog(
             show = showRestartDialog,
             onDismiss = { showRestartDialog = false },
@@ -845,9 +727,9 @@ private fun LiquidGlassTabBar(
     backdrop: LayerBackdrop,
     modifier: Modifier = Modifier,
 ) {
-    // 5.2.8 回退：恢复 5.2.6 的胶囊 + 透镜横移滑块 + 可拖拽设计。
-    // 5.2.7 改成"每项独立微凸"，实际用起来图标大小跳变、标签忽隐忽现，
-    // 与界面对不齐，也不好拖。横移滑块更稳、更好按，故回退。
+    
+    
+    
     val context = LocalContext.current
     val haptic = remember { HapticFeedbackEngine.create(context) }
 
@@ -892,7 +774,7 @@ private fun LiquidGlassTabBar(
                 label = "DockLensOffset",
             )
 
-            // 透镜滑块：跟随选中项与拖拽位移横移。
+            
             Box(
                 Modifier
                     .offset { androidx.compose.ui.unit.IntOffset(lensOffsetPx.toInt(), 0) }
@@ -1117,10 +999,10 @@ private fun WhitelistPanel(
     val scopedPrefs = remember(packageName) { context.getSharedPreferences("scoped_haptics_$packageName", Context.MODE_PRIVATE) }
     val global = remember { context.getSharedPreferences("haptics_config", Context.MODE_PRIVATE) }
     var enabled by remember(packageName) { mutableStateOf(scopedPrefs.getBoolean("master_switch", global.getBoolean("master_switch", true))) }
-    var amp by remember(packageName) { mutableStateOf(scopedPrefs.getFloat("haptic_amplitude", global.getFloat("haptic_amplitude", 2f))) }
-    var boost by remember(packageName) { mutableStateOf(scopedPrefs.getFloat("haptic_boost_level", global.getFloat("haptic_boost_level", 1.6f))) }
+    var amp by remember(packageName) { mutableStateOf(scopedPrefs.getFloat("haptic_amplitude", global.getFloat("haptic_amplitude", 2.3f))) }
+    var boost by remember(packageName) { mutableStateOf(scopedPrefs.getFloat("haptic_bass_boost", global.getFloat("haptic_bass_boost", 1.6f))) }
     LaunchedEffect(enabled, amp, boost) {
-        scopedPrefs.edit().putBoolean("master_switch", enabled).putFloat("haptic_amplitude", amp).putFloat("haptic_boost_level", boost).apply()
+        scopedPrefs.edit().putBoolean("master_switch", enabled).putFloat("haptic_amplitude", amp).putFloat("haptic_bass_boost", boost).apply()
         context.sendBroadcast(Intent("com.mouya.musichaptics.ACTION_REFRESH_CONFIG"))
     }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp, 24.dp, 16.dp, 104.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -1133,7 +1015,7 @@ private fun WhitelistPanel(
         Row(Modifier.fillMaxWidth().liquidGlass().padding(16.dp), verticalAlignment=Alignment.CenterVertically) { Text(stringResource(R.string.enable_haptic), Modifier.weight(1f), color=textPrimary(), fontWeight=FontWeight.Medium); IOSToggle(checked = enabled, onToggle = { enabled = !enabled }) }
         Column(Modifier.liquidGlass().padding(16.dp), verticalArrangement=Arrangement.spacedBy(14.dp)) {
             Text(stringResource(R.string.dedicated_intensity), color=textPrimary(), fontWeight=FontWeight.SemiBold)
-            IOSSettingSliderRow(stringResource(R.string.total_intensity), amp, .5f..3f, "x") { amp = it }
+            IOSSettingSliderRow(stringResource(R.string.total_intensity), amp, .5f..3.5f, "x") { amp = it }
             IOSSettingSliderRow(stringResource(R.string.bass_boost), boost, 1f..2.5f, "x") { boost = it }
         }
     }
@@ -1177,7 +1059,7 @@ fun IOSHardwareProfileCard(
     onToggleExpanded: () -> Unit,
 ) {
     val profile = detectDeviceProfile(persistedProfileId = profileId)
-    // 同上：LocalContext 先在 composable 作用域取出，再交给 remember。
+    
     val hwContext = LocalContext.current
     val hardwareHaptic = remember(hwContext) { HapticFeedbackEngine.create(hwContext) }
     val statusColor = if (rootVerified) IOSColors.green else IOSColors.red
@@ -1188,20 +1070,20 @@ fun IOSHardwareProfileCard(
         .joinToString(" · ")
         .ifBlank { "尚未读取硬件指纹" }
 
-    // 5.2.7：折叠态在 composable 作用域解析，drawBehind 的 lambda 不能再调 @Composable。
+    
     val dividerColor = separatorColor().copy(alpha = 0.55f)
     val headerShape = RoundedCornerShape(22.dp)
     val reducedMotion = LocalPrefersReducedMotion.current
-    // Apple：折叠指示器应该在按下瞬间就反馈，所以箭头随展开状态做弹簧旋转，
-    // 而不是等动画结束再变。用近临界阻尼弹簧，一次极微过冲，可随时被打断。
+    
+    
     val chevronRotation by animateFloatAsState(
         targetValue = if (expanded) 180f else 0f,
         animationSpec = if (reducedMotion) snap() else spring(dampingRatio = 0.9f, stiffness = 320f),
         label = "HardwareChevron",
     )
-    // Reduced motion 不是零反馈 —— 保留透明度过渡（它帮助理解"展开了"），
-    // 只丢掉高度与位移这类会移动的动画，避免前庭不适。
-    // expandVertically 的高度动画作用在 IntSize 上（不是 Int），类型必须对上。
+    
+    
+    
     val foldExpandSpec: FiniteAnimationSpec<IntSize> =
         if (reducedMotion) tween(160) else spring(dampingRatio = 0.9f, stiffness = 300f)
     val foldFadeSpec: FiniteAnimationSpec<Float> =
@@ -1230,7 +1112,7 @@ fun IOSHardwareProfileCard(
                 if (refreshing) CircularProgressIndicator(Modifier.size(19.dp), strokeWidth = 2.dp, color = IOSColors.blue)
                 else Icon(Icons.Default.Refresh, "重新检测硬件", tint = IOSColors.blue)
             }
-            // 折叠开关：整块标题行可点，命中区远大于图标本身（约 44dp）。
+            
             Box(
                 Modifier
                     .size(40.dp)
@@ -1239,7 +1121,7 @@ fun IOSHardwareProfileCard(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                         onClick = {
-                            // 触觉与视觉同帧：状态一改，弹簧立刻起步，触觉此刻发出。
+                            
                             hardwareHaptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
                             onToggleExpanded()
                         },
@@ -1256,8 +1138,8 @@ fun IOSHardwareProfileCard(
                 )
             }
         }
-        // 折叠体：Materialize，不要只用淡入淡出 —— 高度与内容一起展开，
-        // 让它读起来像一块真实的材料落位，而不是一段半透明的淡入。
+        
+        
         AnimatedVisibility(
             visible = expanded,
             enter = expandVertically(
@@ -1288,7 +1170,6 @@ fun IOSControlPanel(
     showAdvancedSettings: Boolean, onAdvancedSettingsToggle: () -> Unit,
     customAmplitude: Float, onAmplitudeChange: (Float) -> Unit,
     customBassBoost: Float, onBassBoostChange: (Float) -> Unit,
-    hapticPreset: HapticPreset, onHapticPresetChange: (HapticPreset) -> Unit,
     synthLraF0: Float, onSynthLraF0Change: (Float) -> Unit,
     synthLraQ: Float, onSynthLraQChange: (Float) -> Unit,
     synthRateHz: Int, onSynthRateHzChange: (Int) -> Unit,
@@ -1306,8 +1187,8 @@ fun IOSControlPanel(
     synthContinuousGain: Float, onSynthContinuousGainChange: (Float) -> Unit,
     synthTextureGain: Float, onSynthTextureGainChange: (Float) -> Unit,
     synthMasterGain: Float, onSynthMasterGainChange: (Float) -> Unit,
-    // 5.2.8：六档风格与强度百分比并入本控件，复用既有的“增益档位 / 风格预设”两处，
-    // 不再另起卡片，避免同一件事在界面上有两个入口。
+    
+    
     stylePreset: StylePreset, onStylePresetChange: (StylePreset) -> Unit,
     isForceDefaultAmpActive: Boolean = false, onForceDefaultAmpClick: () -> Unit = {},
 ) {
@@ -1315,17 +1196,17 @@ fun IOSControlPanel(
     val hapticEngine = remember { HapticFeedbackEngine.create(context) }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            // 5.2.8：强度百分比并入"增益档位"。它与既有的四档基础增益是同一件事
-            // 的粗细两档 —— 档位定基准、百分比做连续微调，界面只应有一个入口。
+            
+            
             Text(stringResource(R.string.gain_level), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
             IOSSegmentedControl(items = Preset.entries.toList(), selected = selectedPreset, onSelect = onPresetChange, label = { it.label })
-            // 5.2.9：强度百分比已并入上方"增益档位"分段控件。
-            // 档位本身就是强度的粗调（Low/Mid/High/Ultra 对应 0.7~1.2x），
-            // 不再单独开一个滑块制造重复入口。haptic_intensity_pct 由
-            // 风格预设的 ampScale 隐式承担，DSP 层已正确乘算。
+            
+            
+            
+            
 
-            // 5.2.8：六档风格并入"风格预设"。每档改写的是一组真实 DSP 参数
-            // （频段 / 锐度 / 起音 / 冷却 / 阈值 / 重音），不是常数倍率。
+            
+            
             Text(stringResource(R.string.style_preset), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 StylePreset.entries.chunked(3).forEach { row ->
@@ -1354,7 +1235,7 @@ fun IOSControlPanel(
                     }
                 }
             }
-            // 实时参数预览：与 [STYLE] 日志逐项对照，便于确认 UI 与 DSP 一致。
+            
             Text(
                 "锐度 ${"%.2f".format(stylePreset.sharpness)} · 起音 x${"%.2f".format(stylePreset.attackScale)} · " +
                     "频段 ${stylePreset.lowCutHz.toInt()}-${stylePreset.highCutHz.toInt()}Hz · " +
@@ -1365,17 +1246,17 @@ fun IOSControlPanel(
 
         AnimatedVisibility(
             visible = showAdvancedSettings,
-            enter = expandVertically(tween(300, easing = LinearOutSlowInEasing), Alignment.Top) + fadeIn(tween(250)),  // ease-out
-            exit = shrinkVertically(tween(300, easing = FastOutLinearInEasing), Alignment.Top) + fadeOut(tween(200))  // ease-in
+            enter = expandVertically(tween(300, easing = LinearOutSlowInEasing), Alignment.Top) + fadeIn(tween(250)),  
+            exit = shrinkVertically(tween(300, easing = FastOutLinearInEasing), Alignment.Top) + fadeOut(tween(200))  
         ) {
             Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text(stringResource(R.string.advanced_settings), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                IOSSettingSliderRow("总强度", customAmplitude, 0.5f..3.0f, "x", onAmplitudeChange)
+                IOSSettingSliderRow("总强度", customAmplitude, 0.5f..3.5f, "x", onAmplitudeChange)
                 IOSSettingSliderRow("低音强调", customBassBoost, 1.0f..2.5f, "x", onBassBoostChange)
                 HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
-                // Some ROMs report振幅可控 but the HAL ignores it, so every custom
-                // amplitude comes out equally weak. This forces DEFAULT_AMPLITUDE and lets
-                // segment *durations* carry the texture instead. On 小米10 系列 it是默认开启的。
+                
+                
+                
                 Text(stringResource(R.string.drive_mode), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 IOSButton(stringResource(R.string.force_full_drive), isForceDefaultAmpActive, Modifier.fillMaxWidth(),
                     hapticStyle = if (!isForceDefaultAmpActive) HapticFeedbackEngine.HapticStyle.KICK else HapticFeedbackEngine.HapticStyle.IMPACT
@@ -1451,7 +1332,7 @@ fun AboutScreen(onBack: () -> Unit) {
             Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(stringResource(R.string.developer_info), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 Text(stringResource(R.string.developer_info) + "：" + stringResource(R.string.developer), color = textPrimary(), fontSize = 16.sp)
-                IOSButton("QQ交流群：1047262325  (点击复制)", false, Modifier.fillMaxWidth(), HapticFeedbackEngine.HapticStyle.SUCCESS) {
+                IOSButton("QQ交流群：1047262325", false, Modifier.fillMaxWidth(), HapticFeedbackEngine.HapticStyle.SUCCESS) {
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     clipboard.setPrimaryClip(ClipData.newPlainText("QQ群号", "1047262325"))
                     Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
@@ -1502,12 +1383,12 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
     val haptic = remember { HapticFeedbackEngine.create(context) }
     val reducedMotion = LocalPrefersReducedMotion.current
 
-    // 5.2.7：改用液态玻璃面板承载，替换默认 Material AlertDialog。
-    // 空间一致性：它从触发它的顶部刷新按钮那一侧展开、也沿同一侧收回去，
-    // 而不是从屏幕正中央凭空出现。scrim 压暗背景，让面板成为焦点。
-    // 5.2.8：整层是否绘制与命中，都由 show 决定。
-    // 组件改为常驻挂载（否则退出动画没机会播完），
-    // 若 scrim 仍无条件铺满，关闭状态下它会继续吃掉整屏点击。
+    
+    
+    
+    
+    
+    
     AnimatedVisibility(
         visible = show,
         enter = fadeIn(tween(180)),
@@ -1532,7 +1413,7 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
                 animationSpec = enterSpec,
                 transformOrigin = TransformOrigin(0.5f, 0f),
             )),
-            // 与进入对称：沿同一条路径缩回顶部锚点，而不是凭空淡出。
+            
             exit = if (reducedMotion) fadeOut(tween(140)) else fadeOut(tween(150)) + scaleOut(
                 targetScale = 0.94f,
                 animationSpec = tween(150),
@@ -1544,8 +1425,8 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
                     .padding(top = 96.dp, start = 16.dp, end = 16.dp)
                     .widthIn(max = 520.dp)
                     .fillMaxWidth()
-                    // 5.2.8：面板必须消费自己的点击。scrim 挂在最外层 Box 上，
-                    // 若面板不拦截，点标题或说明文字就会冒泡上去把整个对话框关掉。
+                    
+                    
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
@@ -1570,9 +1451,9 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
                 ) {
                     if (apps.isEmpty()) Text(stringResource(R.string.no_scope_apps), color = textSecondary())
                     apps.forEach { app ->
-                        // 5.2.7 修复：原实现把 Row.clickable 与 Checkbox.onCheckedChange 挂在同一次
-                        // 点击上，事件既被 Checkbox 的 handler 处理又冒泡到 Row 再切换一次，
-                        // 表现为"点了没反应"。现在整行是唯一点击源，Checkbox 只做状态呈现。
+                        
+                        
+                        
                         val isChecked = app.packageName in selected
                         val rowInteraction = remember { MutableInteractionSource() }
                         Row(
@@ -1587,7 +1468,7 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
                                     interactionSource = rowInteraction,
                                     indication = null,
                                 ) {
-                                    // 提交时才给触觉，与视觉同帧；不是每帧都给。
+                                    
                                     haptic.perform(HapticFeedbackEngine.HapticStyle.SELECTION)
                                     if (isChecked) selected.remove(app.packageName)
                                     else selected.add(app.packageName)
@@ -1595,7 +1476,7 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
                                 .padding(horizontal = 10.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            // onCheckedChange = null —— 不参与点击，只呈现状态。
+                            
                             Checkbox(
                                 checked = isChecked,
                                 onCheckedChange = null,
@@ -1645,19 +1526,6 @@ private fun forceStopSelectedAppsWithRoot(packages: List<String>): Boolean {
     } catch (_: Exception) { false }
 }
 
-
-data class TelemetrySnapshot(
-    val subBass: Float = 0f, val midBass: Float = 0f, val presence: Float = 0f,
-    val intensity: Float = 0f, val latencyMs: Float = 0f, val temperature: Float = 25f,
-    val f0Hz: Int = 150, val adsrEnv: Float = 0f, val lraForce: Float = 0f,
-    val lraPhase: Float = 0f, val lraDisp: Float = 0f, val thermalAttenuation: Float = 1f,
-)
-
-enum class HapticPreset(val label: String, val description: String) {
-    BALANCED("均衡", "全频还原"), BASS_ENHANCED("重低音", "震感加强"),
-    TEXTURE_FOCUS("纹理", "高频细腻"), IMPACT_MAX("冲击", "瞬态最大"),
-    CUSTOM("自定义", "手动调参"),
-}
 
 enum class Preset(val label: String) {
     LOW("Low"), MID("Mid"), HIGH("High"), ULTRA("Ultra")

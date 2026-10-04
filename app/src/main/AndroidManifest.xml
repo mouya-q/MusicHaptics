@@ -3,7 +3,7 @@
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
 
-    <!-- Visible-package declaration for the scoped-app list; no broad package query. -->
+    <!-- Declare launcher package visibility. -->
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -11,7 +11,7 @@
         </intent>
     </queries>
 
-    <!-- Preserve the project's custom MusicHaptics icon. -->
+    <!-- Keep the application icon. -->
     <application 
         android:allowBackup="false"
         android:name=".MusicHapticsApplication"
@@ -35,12 +35,6 @@
             android:name=".ConfigProvider"
             android:authorities="com.mouya.musichaptics.provider"
             android:exported="true" />
-            
-        <!-- Root permission / board-level hardware activation -->
-        <activity
-            android:name=".RootActivationActivity"
-            android:exported="false"
-            android:theme="@style/Theme.MusicHaptics" />
 
         <!-- Main entry point. -->
         <activity 

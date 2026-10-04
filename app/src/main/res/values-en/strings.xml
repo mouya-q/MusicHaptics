@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MusicHapticsX</string>
+    <string name="app_haptics">App Haptics</string>
+    <string name="scope_hint">LSPosed scope controls injection; app whitelist controls audio processing</string>
+    <string name="scope_not_found">Cannot read LSPosed scope. Enable the module in LSPosed and reopen.</string>
+    <string name="scope_empty">No apps selected in LSPosed scope.</string>
+    <string name="processing_scope">Processing Scope</string>
+    <string name="clear">Clear</string>
+    <string name="scoped_hint">Overrides apply only to this app; unset parameters inherit global config.</string>
+    <string name="enable_haptic">Enable haptics for this app</string>
+    <string name="dedicated_intensity">Dedicated Intensity</string>
+    <string name="total_intensity">Total Intensity</string>
+    <string name="bass_boost">Bass Boost</string>
+    <string name="hardware_haptic">Hardware Haptic Adaptation</string>
+    <string name="recheck_hint">After re-detection, restart enabled music apps to load new parameters.</string>
+    <string name="gain_level">Gain Level</string>
+    <string name="style_preset">Style Preset</string>
+    <string name="advanced_settings">Advanced Settings</string>
+    <string name="drive_mode">Drive Mode</string>
+    <string name="force_full_drive">Force Full Drive</string>
+    <string name="force_drive_hint">Enable if haptics feel weak and intensity changes have no effect. Drives the motor at full amplitude, using duration for dynamics.</string>
+    <string name="synth_params">Haptic Synthesizer Parameters</string>
+    <string name="thermal_params">Thermal Protection Parameters</string>
+    <string name="triple_gain">Triple Primitive Gain</string>
+    <string name="about">About</string>
+    <string name="version_info">Version Info</string>
+    <string name="developer_info">Developer</string>
+    <string name="developer">mouya</string>
+    <string name="repo">Open Source Repository</string>
+    <string name="usage_tip">Usage Tip</string>
+    <string name="usage_tip_desc">After changing settings, tap the refresh button and restart the target music app for Xposed to reload.</string>
+    <string name="restart_scope_apps">Restart Scoped Apps</string>
+    <string name="restart_scope_hint">Select apps to re-inject hooks and reload settings.</string>
+    <string name="no_scope_apps">No installed scoped apps detected.</string>
+    <string name="all_scope">All Scope</string>
+    <string name="whitelist_only">Whitelist Only</string>
+    <string name="scope_all_desc">All scoped apps will be processed</string>
+    <string name="scope_whitelist_desc">Only enabled apps processed · %1$d</string>
+</resources>

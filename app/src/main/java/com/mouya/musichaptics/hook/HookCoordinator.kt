@@ -65,6 +65,8 @@ class HookCoordinator(
     private var visualizer: Visualizer? = null
     private var lastAudioWriteAtMs = 0L
     private var lastWriteLogAtMs = 0L
+    // 5.2.9: 必须持有强引用，否则 GC 可能在设置生效前把 receiver 收走。
+    @Volatile private var configRefreshReceiver: ConfigRefreshReceiver? = null
 
     fun install(lpparam: LoadPackageParam) {
         if (lpparam.packageName != targetPackage) return
@@ -90,6 +92,10 @@ class HookCoordinator(
         hookMediaPlayers(lpparam.classLoader)
         handler.post { initializeEngine() }
         handler.post(whitelistRefresh)
+
+        // 5.2.9: 注册配置刷新接收器。Context 尚未绑定时无法注册，
+        // 因此首次 adopt() 时补一次；重复注册会被 context 自身去重保护。
+        registerConfigRefreshWhenPossible()
         Log.i(TAG, "[$targetPackage] hooks registered (context not yet bound)")
         contextProvider()?.let { LogBroadcaster.sendLog(it, "Hook ready: $targetPackage") }
     }
@@ -111,6 +117,22 @@ class HookCoordinator(
 
     private fun engineOrNull(): HapticEngine? = engine
 
+    /**
+     * 5.2.9: ACTION_REFRESH_CONFIG 的接收端。此前工程只有发送方，
+     * 注入进程永远不会重新拉取配置，UI 改动因此完全无法生效。
+     */
+    private fun registerConfigRefreshWhenPossible() {
+        if (configRefreshReceiver != null) return
+        val ctx = attachedContext ?: return
+        val receiver = ConfigRefreshReceiver.register(ctx) {
+            handler.post {
+                engineOrNull()?.synchronizeParameters()
+                Log.i(TAG, "[cfg] $targetPackage parameters re-synchronized")
+            }
+        }
+        if (receiver != null) configRefreshReceiver = receiver
+    }
+
 
     private fun hookApplicationAttach(classLoader: ClassLoader) {
         val applicationClass = runCatching { XposedHelpers.findClass("android.app.Application", classLoader) }
@@ -131,6 +153,7 @@ class HookCoordinator(
             if (!attached.compareAndSet(false, true)) return
             attachedContext = appContext
             Log.i(TAG, "[$targetPackage] context acquired via ${context!!.javaClass.simpleName}")
+            registerConfigRefreshWhenPossible()
             handler.post {
                 preloadNative(appContext)
                 initializeEngine()

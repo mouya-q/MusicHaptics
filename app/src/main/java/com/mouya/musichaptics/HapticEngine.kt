@@ -78,27 +78,27 @@ enum class StylePreset(
     val accentScale: Float
 ) {
     BALANCED(
-        "balanced", "均衡自适应", "默认 · 兼顾低频厚度与节拍清晰度",
+        "balanced", "均衡", "Balanced",
         118L, 1.00f, 0.32f, 1.00f, 55f, 650f, 0.08f, 1.00f
     ),
     BASS(
-        "bass", "低频律动", "强化鼓点与贝斯，振感更厚、更绵长",
+        "bass", "低频", "Bass",
         128L, 1.22f, 0.20f, 1.45f, 32f, 420f, 0.07f, 1.35f
     ),
     CRISP(
-        "crisp", "清脆节拍", "短促锐利，适合鼓点密集的音乐",
+        "crisp", "清脆", "Crisp",
         98L, 0.92f, 0.62f, 0.55f, 90f, 1400f, 0.11f, 0.85f
     ),
     SOFT(
-        "soft", "柔和氛围", "降低幅度和锐度，适合安静聆听",
+        "soft", "柔和", "Soft",
         142L, 0.66f, 0.14f, 1.80f, 45f, 520f, 0.06f, 0.60f
     ),
     IMMERSIVE(
-        "immersive", "强劲沉浸", "更宽动态范围，增强整体参与感",
+        "immersive", "强劲", "Immersive",
         108L, 1.35f, 0.42f, 0.78f, 38f, 900f, 0.05f, 1.55f
     ),
     PURE(
-        "pure", "纯净律动", "过滤连续微振，只保留清晰鼓点与强起音",
+        "pure", "纯净", "Pure",
         260L, 1.12f, 0.74f, 0.42f, 120f, 2200f, 0.19f, 1.25f
     );
 

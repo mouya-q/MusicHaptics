@@ -1,5 +1,35 @@
 # Changelog
 
+## 5.2.9 — 修复配置刷新链路：设置不生效 / 白名单回弹 (2026-10-04)
+
+本版三处修改指向同一根因链：**UI 改了设置，但注入进程永远不知道**。
+5.2.8 及之前，ACTION_REFRESH_CONFIG 广播只有发送方（Dashboard），无注册方；
+ConfigProvider 对 callingPackage 过严校验导致部分 ROM 上 ContentProvider.call 静默返回 null。
+两者叠加使 HookConfigPreferences.refresh() 拿到的 bundle 始终为空，DSP 参数停在默认值。
+
+### Fixed
+- **新增 ConfigRefreshReceiver**：注入目标进程内动态注册 BroadcastReceiver，
+  监听 com.mouya.musichaptics.ACTION_REFRESH_CONFIG，收到后立即调用
+  HapticEngine.synchronizeParameters() 重新拉取配置并重建 DSP 参数。
+- **放宽 ConfigProvider.call caller 校验**：白名单已在 MainHook/HookCoordinator 安装阶段把关，
+  ContentProvider 再用 callingPackage 严格匹配会在共享 UID 宿主或 null caller 的 ROM 上拒绝合法请求。
+  现改为仅当 caller 明确不匹配且不在白名单时才拒绝。
+- **HookCoordinator 生命周期绑定**：install() 与 adopt() 两处调用
+  registerConfigRefreshWhenPossible()，@Volatile 强引用持有 receiver 防 GC 回收。
+
+### Changed
+- **风格预设文案简化**：label 改为“均衡”“低频”“清脆”“柔和”“强劲”“纯净”短词，
+  description 改为英文单词（Balanced/Bass/Crisp/Soft/Immersive/Pure）。
+- **删除“整体触感幅度”独立滑块**：强度百分比已由增益档位分段控件和风格预设的 ampScale 隐式承担，
+  不再有重复入口。DSP 层 intensityScale 乘算保留，使用默认值 75%。
+- **多语言支持**：新增 strings.xml 资源文件，
+  支持中文（默认）/ 英语 / 日语 / 韩语 / 西班牙语。
+  UI 中 34 处硬编码中文改为 stringResource() 引用，
+  Android 系统语言变更时自动切换。
+- 版本升至 5.2.9 (versionCode 50209)。
+
+---
+
 ## 5.2.8 — 收敛为单一入口：撤销独立卡片，dock 回到滑块 (2026-10-03)
 5.2.7 把风格预设做成了一张独立卡片，结果是控制台里**同一件事有两个入口**：
 上面一张「震感风格」卡，下面又一块既有的「增益档位 / 风格预设」。

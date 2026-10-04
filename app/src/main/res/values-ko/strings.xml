@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MusicHapticsX</string>
+    <string name="app_haptics">앱 햅틱</string>
+    <string name="scope_hint">LSPosed 스코프가 주입을 제어하고, 앱 화이트리스트가 오디오 처리를 제어합니다</string>
+    <string name="scope_not_found">LSPosed 스코프를 읽을 수 없습니다. LSPosed에서 모듈을 활성화 후 다시 여세요.</string>
+    <string name="scope_empty">LSPosed 스코프에 선택된 앱이 없습니다.</string>
+    <string name="processing_scope">처리 범위</string>
+    <string name="clear">초기화</string>
+    <string name="scoped_hint">이 앱에만 덮어쓰기됩니다. 미설정 매개변수는 전역 설정을 상속합니다.</string>
+    <string name="enable_haptic">이 앱 햅틱 활성화</string>
+    <string name="dedicated_intensity">전용 강도</string>
+    <string name="total_intensity">총 강도</string>
+    <string name="bass_boost">베이스 부스트</string>
+    <string name="hardware_haptic">하드웨어 햅틱 적응</string>
+    <string name="recheck_hint">재검출 후, 활성화된 음악 앱을 재시작하여 새 매개변수를 로드하세요.</string>
+    <string name="gain_level">게인 레벨</string>
+    <string name="style_preset">스타일 프리셋</string>
+    <string name="advanced_settings">고급 설정</string>
+    <string name="drive_mode">드라이브 모드</string>
+    <string name="force_full_drive">풀 드라이브 강제</string>
+    <string name="force_drive_hint">햅틱이 약하고 강도 조절이 효과 없을 때 활성화. 최대 진폭으로 모터를 구동하고 길이로 강약을 표현합니다.</string>
+    <string name="synth_params">햅틱 신디사이저 매개변수</string>
+    <string name="thermal_params">열 보호 매개변수</string>
+    <string name="triple_gain">삼중 프리미티브 게인</string>
+    <string name="about">정보</string>
+    <string name="version_info">버전 정보</string>
+    <string name="developer_info">개발자</string>
+    <string name="developer">もうや</string>
+    <string name="repo">오픈소스 저장소</string>
+    <string name="usage_tip">사용 팁</string>
+    <string name="usage_tip_desc">설정 변경 후, 우측 상단 새로고침 버튼을 탭하고 대상 음악 앱을 재시작하여 Xposed가 다시 로드하게 하세요.</string>
+    <string name="restart_scope_apps">스코프 앱 재시작</string>
+    <string name="restart_scope_hint">후크를 재주입하고 설정을 다시 로드할 앱을 선택하세요.</string>
+    <string name="no_scope_apps">설치된 스코프 앱이 없습니다.</string>
+    <string name="all_scope">전체 스코프</string>
+    <string name="whitelist_only">화이트리스트만</string>
+    <string name="scope_all_desc">스코프 내 모든 앱을 처리합니다</string>
+    <string name="scope_whitelist_desc">활성화된 앱만 처리 · %1$d</string>
+</resources>

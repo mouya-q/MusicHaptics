@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material3.*
+import androidx.compose.ui.res.stringResource
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -611,9 +612,7 @@ fun HapticDashboard() {
     var stylePreset by remember {
         mutableStateOf(StylePreset.fromKey(prefs.getString("style_preset", "balanced")))
     }
-    var intensityPct by remember {
-        mutableStateOf(prefs.getInt("haptic_intensity_pct", 75))
-    }
+    // 5.2.9: intensityPct 不再暴露为独立滑块。保留默认值用于 DSP 乘算。
 
     var synthLraF0 by remember { mutableStateOf(prefs.getFloat("synth_lra_f0", HapticSynthesizer.LRA_F0)) }
     var synthLraQ by remember { mutableStateOf(prefs.getFloat("synth_lra_q", HapticSynthesizer.LRA_Q)) }
@@ -646,7 +645,7 @@ fun HapticDashboard() {
     val liquidGlassBackdrop = rememberLayerBackdrop()
  
 LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoost, hapticPreset,
-                  stylePreset, intensityPct,
+                  stylePreset,
                   isForceDefaultAmpActive,
                  synthLraF0, synthLraQ, synthRateHz, synthAttackImpact, synthDecayImpact, synthAttackContinuous, synthDecayContinuous,
                  synthReleaseTau, synthSustainLevel, synthThermalWarn, synthThermalCrit, synthThermalRth, synthThermalCth,
@@ -662,7 +661,7 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
              putString("haptic_preset", hapticPreset.name)
             // 5.2.7 风格预设与强度百分比
             putString("style_preset", stylePreset.key)
-            putInt("haptic_intensity_pct", intensityPct)
+            // 5.2.9: intensity_pct 不再由 UI 独立写入；由风格预设 ampScale 隐式承担。
              putFloat("synth_lra_f0", synthLraF0)
              putFloat("synth_lra_q", synthLraQ)
              putInt("synth_rate_hz", synthRateHz)
@@ -787,7 +786,7 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
                 synthTextureGain, { synthTextureGain = it; prefs.edit().putFloat("synth_texture_gain", it).apply() },
                 synthMasterGain, { synthMasterGain = it; prefs.edit().putFloat("synth_master_gain", it).apply() },
                 stylePreset, { stylePreset = it },
-                intensityPct, { intensityPct = it },
+
                 isForceDefaultAmpActive, { isForceDefaultAmpActive = !isForceDefaultAmpActive },
             )
             IOSConsole(
@@ -1012,8 +1011,8 @@ private fun ScopedAppsScreen() {
     Box(Modifier.fillMaxSize()) {
         LazyColumn(contentPadding = PaddingValues(16.dp, 24.dp, 16.dp, 102.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
-                Text("应用触觉", color = textPrimary(), fontWeight = FontWeight.Bold, fontSize = 28.sp)
-                Text("LSPosed 作用域决定注入；应用白名单决定是否处理音频", color = textSecondary(), fontSize = 14.sp, modifier = Modifier.padding(top = 3.dp, bottom = 10.dp))
+                Text(stringResource(R.string.app_haptics), color = textPrimary(), fontWeight = FontWeight.Bold, fontSize = 28.sp)
+                Text(stringResource(R.string.scope_hint), color = textSecondary(), fontSize = 14.sp, modifier = Modifier.padding(top = 3.dp, bottom = 10.dp))
             }
             item {
                 WhitelistPanel(
@@ -1030,8 +1029,8 @@ private fun ScopedAppsScreen() {
                     }
                 )
             }
-            if (scopedPackages == null) item { Text("无法读取 LSPosed 作用域。请在 LSPosed 中启用模块后重新打开", color = textSecondary(), modifier = Modifier.padding(20.dp)) }
-            else if (apps.isEmpty()) item { Text("LSPosed 当前没有为本模块勾选应用。", color = textSecondary(), modifier = Modifier.padding(20.dp)) }
+            if (scopedPackages == null) item { Text(stringResource(R.string.scope_not_found), color = textSecondary(), modifier = Modifier.padding(20.dp)) }
+            else if (apps.isEmpty()) item { Text(stringResource(R.string.scope_empty), color = textSecondary(), modifier = Modifier.padding(20.dp)) }
             items(apps, key = { it.packageName }) { app ->
                 val whitelisted = whitelistMode == WhitelistManager.MODE_ALL || app.packageName in enabledPackages
                 ScopedAppRow(app, whitelisted, onToggleWhitelist = { allowed ->
@@ -1077,20 +1076,20 @@ private fun WhitelistPanel(
     Column(Modifier.fillMaxWidth().liquidGlass(20.dp).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("处理范围", color = textPrimary(), fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+                Text(stringResource(R.string.processing_scope), color = textPrimary(), fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
                 Text(
-                    if (mode == WhitelistManager.MODE_ALL) "当前作用域内的应用都会处理" else "仅处理已启用的应用 · $enabledCount 个",
+                    if (mode == WhitelistManager.MODE_ALL) stringResource(R.string.scope_all_desc) else String.format(stringResource(R.string.scope_whitelist_desc), enabledCount),
                     color = textSecondary(), fontSize = 12.sp
                 )
             }
-            TextButton(onClick = onClear, enabled = enabledCount > 0) { Text("清空") }
+            TextButton(onClick = onClear, enabled = enabledCount > 0) { Text(stringResource(R.string.clear)) }
         }
         Spacer(Modifier.height(10.dp))
         IOSSegmentedControl(
             items = listOf(WhitelistManager.MODE_WHITELIST, WhitelistManager.MODE_ALL),
             selected = mode,
             onSelect = onModeChange,
-            label = { it -> if (it == WhitelistManager.MODE_WHITELIST) "仅白名单" else "全部作用域" }
+            label = { it -> if (it == WhitelistManager.MODE_WHITELIST) stringResource(R.string.whitelist_only) else stringResource(R.string.all_scope) }
         )
     }
 }
@@ -1126,12 +1125,12 @@ private fun WhitelistPanel(
         }
         Text(label, color=textPrimary(), fontSize=27.sp, fontWeight=FontWeight.Bold)
         Text(packageName, color=textSecondary(), fontSize=13.sp)
-        Text("此处仅覆写该应用；未设置的高级参数继续继承全局配置。", color=textSecondary(), fontSize=13.sp, modifier=Modifier.liquidGlass(16.dp).padding(14.dp))
-        Row(Modifier.fillMaxWidth().liquidGlass().padding(16.dp), verticalAlignment=Alignment.CenterVertically) { Text("启用此应用触觉", Modifier.weight(1f), color=textPrimary(), fontWeight=FontWeight.Medium); IOSToggle(checked = enabled, onToggle = { enabled = !enabled }) }
+        Text(stringResource(R.string.scoped_hint), color=textSecondary(), fontSize=13.sp, modifier=Modifier.liquidGlass(16.dp).padding(14.dp))
+        Row(Modifier.fillMaxWidth().liquidGlass().padding(16.dp), verticalAlignment=Alignment.CenterVertically) { Text(stringResource(R.string.enable_haptic), Modifier.weight(1f), color=textPrimary(), fontWeight=FontWeight.Medium); IOSToggle(checked = enabled, onToggle = { enabled = !enabled }) }
         Column(Modifier.liquidGlass().padding(16.dp), verticalArrangement=Arrangement.spacedBy(14.dp)) {
-            Text("专属强度", color=textPrimary(), fontWeight=FontWeight.SemiBold)
-            IOSSettingSliderRow("总强度", amp, .5f..3f, "x") { amp = it }
-            IOSSettingSliderRow("低音强调", boost, 1f..2.5f, "x") { boost = it }
+            Text(stringResource(R.string.dedicated_intensity), color=textPrimary(), fontWeight=FontWeight.SemiBold)
+            IOSSettingSliderRow(stringResource(R.string.total_intensity), amp, .5f..3f, "x") { amp = it }
+            IOSSettingSliderRow(stringResource(R.string.bass_boost), boost, 1f..2.5f, "x") { boost = it }
         }
     }
 }
@@ -1220,7 +1219,7 @@ fun IOSHardwareProfileCard(
             }
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text("硬件触觉适配", color = textPrimary(), fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text(stringResource(R.string.hardware_haptic), color = textPrimary(), fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 Text(statusText, color = statusColor, fontSize = 12.sp)
             }
             IconButton(onClick = onRefresh, enabled = !refreshing) {
@@ -1274,7 +1273,7 @@ fun IOSHardwareProfileCard(
                     color = textSecondary(), fontSize = 12.sp
                 )
                 Text(compactFingerprint, color = textTertiary(), fontSize = 11.sp, maxLines = 2)
-                Text("重新检测后，请重启已启用的音乐 App，使 Hook 进程加载新参数", color = textTertiary(), fontSize = 11.sp)
+                Text(stringResource(R.string.recheck_hint), color = textTertiary(), fontSize = 11.sp)
             }
         }
     }
@@ -1306,7 +1305,6 @@ fun IOSControlPanel(
     // 5.2.8：六档风格与强度百分比并入本控件，复用既有的“增益档位 / 风格预设”两处，
     // 不再另起卡片，避免同一件事在界面上有两个入口。
     stylePreset: StylePreset, onStylePresetChange: (StylePreset) -> Unit,
-    intensityPct: Int, onIntensityPctChange: (Int) -> Unit,
     isForceDefaultAmpActive: Boolean = false, onForceDefaultAmpClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -1315,30 +1313,16 @@ fun IOSControlPanel(
         Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             // 5.2.8：强度百分比并入"增益档位"。它与既有的四档基础增益是同一件事
             // 的粗细两档 —— 档位定基准、百分比做连续微调，界面只应有一个入口。
-            Text("增益档位", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text(stringResource(R.string.gain_level), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
             IOSSegmentedControl(items = Preset.entries.toList(), selected = selectedPreset, onSelect = onPresetChange, label = { it.label })
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("整体触感幅度", color = textPrimary(), fontWeight = FontWeight.Medium, fontSize = 13.sp)
-                Text("$intensityPct%", color = IOSColors.blue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            }
-            Slider(
-                value = intensityPct.toFloat(),
-                onValueChange = { onIntensityPctChange(it.roundToInt()) },
-                valueRange = 10f..100f,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Text(
-                "在所选风格曲线上做连续微调；档位决定基准，增度决定手感。",
-                color = textTertiary(), fontSize = 10.sp,
-            )
+            // 5.2.9：强度百分比已并入上方"增益档位"分段控件。
+            // 档位本身就是强度的粗调（Low/Mid/High/Ultra 对应 0.7~1.2x），
+            // 不再单独开一个滑块制造重复入口。haptic_intensity_pct 由
+            // 风格预设的 ampScale 隐式承担，DSP 层已正确乘算。
 
             // 5.2.8：六档风格并入"风格预设"。每档改写的是一组真实 DSP 参数
             // （频段 / 锐度 / 起音 / 冷却 / 阈值 / 重音），不是常数倍率。
-            Text("风格预设", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text(stringResource(R.string.style_preset), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 StylePreset.entries.chunked(3).forEach { row ->
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1381,23 +1365,22 @@ fun IOSControlPanel(
             exit = shrinkVertically(tween(300, easing = FastOutLinearInEasing), Alignment.Top) + fadeOut(tween(200))  // ease-in
         ) {
             Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text("高级设置", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text(stringResource(R.string.advanced_settings), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 IOSSettingSliderRow("总强度", customAmplitude, 0.5f..3.0f, "x", onAmplitudeChange)
                 IOSSettingSliderRow("低音强调", customBassBoost, 1.0f..2.5f, "x", onBassBoostChange)
                 HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
                 // Some ROMs report振幅可控 but the HAL ignores it, so every custom
                 // amplitude comes out equally weak. This forces DEFAULT_AMPLITUDE and lets
                 // segment *durations* carry the texture instead. On 小米10 系列 it是默认开启的。
-                Text("驱动模式", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                IOSButton("强制满驱动", isForceDefaultAmpActive, Modifier.fillMaxWidth(),
+                Text(stringResource(R.string.drive_mode), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                IOSButton(stringResource(R.string.force_full_drive), isForceDefaultAmpActive, Modifier.fillMaxWidth(),
                     hapticStyle = if (!isForceDefaultAmpActive) HapticFeedbackEngine.HapticStyle.KICK else HapticFeedbackEngine.HapticStyle.IMPACT
                 ) { onForceDefaultAmpClick() }
-                Text(
-                    "振感明显偏弱、且调节总强度几乎没变化时打开。会用满幅驱动马达，靠时长塑造轻重（小米10 系列默认开启）。",
+                Text(stringResource(R.string.force_drive_hint),
                     color = textTertiary(), fontSize = 10.sp
                 )
                 HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
-                Text("触觉合成器参数", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text(stringResource(R.string.synth_params), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 IOSSettingSliderRow("LRA 谐振频率", synthLraF0, 150f..250f, "Hz", onSynthLraF0Change)
                 IOSSettingSliderRow("LRA 品质因子 Q", synthLraQ, 5f..30f, "", onSynthLraQChange)
                 IOSSettingSliderRow("合成帧率", synthRateHz.toFloat(), 30f..120f, "Hz", { onSynthRateHzChange(it.toInt()) })
@@ -1408,13 +1391,13 @@ fun IOSControlPanel(
                 IOSSettingSliderRow("释放时间", synthReleaseTau * 1000f, 10f..200f, "ms", { onSynthReleaseTauChange(it / 1000f) })
                 IOSSettingSliderRow("维持电平", synthSustainLevel, 0.1f..0.8f, "", onSynthSustainLevelChange)
                 HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
-                Text("热保护参数", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text(stringResource(R.string.thermal_params), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 IOSSettingSliderRow("热警告温度", synthThermalWarn, 50f..85f, "°C", onSynthThermalWarnChange)
                 IOSSettingSliderRow("热临界温度", synthThermalCrit, 80f..110f, "°C", onSynthThermalCritChange)
                 IOSSettingSliderRow("热阻 Rth", synthThermalRth, 10f..50f, "°C/W", onSynthThermalRthChange)
                 IOSSettingSliderRow("热容 Cth", synthThermalCth, 0.5f..5.0f, "J/°C", onSynthThermalCthChange)
                 HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
-                Text("三基元增益", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text(stringResource(R.string.triple_gain), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 IOSSettingSliderRow("冲击增益", synthImpactGain, 0.1f..3.0f, "x", onSynthImpactGainChange)
                 IOSSettingSliderRow("持续音增益", synthContinuousGain, 0.1f..3.0f, "x", onSynthContinuousGainChange)
                 IOSSettingSliderRow("纹理增益", synthTextureGain, 0.1f..3.0f, "x", onSynthTextureGainChange)
@@ -1449,21 +1432,21 @@ fun AboutScreen(onBack: () -> Unit) {
                 IconButton(onClick = onBack, modifier = Modifier.size(44.dp)) {
                     Icon(Icons.Default.KeyboardArrowLeft, contentDescription = "返回控制台", tint = IOSColors.blue, modifier = Modifier.size(24.dp))
                 }
-                Text("关于", color = textPrimary(), fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.about), color = textPrimary(), fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.size(44.dp))
             }
             
             Spacer(Modifier.height(16.dp))
             
             Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("版本信息", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text(stringResource(R.string.version_info), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 Text("MusicHapticsX ${BuildConfig.VERSION_NAME}", color = textPrimary(), fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Text("(${BuildConfig.VERSION_CODE})", color = textSecondary(), fontSize = 13.sp)
             }
             
             Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("开发者信息", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                Text("开发者：もうや", color = textPrimary(), fontSize = 16.sp)
+                Text(stringResource(R.string.developer_info), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text(stringResource(R.string.developer_info) + "：" + stringResource(R.string.developer), color = textPrimary(), fontSize = 16.sp)
                 IOSButton("QQ交流群：1047262325  (点击复制)", false, Modifier.fillMaxWidth(), HapticFeedbackEngine.HapticStyle.SUCCESS) {
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     clipboard.setPrimaryClip(ClipData.newPlainText("QQ群号", "1047262325"))
@@ -1472,7 +1455,7 @@ fun AboutScreen(onBack: () -> Unit) {
             }
             
             Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("开源仓库", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text(stringResource(R.string.repo), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 Text(
                     "github.com/mouya-q/MusicHaptics",
                     color = IOSColors.blue, fontSize = 16.sp, fontWeight = FontWeight.Medium,
@@ -1484,8 +1467,8 @@ fun AboutScreen(onBack: () -> Unit) {
             }
             
             Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("使用提示", color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                Text("修改设置后，请点击右上角刷新按钮并重启对应音乐 App，设置才会由 Xposed 重新加载。", color = textPrimary(), fontSize = 14.sp)
+                Text(stringResource(R.string.usage_tip), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text(stringResource(R.string.usage_tip_desc), color = textPrimary(), fontSize = 14.sp)
             }
         }
     }
@@ -1568,8 +1551,8 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Text("重启作用域 App", color = textPrimary(), fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                Text("勾选需要重新注入 Hook 并加载新设置的 App。", color = textSecondary(), fontSize = 14.sp)
+                Text(stringResource(R.string.restart_scope_apps), color = textPrimary(), fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.restart_scope_hint), color = textSecondary(), fontSize = 14.sp)
                 Text(
                     "将尝试通过 Root 执行 force-stop；未获取 Root 权限时，请手动结束并重新打开所选 App。",
                     color = IOSColors.orange, fontSize = 12.sp,
@@ -1581,7 +1564,7 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    if (apps.isEmpty()) Text("未检测到已安装的作用域 App。", color = textSecondary())
+                    if (apps.isEmpty()) Text(stringResource(R.string.no_scope_apps), color = textSecondary())
                     apps.forEach { app ->
                         // 5.2.7 修复：原实现把 Row.clickable 与 Checkbox.onCheckedChange 挂在同一次
                         // 点击上，事件既被 Checkbox 的 handler 处理又冒泡到 Row 再切换一次，

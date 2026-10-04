@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MusicHapticsX</string>
+    <string name="app_haptics">アプリ触覚</string>
+    <string name="scope_hint">LSPosedスコープが注入を制御し、アプリホワイトリストが音声処理を制御します</string>
+    <string name="scope_not_found">LSPosedスコープを読み取れません。LSPosedでモジュールを有効にして再開してください。</string>
+    <string name="scope_empty">LSPosedスコープにアプリが選択されていません。</string>
+    <string name="processing_scope">処理範囲</string>
+    <string name="clear">クリア</string>
+    <string name="scoped_hint">このアプリのみ上書きします。未設定のパラメータはグローバル設定を継承します。</string>
+    <string name="enable_haptic">このアプリの触覚を有効化</string>
+    <string name="dedicated_intensity">専用強度</string>
+    <string name="total_intensity">総合強度</string>
+    <string name="bass_boost">低音ブースト</string>
+    <string name="hardware_haptic">ハードウェア触覚適応</string>
+    <string name="recheck_hint">再検出後、有効な音楽アプリを再起動して新しいパラメータを読み込んでください。</string>
+    <string name="gain_level">ゲインレベル</string>
+    <string name="style_preset">スタイルプリセット</string>
+    <string name="advanced_settings">詳細設定</string>
+    <string name="drive_mode">ドライブモード</string>
+    <string name="force_full_drive">フルドライブ強制</string>
+    <string name="force_drive_hint">触覚が弱く、強度調整が効かない場合に有効化。フル振幅でモーターを駆動し、長さで强弱を表現します。</string>
+    <string name="synth_params">触覚合成パラメータ</string>
+    <string name="thermal_params">熱保護パラメータ</string>
+    <string name="triple_gain">三プリミティブゲイン</string>
+    <string name="about">情報</string>
+    <string name="version_info">バージョン情報</string>
+    <string name="developer_info">開発者</string>
+    <string name="developer">もうや</string>
+    <string name="repo">オープンソースリポジトリ</string>
+    <string name="usage_tip">使用のヒント</string>
+    <string name="usage_tip_desc">設定変更後、右上のリフレッシュボタンをタップし、対象の音楽アプリを再起動してXposedに再読み込みさせてください。</string>
+    <string name="restart_scope_apps">スコープアプリを再起動</string>
+    <string name="restart_scope_hint">フックを再注入し設定を再読み込みするアプリを選択してください。</string>
+    <string name="no_scope_apps">インストールされたスコープアプリが見つかりません。</string>
+    <string name="all_scope">全スコープ</string>
+    <string name="whitelist_only">ホワイトリストのみ</string>
+    <string name="scope_all_desc">スコープ内の全アプリを処理します</string>
+    <string name="scope_whitelist_desc">有効なアプリのみ処理 · %1$d</string>
+</resources>

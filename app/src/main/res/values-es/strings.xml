@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MusicHapticsX</string>
+    <string name="app_haptics">Háptica de apps</string>
+    <string name="scope_hint">El ámbito de LSPosed controla la inyección; la lista blanca controla el procesamiento de audio</string>
+    <string name="scope_not_found">No se puede leer el ámbito de LSPosed. Habilite el módulo en LSPosed y vuelva a abrir.</string>
+    <string name="scope_empty">No hay apps seleccionadas en el ámbito de LSPosed.</string>
+    <string name="processing_scope">Ámbito de procesamiento</string>
+    <string name="clear">Limpiar</string>
+    <string name="scoped_hint">Solo sobrescribe esta app; los parámetros no configurados heredan la configuración global.</string>
+    <string name="enable_haptic">Activar háptica para esta app</string>
+    <string name="dedicated_intensity">Intensidad dedicada</string>
+    <string name="total_intensity">Intensidad total</string>
+    <string name="bass_boost">Refuerzo de bajos</string>
+    <string name="hardware_haptic">Adaptación háptica de hardware</string>
+    <string name="recheck_hint">Tras la detección, reinicie las apps de música habilitadas para cargar los nuevos parámetros.</string>
+    <string name="gain_level">Nivel de ganancia</string>
+    <string name="style_preset">Preset de estilo</string>
+    <string name="advanced_settings">Ajustes avanzados</string>
+    <string name="drive_mode">Modo de unidad</string>
+    <string name="force_full_drive">Forzar unidad completa</string>
+    <string name="force_drive_hint">Active si la háptica es débil y ajustar la intensidad no tiene efecto. Conduce el motor a amplitud máxima, usando la duración para la dinámica.</string>
+    <string name="synth_params">Parámetros del sintetizador háptico</string>
+    <string name="thermal_params">Parámetros de protección térmica</string>
+    <string name="triple_gain">Ganancia triple primitiva</string>
+    <string name="about">Acerca de</string>
+    <string name="version_info">Información de versión</string>
+    <string name="developer_info">Desarrollador</string>
+    <string name="developer">もうや</string>
+    <string name="repo">Repositorio de código abierto</string>
+    <string name="usage_tip">Consejo de uso</string>
+    <string name="usage_tip_desc">Tras cambiar los ajustes, pulse el botón de actualización y reinicie la app de música objetivo para que Xposed recargue.</string>
+    <string name="restart_scope_apps">Reiniciar apps del ámbito</string>
+    <string name="restart_scope_hint">Seleccione las apps para reinyectar hooks y recargar ajustes.</string>
+    <string name="no_scope_apps">No se detectaron apps del ámbito instaladas.</string>
+    <string name="all_scope">Todo el ámbito</string>
+    <string name="whitelist_only">Solo lista blanca</string>
+    <string name="scope_all_desc">Se procesarán todas las apps del ámbito</string>
+    <string name="scope_whitelist_desc">Solo apps habilitadas · %1$d</string>
+</resources>

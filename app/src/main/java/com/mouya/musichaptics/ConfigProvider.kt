@@ -37,8 +37,16 @@ class ConfigProvider : ContentProvider() {
         val targetPackage = extras?.getString("target_package").orEmpty()
         val ownPackage = BuildConfig.APPLICATION_ID
         val packageOk = targetPackage.isNotBlank() && PACKAGE_RE.matches(targetPackage)
-        if (!packageOk || (caller != ownPackage && caller != targetPackage)) return null
-        if (caller != ownPackage && !WhitelistManager().isPackageAllowed(caller)) return null
+        if (!packageOk) return null
+
+        // 5.2.9: 白名单已经由 MainHook/HookCoordinator 在安装阶段把关，
+        // 这里再用 callingPackage 做二次校验会引入新的失效面：
+        // 某些 ROM 上 ContentProvider.call 的 callingPackage 可能是
+        // 共享 uid 的宿主名甚至 null，导致整条配置链路静默返回 null，
+        // 表现就是「所有设置都没变化」。这里只对明确的陌生包拒绝，
+        // caller 不可知时按允许处理（读操作本身不修改任何数据）。
+        val callerMismatch = caller != null && caller != ownPackage && caller != targetPackage
+        if (callerMismatch && !WhitelistManager().isPackageAllowed(caller)) return null
 
         val globalPrefs = ctx.getSharedPreferences("haptics_config", Context.MODE_PRIVATE)
         return when (method) {

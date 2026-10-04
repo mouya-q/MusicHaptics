@@ -1,5 +1,40 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">MusicHapticsX</string>
-
+    <string name="app_haptics">应用触觉</string>
+    <string name="scope_hint">LSPosed 作用域决定注入；应用白名单决定是否处理音频</string>
+    <string name="scope_not_found">无法读取 LSPosed 作用域。请在 LSPosed 中启用模块后重新打开</string>
+    <string name="scope_empty">LSPosed 当前没有为本模块勾选应用。</string>
+    <string name="processing_scope">处理范围</string>
+    <string name="clear">清空</string>
+    <string name="scoped_hint">此处仅覆写该应用；未设置的高级参数继续继承全局配置。</string>
+    <string name="enable_haptic">启用此应用触觉</string>
+    <string name="dedicated_intensity">专属强度</string>
+    <string name="total_intensity">总强度</string>
+    <string name="bass_boost">低音强调</string>
+    <string name="hardware_haptic">硬件触觉适配</string>
+    <string name="recheck_hint">重新检测后，请重启已启用的音乐 App，使 Hook 进程加载新参数</string>
+    <string name="gain_level">增益档位</string>
+    <string name="style_preset">风格预设</string>
+    <string name="advanced_settings">高级设置</string>
+    <string name="drive_mode">驱动模式</string>
+    <string name="force_full_drive">强制满驱动</string>
+    <string name="force_drive_hint">振感明显偏弱、且调节总强度几乎没变化时打开。会用满幅驱动马达，靠时长塑造轻重。</string>
+    <string name="synth_params">触觉合成器参数</string>
+    <string name="thermal_params">热保护参数</string>
+    <string name="triple_gain">三基元增益</string>
+    <string name="about">关于</string>
+    <string name="version_info">版本信息</string>
+    <string name="developer_info">开发者信息</string>
+    <string name="developer">もうや</string>
+    <string name="repo">开源仓库</string>
+    <string name="usage_tip">使用提示</string>
+    <string name="usage_tip_desc">修改设置后，请点击右上角刷新按钮并重启对应音乐 App，设置才会由 Xposed 重新加载。</string>
+    <string name="restart_scope_apps">重启作用域 App</string>
+    <string name="restart_scope_hint">勾选需要重新注入 Hook 并加载新设置的 App。</string>
+    <string name="no_scope_apps">未检测到已安装的作用域 App。</string>
+    <string name="all_scope">全部作用域</string>
+    <string name="whitelist_only">仅白名单</string>
+    <string name="scope_all_desc">当前作用域内的应用都会处理</string>
+    <string name="scope_whitelist_desc">仅处理已启用的应用 · %1$d 个</string>
 </resources>

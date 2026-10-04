@@ -54,11 +54,6 @@ object LogBroadcaster {
             Log.e("LogBroadcaster", "Failed to broadcast log: ${e.message}")
         }
     }
-            context.sendBroadcast(intent)
-        } catch (e: Exception) {
-            Log.e("LogBroadcaster", "Failed to broadcast telemetry: ${e.message}")
-        }
-    }
 
     fun log(context: Context, tag: String, msg: String) {
         sendLog(context, "[$tag] $msg")

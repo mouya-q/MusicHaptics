@@ -918,7 +918,6 @@ class HapticEngine(
             Log.i(TAG, "Native Haptic Scheduler stopped (pthread_join complete).")
         }
 
-        hapticEventGenerator.release()
         hapticSynthesizer.reset()
         engineJob.cancel()
         lifecycleJob.cancel()

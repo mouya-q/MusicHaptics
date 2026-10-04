@@ -181,6 +181,8 @@ private:
     std::atomic<float> profileTickMult_{0.40f};
     std::atomic<float> profileBodyMult_{1.20f};
     std::atomic<float> profileRefractoryScale_{1.00f};
+    std::atomic<float> profileMinIntervalMs_{52.0f};
+    std::atomic<float> styleOnsetThreshold_{0.08f};
 
     LinkwitzRiley4th subLowPass_;
     LinkwitzRiley4th midHighPass_, midLowPass_;
@@ -189,7 +191,8 @@ private:
     // v3.8 semantic filter bank.  These are real independently filtered
     // analysis bands; unlike the old Kotlin pseudo-spectrum they retain the
     // different envelopes needed to distinguish percussion, voice and harmony.
-    LinkwitzRiley4th bassHp_, bassLp_;       // 80..180 Hz
+    LinkwitzRiley4th kickHp_, kickLp_;       // 35..150 Hz — kick/transient focus
+    LinkwitzRiley4th bassHp_, bassLp_;       // 70..190 Hz — bass body
     LinkwitzRiley4th lowMidHp_, lowMidLp_;   // 180..500 Hz
     LinkwitzRiley4th vocalHp_, vocalLp_;     // 500..3000 Hz
     LinkwitzRiley4th presenceHp_, presenceLp_; // 3..8 kHz
@@ -203,6 +206,16 @@ private:
     float prevPresenceRms_ = 0.0f;
     float prevAirRms_ = 0.0f;
     float vocalBandRms_ = 0.0f;  // vocal band energy for instrument-aware composition
+
+    // Adaptive onset normalization. Absolute PCM levels vary substantially
+    // between players, mixers and volumes; event detection is therefore
+    // based on local change ratios as well as the raw band flux.
+    float bassFluxEma_ = 0.0005f;
+    float lowMidFluxEma_ = 0.0005f;
+    float vocalFluxEma_ = 0.0005f;
+    float presenceFluxEma_ = 0.0005f;
+    float inputLevelEma_ = 0.02f;
+    float inputPeakEma_ = 0.05f;
     float prevPitch_ = 0.0f;
     int pitchUpdateCounter_ = 0;
     float pitchConfidence_ = 0.0f;
@@ -344,7 +357,7 @@ public:
     }
 
     void configureProfile(float dspFloor, float subMult, float kickMult, float snareMult,
-                          float tickMult, float bodyMult, float refractoryScale) {
+                          float tickMult, float bodyMult, float refractoryScale, float minIntervalMs) {
         profileDspFloor_.store(std::clamp(dspFloor, 0.0010f, 0.0200f), std::memory_order_relaxed);
         profileSubMult_.store(std::clamp(subMult, 0.50f, 3.00f), std::memory_order_relaxed);
         profileKickMult_.store(std::clamp(kickMult, 0.20f, 2.00f), std::memory_order_relaxed);
@@ -352,8 +365,13 @@ public:
         profileTickMult_.store(std::clamp(tickMult, 0.20f, 2.00f), std::memory_order_relaxed);
         profileBodyMult_.store(std::clamp(bodyMult, 0.20f, 2.00f), std::memory_order_relaxed);
         profileRefractoryScale_.store(std::clamp(refractoryScale, 0.50f, 2.00f), std::memory_order_relaxed);
-        HMS_LOGI("[DSP-PROFILE] floor=%.5f sub=%.3f kick=%.3f snare=%.3f tick=%.3f body=%.3f refractory=%.2f",
-                  dspFloor, subMult, kickMult, snareMult, tickMult, bodyMult, refractoryScale);
+        profileMinIntervalMs_.store(std::clamp(minIntervalMs, 28.0f, 84.0f), std::memory_order_relaxed);
+        HMS_LOGI("[DSP-PROFILE] floor=%.5f sub=%.3f kick=%.3f snare=%.3f tick=%.3f body=%.3f refractory=%.2f minInterval=%.1fms",
+                  dspFloor, subMult, kickMult, snareMult, tickMult, bodyMult, refractoryScale, minIntervalMs);
+    }
+
+    void configureStyle(float onsetThreshold) {
+        styleOnsetThreshold_.store(std::clamp(onsetThreshold, 0.035f, 0.220f), std::memory_order_relaxed);
     }
 
 private:
@@ -371,6 +389,8 @@ private:
         midHighPass_.reset();
         midLowPass_.reset();
         textureHighPass_.reset();
+        kickHp_.reset();
+        kickLp_.reset();
         bassHp_.reset();
         bassLp_.reset();
         lowMidHp_.reset();
@@ -385,15 +405,20 @@ private:
         midLowPass_.setLowPass(sampleRate, std::max(highCut, lowCut + 10.0f));
         textureHighPass_.setHighPass(sampleRate, std::max(highCut, lowCut + 10.0f));
 
-        bassHp_.setHighPass(sampleRate, 80.0f);
-        bassLp_.setLowPass(sampleRate, 180.0f);
-        lowMidHp_.setHighPass(sampleRate, 180.0f);
-        lowMidLp_.setLowPass(sampleRate, 500.0f);
-        vocalHp_.setHighPass(sampleRate, 500.0f);
-        vocalLp_.setLowPass(sampleRate, 3000.0f);
-        presenceHp_.setHighPass(sampleRate, 3000.0f);
-        presenceLp_.setLowPass(sampleRate, 8000.0f);
-        airHp_.setHighPass(sampleRate, 8000.0f);
+        // Keep the analysis bank aligned with perceptual instrument regions.
+        // The lower kick window is intentionally wider than the old 80 Hz floor
+        // so deep electronic kicks are not mistaken for generic background bass.
+        kickHp_.setHighPass(sampleRate, 35.0f);
+        kickLp_.setLowPass(sampleRate, 150.0f);
+        bassHp_.setHighPass(sampleRate, 70.0f);
+        bassLp_.setLowPass(sampleRate, 190.0f);
+        lowMidHp_.setHighPass(sampleRate, 150.0f);
+        lowMidLp_.setLowPass(sampleRate, 650.0f);
+        vocalHp_.setHighPass(sampleRate, 250.0f);
+        vocalLp_.setLowPass(sampleRate, 3200.0f);
+        presenceHp_.setHighPass(sampleRate, 2500.0f);
+        presenceLp_.setLowPass(sampleRate, 7500.0f);
+        airHp_.setHighPass(sampleRate, 7500.0f);
         appliedConfigRevision_ = revision;
     }
 
@@ -422,6 +447,9 @@ private:
         bassSustainProbability_ = pitchConfidence_ = 0.0f;
         vocalEnvelope_ = harmonicEnvelope_ = smoothedAmp_ = 0.0f;
         prevSubRms_ = prevLowMidRms_ = prevPresenceRms_ = prevAirRms_ = prevVocalRms_ = 0.0f;
+        bassFluxEma_ = lowMidFluxEma_ = vocalFluxEma_ = presenceFluxEma_ = 0.0005f;
+        inputLevelEma_ = 0.02f;
+        inputPeakEma_ = 0.05f;
         prevPitch_ = 0.0f;
         coilTemp_ = 25.0f;
         magnetTemp_ = 25.0f;
@@ -628,8 +656,8 @@ public:
         s_dbgCounter++;
 
         // 1. Legacy crossover plus v3.8 real semantic filter bank.
-        float bassSq = 0.0f, lowMidSq = 0.0f, vocalSq = 0.0f;
-        float presenceSq = 0.0f, airSq = 0.0f, absSum = 0.0f;
+        float kickSq = 0.0f, bassSq = 0.0f, lowMidSq = 0.0f, vocalSq = 0.0f;
+        float presenceSq = 0.0f, airSq = 0.0f, absSum = 0.0f, sumSq = 0.0f, peak = 0.0f;
         int zeroCrossings = 0;
         float previousSample = input[0];
         for (int i = 0; i < size; ++i) {
@@ -639,17 +667,22 @@ public:
             midOutput_[i] = midLowPass_.process(midTemp);
             textureOutput_[i] = textureHighPass_.process(s);
 
+            float kick = kickLp_.process(kickHp_.process(s));
             float bass = bassLp_.process(bassHp_.process(s));
             float lowMid = lowMidLp_.process(lowMidHp_.process(s));
             float vocal = vocalLp_.process(vocalHp_.process(s));
             float presence = presenceLp_.process(presenceHp_.process(s));
             float air = airHp_.process(s);
+            kickSq += kick * kick;
             bassSq += bass * bass;
             lowMidSq += lowMid * lowMid;
             vocalSq += vocal * vocal;
             presenceSq += presence * presence;
             airSq += air * air;
-            absSum += std::abs(s);
+            const float absS = std::abs(s);
+            absSum += absS;
+            sumSq += s * s;
+            peak = std::max(peak, absS);
             if ((s >= 0.0f) != (previousSample >= 0.0f)) zeroCrossings++;
             previousSample = s;
         }
@@ -662,14 +695,31 @@ public:
         // texture channel contains most music content (200Hz+), so it's always high.
         // It should only add micro-texture, not drive volume envelope.
         textureRms = std::min(textureRms, 0.05f);
-        const float subProfileGain = 1.0f + (profileSubMult_.load(std::memory_order_relaxed) - 1.0f) * 0.25f;
-        subRms *= std::clamp(subProfileGain, 0.75f, 1.50f);
+        const float subProfileGain = std::clamp(profileSubMult_.load(std::memory_order_relaxed), 0.75f, 1.75f);
+        subRms *= subProfileGain;
         const float invSize = 1.0f / static_cast<float>(size);
+        float kickBand = std::sqrt(kickSq * invSize);
         float bassBand = std::sqrt(bassSq * invSize);
         float lowMidBand = std::sqrt(lowMidSq * invSize);
         float vocalBand = std::sqrt(vocalSq * invSize);
+        vocalBandRms_ = vocalBand;
         float presenceBand = std::sqrt(presenceSq * invSize);
         float airBand = std::sqrt(airSq * invSize);
+        const float rawInputRms = std::sqrt(sumSq * invSize);
+        const float crestFactor = peak / (rawInputRms + 1.0e-4f);
+        inputLevelEma_ += 0.025f * (rawInputRms - inputLevelEma_);
+        inputPeakEma_ += 0.025f * (peak - inputPeakEma_);
+        // Soft loudness normalization used only for feature extraction. It keeps
+        // quiet player mixes from starving onset detection without making loud
+        // mixes artificially dominate.
+        const float featureGain = std::clamp(0.070f / (inputLevelEma_ + 0.012f), 0.70f, 1.65f);
+        kickBand *= featureGain;
+        bassBand *= featureGain;
+        lowMidBand *= featureGain;
+        vocalBand *= featureGain;
+        presenceBand *= featureGain;
+        airBand *= featureGain;
+        subRms *= std::clamp(featureGain, 0.78f, 1.45f);
         float zcr = static_cast<float>(zeroCrossings) * invSize;
         updateSpectrum(input, size);
         float totalBand = bassBand + lowMidBand + vocalBand + presenceBand + airBand + 1.0e-6f;
@@ -688,35 +738,68 @@ public:
         float pitchDelta = prevPitch_ > 0.0f ? std::abs(pitch - prevPitch_) / std::max(prevPitch_, 1.0f) : 1.0f;
         pitchConfidence_ += 0.18f * (((pitch >= 70.0f && pitch <= 300.0f) && pitchDelta < 0.18f ? 1.0f : 0.0f) - pitchConfidence_);
 
+        // Adaptive transients: compare each band against its own recent flux floor.
+        // This is much less sensitive to player volume and avoids treating a loud
+        // sustained note as a new hit on every audio block.
+        const float bassFlux = std::max(0.0f, bassBand - prevBassRms_);
+        const float lowMidFlux2 = std::max(0.0f, lowMidBand - prevLowMidRms_);
+        const float vocalFlux = std::max(0.0f, vocalBand - prevVocalRms_);
+        const float presenceFlux2 = std::max(0.0f, presenceBand - prevPresenceRms_);
+        const float airFlux2 = std::max(0.0f, airBand - prevAirRms_);
+        const float fluxFloor = std::max(profileDspFloor_.load(std::memory_order_relaxed) * 0.35f, 0.00035f);
+        bassFluxEma_ += 0.055f * (bassFlux - bassFluxEma_);
+        lowMidFluxEma_ += 0.055f * (lowMidFlux2 - lowMidFluxEma_);
+        vocalFluxEma_ += 0.045f * (vocalFlux - vocalFluxEma_);
+        presenceFluxEma_ += 0.055f * (presenceFlux2 - presenceFluxEma_);
+
+        const float bassFluxRatio = bassFlux / (bassFluxEma_ + fluxFloor);
+        const float lowMidFluxRatio = lowMidFlux2 / (lowMidFluxEma_ + fluxFloor);
+        const float vocalFluxRatio = vocalFlux / (vocalFluxEma_ + fluxFloor);
+        const float presenceFluxRatio = presenceFlux2 / (presenceFluxEma_ + fluxFloor);
+        const float kickRiseRatio = std::max(0.0f, subRms - prevSubRms_) / (prevSubRms_ + profileDspFloor_.load(std::memory_order_relaxed));
+
+        const float transientCrest = std::clamp((crestFactor - 2.2f) / 5.0f, 0.0f, 1.0f);
         float kickTarget = std::clamp(
-            std::max(0.0f, subRms - prevSubRms_) * 12.0f
-            + bassSpectralFlux_ * 0.85f
-            - highRatio * 0.30f,
-            0.0f, 1.0f
-        );
+            0.48f * std::clamp((bassFluxRatio - 1.12f) * 0.58f, 0.0f, 1.0f)
+            + 0.28f * std::clamp((kickRiseRatio - 0.22f) * 0.62f, 0.0f, 1.0f)
+            + 0.18f * bassSpectralFlux_
+            + 0.14f * transientCrest
+            - highRatio * 0.14f,
+            0.0f, 1.0f);
         float snareTarget = std::clamp(
-            lowMidFlux * 15.0f + presenceFlux * 7.0f + spectralFlux_ * 0.30f
-            + highRatio * 0.28f - bassRatio * 0.25f,
+            0.46f * std::clamp((lowMidFluxRatio - 1.13f) * 0.64f, 0.0f, 1.0f)
+            + 0.32f * std::clamp((presenceFluxRatio - 1.07f) * 0.72f, 0.0f, 1.0f)
+            + 0.18f * highSpectralFlux_
+            + 0.10f * transientCrest
+            - bassRatio * 0.15f,
             0.0f, 1.0f);
         float hatTarget = std::clamp(
-            highSpectralFlux_ * (0.75f * profileTickMult_.load(std::memory_order_relaxed))
-            + airFlux * 22.0f + presenceFlux * 6.0f
-            + zcr * 1.4f - bassRatio * 0.35f,
+            0.62f * highSpectralFlux_ * profileTickMult_.load(std::memory_order_relaxed)
+            + 0.24f * std::clamp((presenceFluxRatio - 1.15f) * 0.65f, 0.0f, 1.0f)
+            + 0.14f * std::clamp(zcr * 2.0f, 0.0f, 1.0f)
+            - bassRatio * 0.22f,
             0.0f, 1.0f);
         float vocalTarget = std::clamp(
-            vocalRatio * 1.2f  // reduced from 1.8f
-            + pitchConfidence_ * 0.35f  // reduced from 0.65f
-            - highRatio * 0.45f
-            - std::max(kickTarget, snareTarget) * 0.65f,  // increased from 0.35f (stronger suppression)
-            0.0f, 1.0f
-        );
-        float pluckedTarget = std::clamp(lowMidFlux * 14.0f + presenceFlux * 5.0f + pitchConfidence_ * 0.35f - vocalTarget * 0.25f, 0.0f, 1.0f);
-        float harmonicTarget = std::clamp(pitchConfidence_ * 0.65f + (lowMidBand + vocalBand) / totalBand * 0.55f - std::max({kickTarget, snareTarget, hatTarget}) * 0.3f, 0.0f, 1.0f);
+            vocalRatio * 0.78f
+            + pitchConfidence_ * 0.28f
+            + 0.24f * std::clamp((vocalFluxRatio - 1.20f) * 0.50f, 0.0f, 1.0f)
+            - highRatio * 0.22f
+            - std::max(kickTarget, snareTarget) * 0.45f,
+            0.0f, 1.0f);
+        float pluckedTarget = std::clamp(
+            0.48f * std::clamp((lowMidFluxRatio - 1.18f) * 0.58f, 0.0f, 1.0f)
+            + 0.26f * std::clamp((presenceFluxRatio - 1.12f) * 0.55f, 0.0f, 1.0f)
+            + pitchConfidence_ * 0.28f
+            - vocalTarget * 0.22f, 0.0f, 1.0f);
+        float harmonicTarget = std::clamp(
+            pitchConfidence_ * 0.55f
+            + (lowMidBand + vocalBand) / totalBand * 0.48f
+            - std::max({kickTarget, snareTarget, hatTarget}) * 0.24f,
+            0.0f, 1.0f);
         float bassSustainTarget = std::clamp(
-            std::max(0.0f, subRms - prevSubRms_) * 8.0f  // transient-based sustain
-            + subRms * 0.3f,  // small continuous component
-            0.0f, 1.0f
-        );
+            0.42f * std::clamp(kickBand * 2.4f, 0.0f, 1.0f)
+            + 0.58f * std::clamp((subRms - profileDspFloor_.load(std::memory_order_relaxed) * 5.0f) * 5.0f, 0.0f, 1.0f),
+            0.0f, 1.0f);
 
         auto smoothProbability = [](float current, float target) {
             const float alpha = target > current ? 0.42f : 0.10f;
@@ -730,13 +813,9 @@ public:
         harmonicProbability_ = smoothProbability(harmonicProbability_, harmonicTarget);
         bassSustainProbability_ = smoothProbability(bassSustainProbability_, bassSustainTarget);
 
-        // Onset detection via spectral flux + energy differential
-        // Each band: flux = max(0, current - previous), onset = flux * probability * gain
-        float bassFlux = std::max(0.0f, bassBand - prevBassRms_);
-        float lowMidFlux2 = std::max(0.0f, lowMidBand - prevLowMidRms_);
-        float vocalFlux = std::max(0.0f, vocalBand - prevVocalRms_);
-        float presenceFlux2 = std::max(0.0f, presenceBand - prevPresenceRms_);
-        float airFlux2 = std::max(0.0f, airBand - prevAirRms_);
+        // Onset detection uses the per-band attack differentials above. Keeping the
+        // same features for probability and event detection prevents the detector from
+        // disagreeing with itself at quiet/loud playback levels.
 
         // Refractory counters (decrement each frame)
         for (int i = 0; i < 4; ++i) {
@@ -748,63 +827,60 @@ public:
         // Only sudden energy changes should trigger — continuous content should NOT.
         // This matches Apple's Taptic Engine: sharp, short, event-driven.
 
-        // Kick: bass band + sub-bass (TRANSIENT ONLY)
+        // Kick: use adaptive change ratios. A steady kick tail cannot retrigger.
         float kickOnset = 0.0f;
         if (onsetRefractoryFrames_[0] == 0) {
-            float bassFluxVal = std::clamp(bassFlux * 15.0f, 0.0f, 1.0f);
-            float subFluxVal  = std::clamp(std::max(0.0f, subRms - prevSubRms_) * 15.0f, 0.0f, 1.0f);
-            float spectralBassVal = bassSpectralFlux_ * 0.95f;
-            kickOnset = std::max({bassFluxVal, subFluxVal, spectralBassVal});
-            kickOnset *= profileKickMult_.load(std::memory_order_relaxed);
-            // Profile floor is a device-aware sensitivity hint. Higher floor = stricter onset gate.
+            const float kickShape = std::clamp(
+                0.44f * std::clamp((bassFluxRatio - 1.10f) * 0.70f, 0.0f, 1.0f)
+                + 0.32f * std::clamp((kickRiseRatio - 0.20f) * 0.60f, 0.0f, 1.0f)
+                + 0.18f * bassSpectralFlux_
+                + 0.14f * transientCrest,
+                0.0f, 1.0f);
+            kickOnset = kickShape * profileKickMult_.load(std::memory_order_relaxed);
             const float floorRatio = std::clamp(profileDspFloor_.load(std::memory_order_relaxed) / 0.0040f, 0.55f, 2.00f);
-            const float kickThreshold = std::clamp(0.40f * std::sqrt(floorRatio), 0.28f, 0.58f);
-            if (kickOnset < kickThreshold) kickOnset = 0.0f;  // raised from 0.25f
+            const float styleThreshold = styleOnsetThreshold_.load(std::memory_order_relaxed);
+            const float kickThreshold = std::clamp(styleThreshold * 3.50f * std::sqrt(floorRatio), 0.14f, 0.52f);
+            if (kickOnset < kickThreshold) kickOnset = 0.0f;
             if (kickOnset > 0.0f) onsetRefractoryFrames_[0] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
         }
 
-        // Snare: low-mid band + presence band (TRANSIENT ONLY)
+        // Snare / clap: low-mid attack plus upper transient, without level-based retriggers.
         float snareOnset = 0.0f;
         if (onsetRefractoryFrames_[1] == 0) {
-            // Require strong low-mid transient — general mid-band should NOT trigger
-            float lowMidEnergy = std::clamp((lowMidBand - 0.10f) * 4.0f, 0.0f, 1.0f);  // raised threshold from 0.08, lowered gain from 6.0
-            float lowMidFluxV  = std::clamp(lowMidFlux2 * 12.0f, 0.0f, 1.0f);  // lowered from 20.0f
-            float presFluxVal  = std::clamp(presenceFlux2 * 10.0f, 0.0f, 1.0f);  // lowered from 15.0f
-            snareOnset = std::max({lowMidEnergy, lowMidFluxV, presFluxVal});
-            snareOnset *= profileSnareMult_.load(std::memory_order_relaxed);
+            const float snareShape = std::clamp(
+                0.46f * std::clamp((lowMidFluxRatio - 1.12f) * 0.68f, 0.0f, 1.0f)
+                + 0.30f * std::clamp((presenceFluxRatio - 1.08f) * 0.72f, 0.0f, 1.0f)
+                + 0.14f * highSpectralFlux_
+                + 0.10f * transientCrest, 0.0f, 1.0f);
+            snareOnset = snareShape * profileSnareMult_.load(std::memory_order_relaxed);
             const float floorRatio = std::clamp(profileDspFloor_.load(std::memory_order_relaxed) / 0.0040f, 0.55f, 2.00f);
-            const float snareThreshold = std::clamp(0.50f * std::sqrt(floorRatio), 0.34f, 0.68f);
-            if (snareOnset < snareThreshold) snareOnset = 0.0f;  // raised from 0.35f
+            const float styleThreshold = styleOnsetThreshold_.load(std::memory_order_relaxed);
+            const float snareThreshold = std::clamp(styleThreshold * 3.15f * std::sqrt(floorRatio), 0.13f, 0.48f);
+            if (snareOnset < snareThreshold) snareOnset = 0.0f;
             if (snareOnset > 0.0f) onsetRefractoryFrames_[1] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
         }
 
-        // Vocal: vocal band (500-3000Hz) — only strong vocal attacks
+        // Vocal: sparse accents only; sustained vowels stay in the background layer.
         float vocalOnset = 0.0f;
         if (onsetRefractoryFrames_[2] == 0) {
-            float vocalEnergy = std::clamp((vocalBand - 0.05f) * 5.0f, 0.0f, 1.0f);
-            float vocalFluxV  = std::clamp(vocalFlux * 8.0f, 0.0f, 1.0f);
-            float vocalStrength = std::max(vocalEnergy, vocalFluxV);
-            // Mutual exclusion — if snare is strong, suppress vocal
-            if (snareOnset > 0.3f) vocalStrength *= 0.2f;
-            // Threshold the normalized detector first, then map to the small
-            // output range consumed by the Kotlin event scheduler.
-            if (vocalStrength >= 0.30f) {
-                vocalOnset = std::clamp((vocalStrength - 0.30f) * 0.18f, 0.0f, 0.10f);
+            float vocalStrength = std::clamp(
+                0.58f * std::clamp((vocalFluxRatio - 1.18f) * 0.60f, 0.0f, 1.0f)
+                + 0.28f * pitchConfidence_
+                + 0.14f * std::clamp(vocalRatio * 1.8f, 0.0f, 1.0f), 0.0f, 1.0f);
+            if (snareOnset > 0.30f) vocalStrength *= 0.30f;
+            if (vocalStrength >= 0.42f) {
+                vocalOnset = std::clamp((vocalStrength - 0.42f) * 0.75f, 0.0f, 0.35f);
             }
-            if (vocalOnset > 0.0f) onsetRefractoryFrames_[2] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
+            if (vocalOnset > 0.0f) onsetRefractoryFrames_[2] = std::max(1, static_cast<int>(std::lround((ONSET_REFRACTORY_FRAMES + 2) * profileRefractoryScale_.load(std::memory_order_relaxed))));
         }
 
-        // Body: sub-bass sustained energy (very subtle).
-        // Do not apply the final 0.05 cap before thresholding: doing so made the
-        // old `bodyOnset < 0.20` gate mathematically impossible to pass.
+        // Body events are deliberately rare and softer than kick/snare events.
         float bodyOnset = 0.0f;
         if (onsetRefractoryFrames_[3] == 0) {
-            const float rawBody = std::clamp((subRms - profileDspFloor_.load(std::memory_order_relaxed) * 8.0f) * 6.0f, 0.0f, 1.0f);
-            const float bodyStrength = rawBody * profileBodyMult_.load(std::memory_order_relaxed);
-            if (bodyStrength >= 0.65f) {
-                bodyOnset = std::clamp((bodyStrength - 0.65f) * 0.14f, 0.0f, 0.05f);
-            }
-            if (bodyOnset > 0.0f) onsetRefractoryFrames_[3] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
+            const float bodyRise = std::clamp((kickBand - prevBassRms_) / (prevBassRms_ + profileDspFloor_.load(std::memory_order_relaxed) * 4.0f), 0.0f, 1.0f);
+            const float bodyStrength = bodyRise * profileBodyMult_.load(std::memory_order_relaxed);
+            if (bodyStrength >= 0.55f) bodyOnset = std::clamp((bodyStrength - 0.55f) * 0.32f, 0.0f, 0.18f);
+            if (bodyOnset > 0.0f) onsetRefractoryFrames_[3] = std::max(1, static_cast<int>(std::lround((ONSET_REFRACTORY_FRAMES + 3) * profileRefractoryScale_.load(std::memory_order_relaxed))));
         }
 
         // DEBUG: Log band energies and onset values periodically
@@ -845,7 +921,7 @@ public:
         }
 
         // 6. Compose
-        composeHapticLayer(subRms, midRms, textureRms, pitch, thermalGain, amp, dt);
+        composeHapticLayer(subRms, midRms, textureRms, pitch, thermalGain, amp, dt, kickOnset, snareOnset, vocalOnset, bodyOnset);
 
         // 7. Telemetry
         outTelemetry[0] = subRms * amp * thermalGain;
@@ -900,65 +976,79 @@ public:
     //  for each instrumental track separately.
     // ═════════════════════════════════════════════════════════════════
     void composeHapticLayer(float subRms, float midRms, float textureRms,
-                              float pitch, float thermalGain, float userAmp, float dt) {
-        // 1. Kick Track: Fast attack, sharp exponential decay
-        float kickEnv = std::max(0.0f, subRms - prevSubRms_) * 6.0f * kickProbability_;  // lowered from 8.0f
-        kickEnv = std::clamp(kickEnv, 0.0f, 1.0f);
-        
-        // 2. Snare Track: Snap transient (NO texture component to avoid constant vibration)
-        // Lowered snare gain to avoid "一直震"
-        float snareEnv = midRms * 0.5f * snareProbability_;  // added 0.5f gain reduction
-        snareEnv = std::clamp(snareEnv, 0.0f, 0.60f);  // hard cap at 60%
-        
-        // 3. Vocal Track: Long-sustain low-pass envelope (capped to avoid constant vibration)
-        // Removed textureRms component to avoid "一直震" (constant vibration)
-        // Further lowered vocal gain
-        float vocalTarget = midRms * 0.15f * vocalProbability_;  // lowered from 0.3f to 0.15f
-        vocalEnvelope_ += (vocalTarget - vocalEnvelope_) * 0.20f;  // slower attack (was 0.25f)
-        float vocalEnv = std::clamp(vocalEnvelope_, 0.0f, 0.10f);  // lowered cap from 0.20f to 0.10f
-        
-        // 4. Body (Background Rumble) - capped to avoid continuous rumble
-        // Lowered body gain further
-        float bodyTarget = subRms * 0.08f * bassSustainProbability_;  // lowered from 0.15f to 0.08f
-        bassSmoothed_ += (bodyTarget - bassSmoothed_) * 0.20f;  // slower attack (was 0.25f)
-        float bodyEnv = std::clamp(bassSmoothed_, 0.0f, 0.05f);  // lowered cap from 0.10f to 0.05f
-        
-        // Volume envelope modulation — scale all layers by overall music volume
-        // This ensures haptic amplitude follows the music's dynamic range
-        // Removed textureRms from overallVolume calculation to avoid "一直震"
-        float overallVolume = std::clamp((subRms + midRms) / 2.0f, 0.0f, 1.0f);
-        // Apply sqrt curve to preserve relative dynamics at micro-levels
-        float volumeMod = std::sqrt(overallVolume);
-        kickEnv *= volumeMod;
-        snareEnv *= volumeMod;
-        vocalEnv *= volumeMod;
-        bodyEnv *= volumeMod;
-        
-        // TAIL-CATCHER — replaced hard cutoff with smooth attenuation.
-        // Old: if (totalEnergy < 0.003f) → everything zeroed → "尾气" (fade tails) lost.
-        // New: Below 0.002f, apply progressive gain reduction instead of hard zero.
-        //      0.002→1.0x, 0.001→0.5x, 0.0005→0.25x, approaching 0→0x.
-        //      This preserves the C++ DSP output for Kotlin-side rendering.
-        float totalEnergy = kickEnv + snareEnv + vocalEnv + bodyEnv;
-        if (totalEnergy < 0.002f) {
-            float tailGain = std::clamp(totalEnergy / 0.002f, 0.0f, 1.0f);
-            // Apply sqrt curve to preserve relative dynamics at micro-levels
-            tailGain = std::sqrt(tailGain);
-            kickEnv *= tailGain;
-            snareEnv *= tailGain;
-            vocalEnv *= tailGain;
-            bodyEnv *= tailGain;
-        }
-        
-        // Scale to 0-255
-        float scale = 255.0f * userAmp * thermalGain;
-        pushSemanticFrame(kickEnv * scale, snareEnv * scale, vocalEnv * scale, bodyEnv * scale);
-        
-        float composite = kickEnv + snareEnv + vocalEnv + bodyEnv;
-        lastComposedAmp_ = std::clamp(composite * scale, 0.0f, 255.0f);
-        lastBeatLayer_ = kickEnv;
-        lastBassLayer_ = bodyEnv;
-        lastMelodyLayer_ = vocalEnv;
+                              float pitch, float thermalGain, float userAmp, float dt,
+                              float kickOnset, float snareOnset, float vocalOnset, float bodyOnset) {
+        // The output is intentionally sparse: a good haptic track has hierarchy.
+        // Kicks are the sharpest events, snares are shorter and lighter, vocal
+        // energy is a soft bed, and body is present only when the music really
+        // carries sub-bass.
+        const float kickGain = std::clamp(profileKickMult_.load(std::memory_order_relaxed), 0.30f, 1.60f);
+        const float snareGain = std::clamp(profileSnareMult_.load(std::memory_order_relaxed), 0.30f, 1.60f);
+        const float bodyGain = std::clamp(profileBodyMult_.load(std::memory_order_relaxed), 0.30f, 1.80f);
+        const float tickGain = std::clamp(profileTickMult_.load(std::memory_order_relaxed), 0.25f, 1.60f);
+
+        float kickEnv = std::pow(std::clamp(kickOnset, 0.0f, 1.0f), 0.72f) * 0.95f * kickGain;
+        float snareEnv = std::pow(std::clamp(snareOnset, 0.0f, 1.0f), 0.78f) * 0.72f * snareGain;
+
+        // Vocal/body beds use slow envelopes and a hard ceiling so the device
+        // never turns an entire chorus into a continuous buzz.
+        const float vocalTarget = std::clamp(
+            vocalBandRms_ * 2.0f * (0.42f + 0.58f * pitchConfidence_), 0.0f, 0.20f);
+        vocalEnvelope_ += (vocalTarget - vocalEnvelope_) * (vocalTarget > vocalEnvelope_ ? 0.11f : 0.045f);
+        float vocalEnv = vocalEnvelope_ * 0.34f;
+        vocalEnv += std::pow(std::clamp(vocalOnset, 0.0f, 0.35f), 0.82f) * 0.20f;
+
+        const float bodyTarget = std::clamp(
+            std::max(0.0f, subRms - profileDspFloor_.load(std::memory_order_relaxed) * 4.5f)
+            * 2.7f * (0.40f + 0.60f * bassSustainProbability_),
+            0.0f, 0.32f);
+        bassSmoothed_ += (bodyTarget - bassSmoothed_) * (bodyTarget > bassSmoothed_ ? 0.075f : 0.035f);
+        float bodyEnv = bassSmoothed_ * 0.36f * bodyGain;
+        bodyEnv += std::pow(std::clamp(bodyOnset, 0.0f, 0.18f) / 0.18f, 0.85f) * 0.08f;
+
+        // High-frequency texture should never become a constant buzz. Use it as
+        // a very low-level micro layer and only when there is actual transient
+        // activity in the upper spectrum.
+        const float textureActivity = std::clamp(highSpectralFlux_ * tickGain + hatProbability_ * 0.24f, 0.0f, 1.0f);
+        float textureEnv = std::pow(textureRms / 0.05f, 0.70f) * textureActivity * 0.06f;
+
+        // Global musical loudness follows a smoothed program level. This is softer
+        // than sqrt(raw RMS) and preserves quiet-to-loud contrast.
+        const float loudness = std::clamp(inputLevelEma_ * 9.5f, 0.0f, 1.0f);
+        const float dynamicGate = std::clamp(0.26f + 0.74f * std::pow(loudness, 0.72f), 0.20f, 1.0f);
+        kickEnv *= dynamicGate;
+        snareEnv *= dynamicGate;
+        vocalEnv *= dynamicGate;
+        bodyEnv *= dynamicGate;
+        textureEnv *= dynamicGate;
+
+        // Avoid a flat wall of amplitude. If the body dominates, duck it under
+        // a transient so the attack always remains perceptually separated.
+        const float transientBus = std::max(kickEnv, snareEnv);
+        if (transientBus > 0.30f) bodyEnv *= 0.55f;
+
+        const float composite = std::clamp(
+            kickEnv * 1.00f + snareEnv * 0.90f + bodyEnv * 0.72f + vocalEnv * 0.42f + textureEnv,
+            0.0f, 1.20f);
+        // Soft-knee output mapping preserves musical contrast instead of hard
+        // saturating the semantic bus as soon as userAmp exceeds ~1.0x.
+        const float master = std::max(0.30f, userAmp) * thermalGain;
+        auto renderLevel = [master](float env) -> float {
+            const float x = std::max(0.0f, env) * master;
+            return std::clamp(255.0f * (1.0f - std::exp(-1.05f * x)), 0.0f, 255.0f);
+        };
+        const float kickOut = renderLevel(kickEnv);
+        const float snareOut = renderLevel(snareEnv);
+        const float vocalOut = renderLevel(vocalEnv);
+        const float bodyOut = renderLevel(bodyEnv + textureEnv * 0.35f);
+
+        pushSemanticFrame(kickOut, snareOut, vocalOut, bodyOut);
+
+        lastComposite_ = composite;
+        lastComposedAmp_ = renderLevel(composite);
+        lastBeatLayer_ = kickOut;
+        lastBassLayer_ = renderLevel(bodyEnv);
+        lastMelodyLayer_ = vocalOut;
     }
     float getLastComposedAmp() const { return lastComposedAmp_; }
     float getLastBeatLayer() const { return lastBeatLayer_; }
@@ -968,6 +1058,9 @@ public:
     float getBeatEnvelope() const { return beatEnvelope_; }
     float getBeatIntervalMs() const { return beatIntervalFrames_ * (256.0f / sampleRate_.load(std::memory_order_relaxed)) * 1000.0f; }
     float getBeatConfidence() const { return beatConfidence_; }
+    float getProfileMinIntervalMs() const {
+        return std::clamp(profileMinIntervalMs_.load(std::memory_order_relaxed), 28.0f, 84.0f);
+    }
 
     int getSemanticFrames(SemanticHapticFrame* outFrames, int maxFrames) {
         if (!outFrames || maxFrames <= 0) return 0;

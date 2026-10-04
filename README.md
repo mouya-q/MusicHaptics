@@ -2,7 +2,7 @@
 
 LSPosed 音乐触觉模块。把目标应用的 PCM 音频送入轻量 Native DSP，识别瞬态、频段和节奏事件，再根据执行器特性合成为短促、可控的触觉反馈。
 
-MusicHapticsX 让真正有意义的瞬间落在对的位置
+MusicHapticsX 让真正有意义的瞬间落在对的位置——不是把音乐“变成震动”，而是把瞬态、身体感与微细纹理重新编排成触觉。
 
 ## 核心能力
 
@@ -12,8 +12,8 @@ MusicHapticsX 让真正有意义的瞬间落在对的位置
 - **双层音频来源**：优先 AudioTrack PCM；没有 PCM 写入时，可延迟启用 Visualizer 作为兼容回退。
 - **Native DSP**：固定尺寸缓冲、NEON RMS、5 个分析频段、512 点窗函数 FFT、谱流量、频谱质心、自相关基频估计、瞬态检测与分层事件概率。
 - **语义触觉**：KICK / SNARE / VOCAL / BODY 四层语义输出，避免把整首音乐压成单一音量曲线。
-- **LRA 触觉成形**：攻击 / 保持 / 衰减三段式包络，结合执行器 Q、上升时间、最小间隔与强度下限调整。
-- **直驱与安全回退**：可直接写已知触觉节点；无权限时回退到 Root 管道、UDP 守护或 Android Vibrator，不同时驱动多个输出链路。
+- **LRA 触觉成形**：事件先经过 compact impact policy，再由 `HapticSynthesizer.sculptImpact()` 按执行器 rise / fall / Q 生成短时多段包络；连续触觉只作为很薄的背景层，避免“马达一直搓”。
+- **分层输出策略**：Native 负责精确找拍，Java 触觉层负责最终渲染裁决；Strike-only 节点也会先套用当前风格、强度和 DeviceTuning 的 sculpted envelope，再经 Native 直驱发送。具备持续幅值控制的驱动器使用约 100 Hz 的平滑控制；Android Vibrator 则在校准 Primitive 与定制 waveform 之间按设备能力选择。
 - **多机型深度适配**：`DeviceProfile` 负责执行器模型，`DeviceTuningRegistry` 负责输出时序/增益/冷却，二者共同进入 Kotlin 事件层与 Native DSP。
 - **LiquidGlass UI**：控制台、应用列表、参数面板和底部导航统一接入 AndroidLiquidGlass / Backdrop 源码；没有玻璃渲染能力时仍有低成本降级层。
 
@@ -42,14 +42,20 @@ MusicHapticsX 让真正有意义的瞬间落在对的位置
                                 │ semantic events
                  ┌──────────────▼──────────────┐
                  │      HapticImpactPolicy     │
-                 │ ADSR + Q shaping + cooldown │
+                 │ compact timing + gating       │
+                 └──────────────┬────────────────┘
+                                │
+                 ┌──────────────▼──────────────┐
+                 │ HapticSynthesizer           │
+                 │ actuator-aware impact shape │
+                 │ attack / body / tail        │
                  └──────────────┬──────────────┘
                                 │
               ┌─────────────────┴──────────────────┐
               │                                    │
       ┌───────▼────────┐                    ┌───────▼────────┐
       │ direct actuator │                   │ Android Vibrator │
-      │ / root / UDP    │                   │ / proxy fallback│
+      │ strike / 100Hz  │                   │ primitive / wave │
       └─────────────────┘                  └─────────────────┘
 ```
 
@@ -70,6 +76,39 @@ Hook 线程只做拦截、轻量参数读取和 PCM 归一化。FFT、滤波、�
 5. **音高 / 周期性**：节流后的自相关估计，用于提升有明确基频的内容稳定性。
 6. **瞬态检测**：以“攻击变化”而不是“当前音量”作为事件触发依据，并为不同频段设置独立 refractory。
 7. **语义分层**：把结果整理成 KICK、SNARE、VOCAL、BODY，再交给触觉策略层。
+
+### 高级触感渲染策略
+
+5.3.x 起，实际输出不再默认走“每个 onset 调一次 DynamicEffect”的路径。原因不是 DynamicEffect 不高级，而是逐事件重启效果会把连续事件切成互相覆盖的独立片段，快节奏音乐尤其容易出现“啪、啪、啪”的廉价感。
+
+当前路径按优先级处理：
+
+```text
+PCM
+ │
+ ├─ true RMS + crest + band flux + FFT novelty
+ │
+ ▼
+Semantic Onset
+ │
+ ├─ KICK   → 快起音 + 有限低频尾
+ ├─ SNARE  → 短促高峰 + 极短纹理尾
+ ├─ VOCAL  → 低幅柔性 accent
+ └─ BODY   → 稀疏、低幅、长一点的支撑
+ │
+ ▼
+Compact Impact Policy
+ │
+ ▼
+Actuator-aware Sculpting
+ │
+ ├─ Primitive composition（设备有校准 primitive 时）
+ └─ Multi-segment waveform（需要精细幅度曲线时）
+```
+
+几个原则是刻意固定下来的：**攻击一定比主体短，主体一定比尾巴更重要，尾巴不能覆盖下一次拍点；连续层只能增加“存在感”，不能抢走瞬态。** 这比简单增加振幅更接近高质量 Taptic / LRA 设计的听感目标。
+
+实时队列也以“新鲜度优先”：DSP worker 在负载上升时主动跳过过时 block，只保留最近的小窗口，避免 UI / 播放器抖动把触觉拖到几十毫秒以后。PCM16 ByteBuffer 路径明确按 little-endian 解码，避免不同调用方的 ByteOrder 造成整条分析链失真。
 
 ### 外部 DSP 项目的取舍
 

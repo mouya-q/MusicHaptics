@@ -135,6 +135,72 @@ class HapticSynthesizer(
         val durationMs: Long
     )
 
+    /**
+     * Build a short, actuator-aware impact envelope for Android Vibrator output.
+     *
+     * This intentionally does not reuse solveLraPhysics(): that integrator runs at
+     * a low control rate and is meant for telemetry/modeling, not for driving a real
+     * LRA. The renderer instead uses measured rise/fall/Q characteristics to sculpt
+     * a compact transient that survives vendor vibrator quantisation.
+     */
+    fun sculptImpact(
+        event: String,
+        intensity01: Float,
+        sharpness: Float,
+        attackScale: Float = 1f
+    ): WaveformSegment {
+        val cfg = currentConfig
+        val i = intensity01.coerceIn(0.03f, 1f)
+        val sharp = sharpness.coerceIn(0f, 1f)
+        val q = profile.actuator.qFactor.coerceIn(7f, 24f)
+        val rise = (profile.actuator.riseTimeMs * attackScale.coerceIn(0.65f, 1.45f)).coerceIn(1.2f, 14f)
+        val fall = (profile.actuator.fallTimeMs * (0.80f + 0.28f * (q / 16f)).coerceIn(0.72f, 1.32f)).coerceIn(5f, 45f)
+        val tail = (1.08f - 0.34f * sharp - 0.10f * ((q - 12f) / 10f)).coerceIn(0.58f, 1.10f)
+        val gain = cfg.masterGain.coerceIn(0.60f, 1.25f) * cfg.impactGain.coerceIn(0.60f, 1.50f)
+
+        fun ms(value: Float): Long = value.roundToInt().coerceAtLeast(1).toLong()
+        fun amp(level: Float): Int = (255f * i * gain * level.pow(0.86f)).roundToInt().coerceIn(1, 255)
+
+        val segments = when (event.uppercase()) {
+            "KICK" -> listOf(
+                ms(rise * 0.26f) to amp(0.26f),
+                ms(rise * 0.46f) to amp(0.92f),
+                ms(fall * 0.42f) to amp(0.57f),
+                ms(fall * 0.70f * tail) to amp(0.22f),
+                ms(fall * 0.26f * tail) to amp(0.055f)
+            )
+            "SNARE" -> listOf(
+                ms(rise * 0.22f) to amp(0.18f),
+                ms(rise * 0.52f) to amp(0.80f),
+                ms(fall * 0.36f) to amp(0.44f),
+                ms(fall * 0.48f * tail) to amp(0.13f),
+                ms(fall * 0.18f * tail) to amp(0.035f)
+            )
+            "TICK" -> listOf(
+                ms(rise * 0.20f) to amp(0.10f),
+                ms(rise * 0.40f) to amp(0.62f),
+                ms(fall * 0.24f) to amp(0.18f),
+                ms(fall * 0.12f) to amp(0.025f)
+            )
+            "VOCAL" -> listOf(
+                ms(rise * 0.34f) to amp(0.07f),
+                ms(rise * 0.72f) to amp(0.34f),
+                ms(fall * 0.45f) to amp(0.20f),
+                ms(fall * 0.30f * tail) to amp(0.06f)
+            )
+            else -> listOf(
+                ms(rise * 0.30f) to amp(0.12f),
+                ms(rise * 0.66f) to amp(0.56f),
+                ms(fall * 0.50f) to amp(0.36f),
+                ms(fall * 0.62f * tail) to amp(0.14f),
+                ms(fall * 0.20f * tail) to amp(0.035f)
+            )
+        }
+        val timings = LongArray(segments.size) { segments[it].first }
+        val amplitudes = IntArray(segments.size) { segments[it].second }
+        return WaveformSegment(timings, amplitudes)
+    }
+
     fun synthesizeFrame(
         subBass: Float,
         midBass: Float,

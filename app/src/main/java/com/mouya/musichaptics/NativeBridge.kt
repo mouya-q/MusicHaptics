@@ -95,11 +95,19 @@ class NativeBridge {
                     profile.dspSnareMult,
                     profile.dspTickMult,
                     profile.dspBodyMult,
-                    profile.dspRefractoryScale
+                    profile.dspRefractoryScale,
+                    com.mouya.musichaptics.haptic.DeviceTuningRegistry.current(profile).minIntervalMs.toFloat()
                 )
             } catch (t: Throwable) {
                 Log.w("NativeBridge", "configureProfile failed: ${t.javaClass.simpleName}: ${t.message}")
             }
+        }
+    }
+
+    fun configureStyle(onsetThreshold: Float) {
+        if (nativePtr != 0L) {
+            try { nativeConfigureStyle(nativePtr, onsetThreshold) }
+            catch (t: Throwable) { Log.w("NativeBridge", "configureStyle failed: ${t.javaClass.simpleName}: ${t.message}") }
         }
     }
 
@@ -172,6 +180,14 @@ class NativeBridge {
             } catch (e: Exception) {
                 Log.e("NativeBridge", "triggerDirectDriveStrike failed: ${e.message}")
             }
+        }
+        return false
+    }
+
+    fun isDirectDriveStrikeOnly(): Boolean {
+        if (nativePtr != 0L) {
+            try { return nativeIsDirectDriveStrikeOnly() }
+            catch (e: Exception) { Log.e("NativeBridge", "isDirectDriveStrikeOnly failed: ${e.message}") }
         }
         return false
     }
@@ -286,7 +302,8 @@ class NativeBridge {
     private external fun nativeCreateEngine(): Long
     private external fun nativeDestroyEngine(ptr: Long)
     private external fun nativeConfigure(ptr: Long, sampleRate: Float, lowCut: Float, highCut: Float, amplitude: Float, presetId: Int)
-    private external fun nativeConfigureProfile(ptr: Long, dspFloor: Float, subMult: Float, kickMult: Float, snareMult: Float, tickMult: Float, bodyMult: Float, refractoryScale: Float)
+    private external fun nativeConfigureStyle(ptr: Long, onsetThreshold: Float)
+    private external fun nativeConfigureProfile(ptr: Long, dspFloor: Float, subMult: Float, kickMult: Float, snareMult: Float, tickMult: Float, bodyMult: Float, refractoryScale: Float, minIntervalMs: Float)
     private external fun nativeProcessAudioDirect(ptr: Long, directBuffer: ByteBuffer, size: Int, outTelemetry: FloatArray)
     private external fun nativeGetSemanticFrames(ptr: Long, outFrames: FloatArray, maxFrames: Int): Int
     private external fun nativeClearHapticBuffer(ptr: Long)
@@ -296,6 +313,7 @@ class NativeBridge {
     private external fun nativeSetDirectDriveNodes(nodes: String): Boolean
     private external fun nativeSetDirectDriveFd(enableFd: Int, amplitudeFd: Int, enablePath: String, amplitudePath: String): Boolean
     private external fun nativeTriggerDirectDriveStrike(durationMs: Int, amplitude: Int): Boolean
+    private external fun nativeIsDirectDriveStrikeOnly(): Boolean
     private external fun nativeIsDirectDriveAvailable(): Boolean
     private external fun nativeInitRootPipe(pipeFd: Int, enablePath: String, amplitudePath: String): Boolean
     private external fun nativeIsRootPipeAvailable(): Boolean

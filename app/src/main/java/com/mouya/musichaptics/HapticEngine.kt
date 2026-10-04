@@ -586,63 +586,73 @@ class HapticEngine(
     private fun triggerBeatVibration(event: String, intensity: Int) {
         if (!vibrateProxy.hasVibrator || hapticPaused) return
         val now = SystemClock.elapsedRealtime()
+        val style = activeStyle
         val plan = impactPolicy.plan(
             event = event,
             intensity = intensity,
             profile = hapticEventGenerator.profile,
             amplitudeControl = vibrateProxy.hasAmplitudeControl,
-            forceDefaultAmplitude = vibrateProxy.forceDefaultAmplitude
+            forceDefaultAmplitude = vibrateProxy.forceDefaultAmplitude,
+            styleCooldownMs = style.cooldownMs
         ) ?: return
 
         val previous = lastVibrationMs.get()
         if (now - previous < plan.cooldownMs) return
         if (!lastVibrationMs.compareAndSet(previous, now)) return
 
-        // 5.2.7: 风格预设真正作用于包络 —— 幅度按 intensity% × ampScale 三级乘算，
-        // 锐度与起音时间由预设改写，冷却间隔沿用预设的疏密节奏。
-        val style = activeStyle
         val intensityPct = activeIntensityPct.coerceIn(10, 100)
         val styleAmp = ((intensity / 255f) * (intensityPct / 100f) * style.ampScale * style.accentScale)
-            .coerceIn(0.08f, 0.98f)
-        val durSec = (plan.totalDurationMs * style.attackScale.coerceIn(0.4f, 2.0f) / 1000f)
-            .coerceIn(0.008f, 0.40f)
-        val attackSec = (hapticEventGenerator.profile.actuator.riseTimeMs / 1000f)
-            .coerceIn(0.001f, 0.08f) * style.attackScale.coerceIn(0.4f, 2.0f)
+            .coerceIn(0.035f, 1.0f)
+        val attackScale = style.attackScale.coerceIn(0.65f, 1.45f)
         val sharpness = style.sharpness.coerceIn(0.05f, 1.0f)
-        val usedDynamic = vibrateProxy.performDynamicEffect(styleAmp, sharpness, durSec, attackSec)
 
-        if (!usedDynamic) {
-            val timings = LongArray(plan.segments.size)
-            val amplitudes = IntArray(plan.segments.size)
-            val gain = (intensityPct / 100f) * style.ampScale
-            plan.segments.forEachIndexed { index, segment ->
-                timings[index] = segment.durationMs
-                amplitudes[index] = (segment.amplitude * gain).toInt().coerceIn(1, 255)
-            }
+        val sculpted = hapticSynthesizer.sculptImpact(
+            event = plan.event,
+            intensity01 = styleAmp,
+            sharpness = sharpness,
+            attackScale = attackScale
+        )
+        val directStrike = if (nativeBridge.isDirectDriveStrikeOnly()) {
+            val directDuration = sculpted.timings.sum().coerceIn(6L, 32L).toInt()
+            val directAmplitude = sculpted.amplitudes.maxOrNull()?.coerceIn(1, 255) ?: 1
+            runCatching { nativeBridge.triggerDirectDriveStrike(directDuration, directAmplitude) }
+                .getOrDefault(false)
+        } else false
+
+        val path = if (directStrike) {
+            "DIRECT-STRIKE"
+        } else {
             try {
-                vibrateProxy.performWaveform(timings, amplitudes)
+                vibrateProxy.performPremiumImpact(
+                    event = plan.event,
+                    intensity = styleAmp,
+                    timings = sculpted.timings,
+                    amplitudes = sculpted.amplitudes,
+                    accent = style.accentScale.coerceIn(0.70f, 1.25f)
+                )
             } catch (t: Throwable) {
-                Log.w(TAG, "[HAPTIC] output failed: ${t.message}")
+                Log.w(TAG, "[HAPTIC] premium output failed: ${t.message}")
+                try {
+                    vibrateProxy.performWaveform(sculpted.timings, sculpted.amplitudes)
+                    "WAVEFORM-FALLBACK"
+                } catch (_: Throwable) {
+                    "FAILED"
+                }
             }
         }
-        lastBeatEvent = plan.event
 
-        // 5.2.7 调试日志：每次触发都打印（不受 verboseLogging 门控），并做限流，
-        // 便于核对"UI 预设 → DSP 参数 → 实际输出"三者是否一致。
+        lastBeatEvent = plan.event
         val beatCounter = beatLogCounter.incrementAndGet()
         if (beatCounter <= 12 || beatCounter % 40 == 0L) {
-            val dbg = "[BEAT] #${beatCounter} ${plan.event} rawInt=$intensity " +
-                    "style=${style.key} pct=${intensityPct}% amp=${"%.3f".format(styleAmp)} " +
-                    "sharp=${"%.2f".format(sharpness)} dur=${"%.3f".format(durSec)}s " +
-                    "atk=${"%.4f".format(attackSec)}s dyn=$usedDynamic " +
-                    "path=${if (usedDynamic) "DynamicEffect" else "Waveform"} " +
-                    "cooldown=${plan.cooldownMs}ms"
+            val dbg = "[BEAT] #${beatCounter} ${plan.event} rawInt=$intensity style=${style.key} " +
+                    "amp=${"%.3f".format(styleAmp)} sharp=${"%.2f".format(sharpness)} " +
+                    "shape=${sculpted.timings.joinToString(",")}ms " +
+                    "path=$path cooldown=${plan.cooldownMs}ms"
             Log.i(TAG, dbg)
             LogBroadcaster.sendLog(context, dbg)
         }
-
         if (verboseLogging) {
-            Log.d(TAG, "[HAPTIC] ${plan.event} intensity=$intensity duration=${plan.totalDurationMs}ms cooldown=${plan.cooldownMs}ms dynamic=$usedDynamic")
+            Log.d(TAG, "[HAPTIC] ${plan.event} intensity=$intensity duration=${plan.totalDurationMs}ms path=$path cooldown=${plan.cooldownMs}ms")
         }
     }
 
@@ -839,6 +849,7 @@ class HapticEngine(
 
         // DeviceProfile is now a live DSP input, not only a renderer hint.
         nativeBridge.configureProfile(deviceProfile)
+        nativeBridge.configureStyle(activeStyle.onsetThreshold)
 
         telemetryData.lowPassCutoffHz = lowCutoffFreq
         telemetryData.highPassCutoffHz = highCutoffFreq

@@ -196,9 +196,12 @@ class AudioIngress(
         byteCount: Int,
         channels: Int
     ): Int {
+        // Audio PCM16 is little-endian on Android. A caller-owned ByteBuffer can
+        // legally arrive with BIG_ENDIAN order, so never inherit that order.
+        val pcm = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
         val ch = channels.coerceAtLeast(1)
-        val start = startPosition.coerceIn(0, buffer.limit())
-        val end = min(buffer.limit(), start + byteCount.coerceAtLeast(0))
+        val start = startPosition.coerceIn(0, pcm.limit())
+        val end = min(pcm.limit(), start + byteCount.coerceAtLeast(0))
         val sampleCount = (end - start) / 2
         val frames = sampleCount / ch
         if (!nativeBridge.isLoaded || frames <= 0 || channels <= 0) return 0
@@ -214,14 +217,14 @@ class AudioIngress(
             var pos = start + frameOffset * ch * 2
             if (ch == 1) {
                 for (i in 0 until batch) {
-                    scratch[i] = buffer.getShort(pos).toFloat() / 32768f
+                    scratch[i] = pcm.getShort(pos).toFloat() / 32768f
                     pos += 2
                 }
             } else {
                 for (i in 0 until batch) {
                     var sum = 0
                     repeat(ch) {
-                        sum += buffer.getShort(pos).toInt()
+                        sum += pcm.getShort(pos).toInt()
                         pos += 2
                     }
                     scratch[i] = sum / (ch * 32768f)
@@ -267,8 +270,24 @@ class AudioIngress(
         while (running.get() || readSequence.get() < writeSequence.get()) {
             var didWork = false
             while (true) {
-                val sequence = readSequence.get()
-                if (sequence >= writeSequence.get()) break
+                var sequence = readSequence.get()
+                val write = writeSequence.get()
+                if (sequence >= write) break
+
+                val backlog = write - sequence
+                if (backlog > 4L) {
+                    val stale = backlog - 4L
+                    var staleFrames = 0L
+                    for (j in 0 until stale.toInt()) {
+                        val staleSlot = slots[((sequence + j).toInt() and (QUEUE_CAPACITY - 1))]
+                        staleFrames += staleSlot.frames.toLong()
+                    }
+                    sequence += stale
+                    readSequence.lazySet(sequence)
+                    droppedFrameCount.addAndGet(staleFrames)
+                    Log.w(TAG, "Dropping $stale stale DSP blocks ($staleFrames frames) to preserve haptic latency")
+                }
+
                 val slot = slots[(sequence.toInt() and (QUEUE_CAPACITY - 1))]
                 if (slot.readySequence.get() != sequence + 1L) break
 

@@ -302,6 +302,12 @@ bool init_direct_drive_from_fd(int enable_fd, int amplitude_fd, const std::strin
     }
 
     g_direct_drive_path = enable_path;
+    const bool strikeOnly = enable_path.find("activate") != std::string::npos ||
+                             enable_path.find("aw8697") != std::string::npos ||
+                             enable_path.find("aw86224") != std::string::npos;
+    g_direct_driver_kind.store(
+        static_cast<int>(strikeOnly ? DirectDriverKind::StrikeOnly : DirectDriverKind::Continuous),
+        std::memory_order_release);
     g_direct_drive_fd.store(enable_fd, std::memory_order_release);
 
     if (amplitude_fd >= 0) {
@@ -335,7 +341,7 @@ static std::atomic<bool> g_dd_mode_entered{false};
 // node may accept duration in milliseconds — we detect this heuristically
 // by checking the node name in init_direct_drive (stored in g_direct_drive_path).
 
-void trigger_direct_drive(int duration_ms, int amplitude) {
+bool trigger_direct_drive(int duration_ms, int amplitude) {
     // ─── Java Pipe Mode ───
     // When direct fd, UDP socket, and root pipe fd all fail, fall back
     // to calling Java's NativeBridge.onRootPipeTrigger() which writes
@@ -343,6 +349,7 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
     if (g_use_java_pipe.load(std::memory_order_acquire)) {
         JNIEnv* env = nullptr;
         bool attached = false;
+        bool ok = false;
         if (g_jvm) {
             if (g_jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
                 if (g_jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
@@ -365,6 +372,8 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
                         env->CallVoidMethod(bridge, mid, (jint)amplitude, (jint)duration_ms);
                         if (env->ExceptionCheck()) {
                             env->ExceptionClear();
+                        } else {
+                            ok = true;
                         }
                     }
                     env->DeleteLocalRef(cls);
@@ -378,7 +387,7 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
         if (tick % 2000 == 0) {
             LOGI("[DD-JAVA] tick=%d amp=%d dur=%d", tick, amplitude, duration_ms);
         }
-        return;
+        return ok;
     }
 
     // ─── UDP Haptic Mode ───
@@ -398,7 +407,7 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
             LOGI("[DD-UDP] tick=%d amp=%d dur=%d sent=%s",
                  tick, amplitude, duration_ms, ok ? "OK" : "FAIL");
         }
-        return;
+        return ok;
     }
 
     // ─── Root Pipe Mode ───
@@ -444,7 +453,7 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
             LOGI("[DD-ROOT] tick=%d amp=%d written=%zd cmd=%s",
                  tick, amplitude, written, cmd);
         }
-        return;
+        return written == cmdLen;
     }
 
     // ─── Direct FD Mode (original path) ───
@@ -504,6 +513,7 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
         LOGI("[DD] tick=%d dur=%d amp=%d ampWritten=%zd enableWritten=%zd aw8697=%d",
              tick, duration_ms, amplitude, ampWritten, durWritten, isAW8697 ? 1 : 0);
     }
+    return durWritten > 0;
 }
 
 // Track the global ref so we can clean it up reliably on stop
@@ -513,7 +523,7 @@ static std::atomic<jobject> g_bridge_ref{nullptr};
 static float g_prev_kick_onset = 0.0f;
 static float g_prev_snare_onset = 0.0f;
 static int64_t g_last_beat_trigger_ns = 0;
-static constexpr int64_t BEAT_REFRACTORY_NS = 55000000L;  // 55ms hard floor; final policy is applied in Kotlin
+static constexpr int64_t BEAT_REFRACTORY_NS = 36000000L;  // fallback only; active profile interval is preferred
 
 struct SchedulerArgs {
     haptic::HapticEngine* engine;
@@ -594,7 +604,8 @@ static void* scheduler_thread_func(void* arg) {
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
             const int64_t nowNs = static_cast<int64_t>(ts.tv_sec) * 1000000000L + ts.tv_nsec;
-            if (nowNs - g_last_beat_trigger_ns >= BEAT_REFRACTORY_NS) {
+            const int64_t profileRefractoryNs = static_cast<int64_t>(engine->getProfileMinIntervalMs() * 1000000.0f);
+            if (nowNs - g_last_beat_trigger_ns >= std::max(BEAT_REFRACTORY_NS, profileRefractoryNs)) {
                 const float kickVal = onsetFrames[0].kick;
                 const float snareVal = onsetFrames[0].snare;
                 const float vocalVal = onsetFrames[0].vocal;
@@ -615,14 +626,13 @@ static void* scheduler_thread_func(void* arg) {
                     const float accentScale = eventType == 1 ? 135.0f : eventType == 2 ? 100.0f : eventType == 3 ? 58.0f : 42.0f;
                     beatAccent = eventValue * accentScale;
 
-                    // 5.2.6: Java 回调与 native 直驱改为并存而非互斥。
-                    // 直驱 sysfs 在部分机型上"报告可用但实际不驱动硬件"，若继续
-                    // 让 use_direct_drive 关掉 onBeatTrigger，整条 Java 振动链路
-                    // （VibrateProxy / DynamicEffect）将永不触发。
+                    const int intensity = static_cast<int>(std::clamp(
+                        eventValue * (eventType == 1 ? 255.0f : eventType == 2 ? 220.0f : eventType == 3 ? 170.0f : 150.0f),
+                        18.0f, 255.0f));
+                    // Native owns timing/detection. Java owns the final render decision
+                    // so style, user intensity and DeviceTuning are identical whether
+                    // the transport is Android Vibrator or a root direct-driver node.
                     if (onBeatTrigger) {
-                        const int intensity = static_cast<int>(std::clamp(
-                            eventValue * (eventType == 1 ? 255.0f : eventType == 2 ? 220.0f : eventType == 3 ? 170.0f : 150.0f),
-                            18.0f, 255.0f));
                         jstring eventName = eventType == 1 ? evKick : eventType == 2 ? evSnare : eventType == 3 ? evVocal : evBody;
                         if (eventName) {
                             env->CallVoidMethod(bridgeRef, onBeatTrigger, eventName, static_cast<jint>(intensity));
@@ -630,18 +640,7 @@ static void* scheduler_thread_func(void* arg) {
                         }
                     }
 
-                    // Hardware nodes named "activate" are usually one-shot waveform
-                    // triggers, not a 200 Hz control input. Treat them as strike-only.
-                    // 5.2.6: 直驱降级为"附加通道"——只有写入真正成功才算数，
-                    // 失败时不再吞掉振动（Java 链路已在上方无条件兜底）。
-                    if (use_direct_drive &&
-                        g_direct_driver_kind.load(std::memory_order_acquire) == static_cast<int>(DirectDriverKind::StrikeOnly)) {
-                            const int duration = eventType == 1 ? 16 : eventType == 2 ? 13 : eventType == 3 ? 9 : 11;
-                            const int amplitude = static_cast<int>(std::clamp(
-                                eventValue * (eventType == 1 ? 255.0f : eventType == 2 ? 220.0f : eventType == 3 ? 170.0f : 150.0f),
-                                18.0f, 255.0f));
-                            trigger_direct_drive(duration, amplitude);
-                    }
+                    transientAccent = std::max(transientAccent, eventValue * (eventType == 1 ? 170.0f : eventType == 2 ? 120.0f : eventType == 3 ? 55.0f : 40.0f));
                     // Refractory window re-arms only when an event actually fired.
                     g_last_beat_trigger_ns = nowNs;
                 }
@@ -664,39 +663,47 @@ static void* scheduler_thread_func(void* arg) {
             // Continuous output is used only for nodes designed for duration/amplitude control.
             // One-shot activate/Awinic nodes are driven exclusively by semantic strikes above.
             if (!strikeOnlyDriver) {
-                haptic::SemanticHapticFrame semFrames[1];
-                const int semN = engine->getSemanticFrames(semFrames, 1);
+                // Keep the scheduler at 5ms for timing, but do not hammer the
+                // actuator at 200Hz. Timed-output/LRA drivers sound cleaner around
+                // a ~100Hz control cadence with a real attack/release envelope.
+                if (++continuousDivider >= 2) {
+                    continuousDivider = 0;
+                    haptic::SemanticHapticFrame semFrames[2] = {};
+                    const int semN = engine->getSemanticFrames(semFrames, 2);
+                    const haptic::SemanticHapticFrame sem = semN > 0 ? semFrames[semN - 1] : haptic::SemanticHapticFrame{};
 
-                float continuous = 0.0f;
-                if (semN > 0) {
-                    continuous =
-                          semFrames[0].kickAmp  * 0.55f
-                        + semFrames[0].snareAmp * 0.25f
-                        + semFrames[0].vocalAmp * 0.08f
-                        + semFrames[0].bodyAmp  * 0.35f;
-                }
+                    const float continuous =
+                          sem.kickAmp  * 0.42f
+                        + sem.snareAmp * 0.16f
+                        + sem.vocalAmp * 0.035f
+                        + sem.bodyAmp  * 0.20f;
+                    beatAccent = transientAccent;
+                    transientAccent *= 0.58f;
 
-                // Target = continuous base + onset accent. The direct path owns the actuator.
-                targetAmp = std::clamp(continuous + beatAccent, 0.0f, 255.0f);
+                    targetAmp = std::clamp(continuous + beatAccent, 0.0f, 255.0f);
+                    const float alpha = (targetAmp > currentAmp) ? attackAlpha : releaseAlpha;
+                    currentAmp += (targetAmp - currentAmp) * alpha;
 
-                // Smooth envelope: fast attack, slower release.
-                const float alpha = (targetAmp > currentAmp) ? attackAlpha : releaseAlpha;
-                currentAmp += (targetAmp - currentAmp) * alpha;
+                    if (semN == 0 && onsetN == 0) {
+                        currentAmp *= 0.86f;
+                        if (currentAmp < 0.8f) currentAmp = 0.0f;
+                    }
 
-                if (semN == 0 && onsetN == 0) {
-                    currentAmp *= 0.90f;
-                    if (currentAmp < 1.0f) currentAmp = 0.0f;
-                }
+                    if (currentAmp > 1.0f) {
+                        const int amplitude = static_cast<int>(std::clamp(currentAmp, 0.0f, 255.0f));
+                        if (lastOutputAmp <= 1 || std::abs(amplitude - lastOutputAmp) >= 3) {
+                            if (trigger_direct_drive(10, amplitude)) lastOutputAmp = amplitude;
+                        }
 
-                if (currentAmp > 1.0f) {
-                    const int amplitude = static_cast<int>(currentAmp);
-                    trigger_direct_drive(5, amplitude);
-
-                    const float acceleration = (currentAmp / 255.0f) - (spring_k * lra_position) - (damping_c * lra_velocity);
-                    lra_velocity += acceleration;
-                    lra_position += lra_velocity;
-                } else if (g_dd_tick_count.load(std::memory_order_relaxed) % 2400 == 0) {
-                    LOGI("[DD] idle (no audio), currentAmp=%.1f", currentAmp);
+                        const float acceleration = (currentAmp / 255.0f) - (spring_k * lra_position) - (damping_c * lra_velocity);
+                        lra_velocity = std::clamp(lra_velocity + acceleration, -1.0f, 1.0f);
+                        lra_position = std::clamp(lra_position + lra_velocity, -1.0f, 1.0f);
+                    } else {
+                        lastOutputAmp = 0;
+                    }
+                } else if (strikeOnlyDriver) {
+                    currentAmp = 0.0f;
+                    lastOutputAmp = 0;
                 }
             } else {
                 currentAmp = 0.0f;
@@ -787,12 +794,20 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigure(
 }
 
 JNIEXPORT void JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeConfigureStyle(
+    JNIEnv* env, jobject thiz, jlong ptr, jfloat onsetThreshold) {
+    auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
+    if (engine) engine->configureStyle(onsetThreshold);
+}
+
+JNIEXPORT void JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeConfigureProfile(
     JNIEnv* env, jobject thiz, jlong ptr, jfloat dspFloor, jfloat subMult,
-    jfloat kickMult, jfloat snareMult, jfloat tickMult, jfloat bodyMult, jfloat refractoryScale) {
+    jfloat kickMult, jfloat snareMult, jfloat tickMult, jfloat bodyMult,
+    jfloat refractoryScale, jfloat minIntervalMs) {
     auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
     if (engine) {
-        engine->configureProfile(dspFloor, subMult, kickMult, snareMult, tickMult, bodyMult, refractoryScale);
+        engine->configureProfile(dspFloor, subMult, kickMult, snareMult, tickMult, bodyMult, refractoryScale, minIntervalMs);
     }
 }
 
@@ -927,8 +942,13 @@ Java_com_mouya_musichaptics_NativeBridge_nativeTriggerDirectDriveStrike(JNIEnv*,
     bool hasUdp = g_use_udp_haptic.load(std::memory_order_acquire);
     bool hasJavaPipe = g_use_java_pipe.load(std::memory_order_acquire);
     if (!hasDirectFd && !hasRootPipe && !hasUdp && !hasJavaPipe) return JNI_FALSE;
-    trigger_direct_drive(durationMs, amplitude);
-    return JNI_TRUE;
+    return trigger_direct_drive(durationMs, amplitude) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeIsDirectDriveStrikeOnly(JNIEnv*, jobject) {
+    return g_direct_driver_kind.load(std::memory_order_acquire) == static_cast<int>(DirectDriverKind::StrikeOnly)
+        ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

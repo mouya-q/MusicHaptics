@@ -16,7 +16,8 @@ class HapticImpactPolicy {
         intensity: Int,
         profile: DeviceProfile,
         amplitudeControl: Boolean,
-        forceDefaultAmplitude: Boolean
+        forceDefaultAmplitude: Boolean,
+        styleCooldownMs: Long = 0L
     ): Plan? {
         val key = event.uppercase()
         val tuning = tuningFor(profile)
@@ -30,28 +31,51 @@ class HapticImpactPolicy {
             else -> 1.0f
         }
         val gain = tuning.impactGain * layerGain * (0.72f + 0.48f * normalized.pow(0.82f))
-        val timing = when {
-            forceDefaultAmplitude || !amplitudeControl -> shape.force
-            else -> shape.ampCtrl
-        }
         val scale = when (key) {
             "KICK" -> tuning.kickMsScale
             "SNARE" -> tuning.snareMsScale
-            "VOCAL" -> (tuning.snareMsScale * 0.94f)
+            "VOCAL" -> tuning.snareMsScale * 0.94f
             "TICK" -> tuning.tickMsScale
             else -> tuning.bodyMsScale
         }
-        val total = (profile.actuator.riseTimeMs * timing.mul * scale)
-            .toLong().coerceIn(timing.min, timing.max)
+        // The policy is deliberately compact: the detailed envelope is rendered
+        // by HapticSynthesizer. These limits stop a slow vendor vibrator from
+        // turning a transient into a long, mushy buzz.
+        val responseMs = (profile.actuator.riseTimeMs + profile.actuator.fallTimeMs * 0.42f)
+            .coerceIn(5f, 55f)
+        val totalFloat = when (key) {
+            "KICK" -> responseMs * 1.25f * scale
+            "SNARE" -> responseMs * 1.00f * scale
+            "TICK" -> responseMs * 0.58f * scale
+            "VOCAL" -> responseMs * 0.92f * scale
+            else -> responseMs * 1.52f * scale
+        }
+        val (minMs, maxMs) = when (key) {
+            "KICK" -> 9L to 28L
+            "SNARE" -> 8L to 24L
+            "TICK" -> 5L to 14L
+            "VOCAL" -> 8L to 24L
+            else -> 12L to 34L
+        }
+        val total = totalFloat.toLong().coerceIn(minMs, maxMs)
 
-        val qShape = (16f / profile.actuator.qFactor.coerceIn(8f, 22f)).coerceIn(0.72f, 1.28f)
-        val baseDecay = (1f - shape.attackFrac - shape.sustainFrac).coerceAtLeast(0.06f)
-        val decayFrac = (baseDecay * qShape).coerceIn(0.05f, 0.62f)
-        val attackFrac = if (shape.hasSustain) shape.attackFrac else (1f - decayFrac).coerceAtLeast(0.20f)
-        val sustainFrac = if (shape.hasSustain) (1f - attackFrac - decayFrac).coerceAtLeast(0.05f) else 0f
-
+        val qTail = (16f / profile.actuator.qFactor.coerceIn(8f, 22f)).coerceIn(0.75f, 1.22f)
+        val attackFrac = when (key) {
+            "KICK" -> 0.18f
+            "SNARE" -> 0.24f
+            "TICK" -> 0.30f
+            "VOCAL" -> 0.28f
+            else -> 0.22f
+        }
+        val sustainFrac = when (key) {
+            "KICK" -> 0.30f
+            "SNARE" -> 0.20f
+            "VOCAL" -> 0.26f
+            else -> 0.34f
+        }
+        val decayFrac = (1f - attackFrac - sustainFrac) * qTail
         val attack = (total * attackFrac).toLong().coerceAtLeast(1L)
-        val sustain = if (shape.hasSustain) (total * sustainFrac).toLong().coerceAtLeast(1L) else 0L
+        val sustain = (total * sustainFrac).toLong().coerceAtLeast(0L)
         val decay = (total - attack - sustain).coerceAtLeast(1L)
 
         val amplitude = (normalized * shape.ampBase * shape.weight(profile) * gain)
@@ -65,6 +89,7 @@ class HapticImpactPolicy {
             }
             add(Segment(decay, if (useDefault) VibrationEffect.DEFAULT_AMPLITUDE else (amplitude * shape.decayAmpFrac).toInt().coerceAtLeast(1)))
         }
-        return Plan(key, total, segments, tuning.minIntervalMs)
+        val cooldown = maxOf(tuning.minIntervalMs, styleCooldownMs.coerceAtLeast(0L))
+        return Plan(key, total, segments, cooldown)
     }
 }

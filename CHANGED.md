@@ -1,5 +1,39 @@
 # Changelog
 
+## 5.3.0 — Premium Haptics pipeline：重新打磨音频→触觉全链路 (2026-10-04)
+
+这一版不是“把振动调大”，而是针对听感中的四个核心问题做结构性调整：瞬态不够干净、连续振动容易发糊、不同事件缺少层次、负载升高时延迟会积累。
+
+### 触觉输出重构
+- `HapticSynthesizer.sculptImpact()` 真正进入主输出链，按照当前 `DeviceProfile` 的 rise / fall / Q 生成 4–5 段短时包络。
+- `HapticImpactPolicy` 改为 compact timing gate：事件总时长大幅收紧，避免快歌里相邻事件互相覆盖。
+- Android Vibrator 优先走校准 Primitive；只有没有合适 Primitive 时才走 waveform。
+- Xiaomi DynamicEffect 不再作为每次 onset 的默认重启动作，保留为兼容 API，避免事件间互相截断。
+
+### 直驱与事件时序
+- Strike-only 硬件节点现在也遵循 Java 侧的最终渲染策略：风格、强度、DeviceTuning、执行器 envelope 先统一计算，再通过 Native 直驱发出。
+- Native onset 不再自己再打一发实体振动，避免“双攻击”造成毛刺/重影；`trigger_direct_drive()` 只负责传输，并返回真实写入结果。 Root pipe / UDP / Java pipe / FD 四条路径都能向渲染层反馈。
+- 连续驱动仍由 5ms scheduler 提供时间精度，但真正写驱动约为 100Hz，并使用快起慢退的平滑包络。
+- profile 的 `minIntervalMs` 现在同时参与 Native scheduler refractory 与 Kotlin policy。
+
+### 音频分析与实时性
+- PCM16 ByteBuffer 强制 little-endian，避免调用方 ByteOrder 导致 PCM 失真。
+- AudioIngress 在 DSP 负载上升时丢弃 stale blocks，只保留最近窗口；宁可丢过时数据，也不累积几十毫秒触觉延迟。
+- Native onset 增加 crest factor 作为瞬态置信度输入，并继续使用 band flux + local floor 做自适应检测。
+- Native semantic bus 保留 soft-knee headroom，减少高增益档位把所有事件压成同一振幅的问题。
+
+### 修复
+- 清理 `HapticEngine.hpp` 中重复的 profile 原子字段与重复 composite 声明。
+- Native `configureProfile` / `configureStyle` JNI 签名与 Kotlin 声明重新对齐。
+- 修复 root-assisted FD 模式没有设置 StrikeOnly / Continuous 类型的问题。
+
+### 验证
+- `scripts/repo_check.py`：通过。
+- JNI 声明 / 实现：24 项通过。
+- Android APK 完整 Gradle 构建仍需在具备 Android SDK / NDK 与可用 Gradle 分发环境的机器验证；本环境不声称 APK build 已通过。
+
+---
+
 ## 5.2.9 — 修复配置刷新链路：设置不生效 / 白名单回弹 (2026-10-04)
 
 本版三处修改指向同一根因链：**UI 改了设置，但注入进程永远不知道**。

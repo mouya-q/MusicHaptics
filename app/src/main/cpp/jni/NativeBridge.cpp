@@ -458,7 +458,7 @@ bool trigger_direct_drive(int duration_ms, int amplitude) {
 
     // ─── Direct FD Mode (original path) ───
     int fd = g_direct_drive_fd.load(std::memory_order_acquire);
-    if (fd < 0) return;
+    if (fd < 0) return false;
 
     int amp_fd = g_direct_amplitude_fd.load(std::memory_order_acquire);
 
@@ -571,6 +571,9 @@ static void* scheduler_thread_func(void* arg) {
     // Envelope smoothing state for continuous haptic rendering
     float currentAmp = 0.0f;       // Smoothed output amplitude (0..255)
     float targetAmp = 0.0f;        // Target amplitude before smoothing
+    float transientAccent = 0.0f;  // Cross-tick accumulation of beat intensity for envelope-driven output
+    int continuousDivider = 0;     // 200Hz scheduler -> 100Hz control cadence divider
+    int lastOutputAmp = 0;         // Hysteresis state to avoid re-triggering on near-identical amplitude
     const float attackAlpha = 0.45f;  // Fast attack
     const float releaseAlpha = 0.08f; // Slow release
 

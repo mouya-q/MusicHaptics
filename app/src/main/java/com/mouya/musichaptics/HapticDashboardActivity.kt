@@ -1073,12 +1073,16 @@ private fun WhitelistPanel(
     onModeChange: (String) -> Unit,
     onClear: () -> Unit
 ) {
+    val whitelistOnlyLabel = stringResource(R.string.whitelist_only)
+    val allScopeLabel = stringResource(R.string.all_scope)
+    val scopeAllDesc = stringResource(R.string.scope_all_desc)
+    val scopeWhitelistDesc = stringResource(R.string.scope_whitelist_desc)
     Column(Modifier.fillMaxWidth().liquidGlass(20.dp).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(stringResource(R.string.processing_scope), color = textPrimary(), fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
                 Text(
-                    if (mode == WhitelistManager.MODE_ALL) stringResource(R.string.scope_all_desc) else String.format(stringResource(R.string.scope_whitelist_desc), enabledCount),
+                    if (mode == WhitelistManager.MODE_ALL) scopeAllDesc else String.format(scopeWhitelistDesc, enabledCount),
                     color = textSecondary(), fontSize = 12.sp
                 )
             }
@@ -1089,7 +1093,7 @@ private fun WhitelistPanel(
             items = listOf(WhitelistManager.MODE_WHITELIST, WhitelistManager.MODE_ALL),
             selected = mode,
             onSelect = onModeChange,
-            label = { it -> if (it == WhitelistManager.MODE_WHITELIST) stringResource(R.string.whitelist_only) else stringResource(R.string.all_scope) }
+            label = { it -> if (it == WhitelistManager.MODE_WHITELIST) whitelistOnlyLabel else allScopeLabel }
         )
     }
 }

@@ -64,6 +64,29 @@ jobs:
       - name: Repository checks
         run: python3 scripts/repo_check.py
 
+      - name: Restore release signing key
+        # The keystore is stored as the repository secret MHX_KEYSTORE_B64 so
+        # that every release is signed with the same key. Without it each run
+        # used a freshly generated debug key, which produced a different
+        # signature per build and made Android refuse to install over the
+        # already installed app. Fork pull requests cannot read secrets, so the
+        # step is allowed to skip and the build then falls back to debug signing.
+        run: |
+          if [ -z "${MHX_KEYSTORE_B64:-}" ]; then
+            echo "MHX_KEYSTORE_B64 is not available (fork PR or secret missing)."
+            echo "Continuing with debug signing for this build."
+            exit 0
+          fi
+          KEYSTORE_PATH="$GITHUB_WORKSPACE/mhx-release.jks"
+          echo "$MHX_KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
+          chmod 600 "$KEYSTORE_PATH"
+          echo "MHX_KEYSTORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "Restored keystore: $(wc -c < "$KEYSTORE_PATH") bytes"
+          # Print only non-sensitive facts so the log proves which key is in use.
+          if [ -n "${MHX_KEY_ALIAS:-}" ]; then
+            echo "key alias: $MHX_KEY_ALIAS"
+          fi
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 

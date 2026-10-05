@@ -72,9 +72,11 @@ jobs:
         # already installed app. Fork pull requests cannot read secrets, so the
         # step is allowed to skip and the build then falls back to debug signing.
         run: |
+          echo "MHX_KEYSTORE_B64 length: ${#MHX_KEYSTORE_B64}"
+          echo "MHX_KEYSTORE_PASS length: ${#MHX_KEYSTORE_PASS}"
+          echo "MHX_KEY_ALIAS length: ${#MHX_KEY_ALIAS}"
           if [ -z "${MHX_KEYSTORE_B64:-}" ]; then
-            echo "MHX_KEYSTORE_B64 is not available (fork PR or secret missing)."
-            echo "Continuing with debug signing for this build."
+            echo "MHX_KEYSTORE_B64 is not available; using debug signing."
             exit 0
           fi
           KEYSTORE_PATH="$GITHUB_WORKSPACE/mhx-release.jks"
@@ -82,7 +84,7 @@ jobs:
           chmod 600 "$KEYSTORE_PATH"
           echo "MHX_KEYSTORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
           echo "Restored keystore: $(wc -c < "$KEYSTORE_PATH") bytes"
-          # Print only non-sensitive facts so the log proves which key is in use.
+          # Never print secret values; the lengths above only prove availability.
           if [ -n "${MHX_KEY_ALIAS:-}" ]; then
             echo "key alias: $MHX_KEY_ALIAS"
           fi
@@ -99,6 +101,10 @@ jobs:
         run: ./gradlew assembleRelease --stacktrace
         env:
           GRADLE_OPTS: "-Xmx4096m"
+          # Passed explicitly rather than relying on step inheritance so the
+          # signing properties are visible in this step's environment block.
+          MHX_KEYSTORE_PASS: ${{ secrets.MHX_KEYSTORE_PASS }}
+          MHX_KEY_ALIAS: ${{ secrets.MHX_KEY_ALIAS }}
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4

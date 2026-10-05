@@ -69,8 +69,16 @@ jobs:
         # that every release is signed with the same key. Without it each run
         # used a freshly generated debug key, which produced a different
         # signature per build and made Android refuse to install over the
-        # already installed app. Fork pull requests cannot read secrets, so the
-        # step is allowed to skip and the build then falls back to debug signing.
+        # already installed app.
+        #
+        # Secrets are NOT injected as environment variables automatically, so
+        # each value must be mapped explicitly through ${{ secrets.* }}. Fork
+        # pull requests cannot read secrets; the expressions then expand to an
+        # empty string and the build falls back to debug signing.
+        env:
+          MHX_KEYSTORE_B64: ${{ secrets.MHX_KEYSTORE_B64 }}
+          MHX_KEYSTORE_PASS: ${{ secrets.MHX_KEYSTORE_PASS }}
+          MHX_KEY_ALIAS: ${{ secrets.MHX_KEY_ALIAS }}
         run: |
           echo "MHX_KEYSTORE_B64 length: ${#MHX_KEYSTORE_B64}"
           echo "MHX_KEYSTORE_PASS length: ${#MHX_KEYSTORE_PASS}"
@@ -101,8 +109,9 @@ jobs:
         run: ./gradlew assembleRelease --stacktrace
         env:
           GRADLE_OPTS: "-Xmx4096m"
-          # Passed explicitly rather than relying on step inheritance so the
-          # signing properties are visible in this step's environment block.
+          # Gradle reads the alias and password from the environment; the
+          # keystore path arrives through MHX_KEYSTORE_FILE, which the restore
+          # step exported via GITHUB_ENV and is therefore inherited here.
           MHX_KEYSTORE_PASS: ${{ secrets.MHX_KEYSTORE_PASS }}
           MHX_KEY_ALIAS: ${{ secrets.MHX_KEY_ALIAS }}
 

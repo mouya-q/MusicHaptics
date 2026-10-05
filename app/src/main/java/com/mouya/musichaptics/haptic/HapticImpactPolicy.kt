@@ -41,7 +41,10 @@ class HapticImpactPolicy {
             "TICK" -> tuning.tickMsScale
             else -> tuning.bodyMsScale
         }
-        val total = (profile.actuator.riseTimeMs * timing.mul * scale)
+        // Duration scales with intensity: stronger beats are slightly longer
+        // (more sustain for impact), weaker beats are shorter and crisper.
+        val intensityDurationFactor = 0.5f + 0.5f * normalized
+        val total = (profile.actuator.riseTimeMs * timing.mul * scale * intensityDurationFactor)
             .toLong().coerceIn(timing.min, timing.max)
 
         val qShape = (16f / profile.actuator.qFactor.coerceIn(8f, 22f)).coerceIn(0.72f, 1.28f)

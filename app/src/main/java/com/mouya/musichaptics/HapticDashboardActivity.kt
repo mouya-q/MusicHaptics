@@ -451,12 +451,16 @@ class HapticDashboardActivity : ComponentActivity() {
         else
             registerReceiver(logReceiver, logFilter)
 
+        // Start foreground keepalive service
+        HapticForegroundService.start(this)
+
         setContent { MaterialTheme { ReducedMotionProvider { HapticDashboard() } } }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         try { unregisterReceiver(logReceiver) } catch (_: Exception) {}
+        HapticForegroundService.stop(this)
     }
 }
 

@@ -523,8 +523,14 @@ class HapticEngine(
         if (!lastVibrationMs.compareAndSet(previous, now)) return
 
         val eventBass = if (event.equals("KICK", true) || event.equals("SUB", true)) activeBassBoost else 1f
-        val level = (activeOutputLevel * style.ampScale * style.accentScale * eventBass).coerceIn(0.25f, 1.90f)
-        val duration = (plan.totalDurationMs * style.attackScale.coerceIn(0.45f, 1.8f)).toLong().coerceIn(12L, 180L)
+        // level = user gain only (0.3-2.0), not crushed by style/bass multipliers.
+        // Those multipliers are applied inside sculptImpact so they shape the envelope
+        // without crushing the dynamic range of the intensity signal.
+        val level = activeOutputLevel.coerceIn(0.3f, 2.0f)
+        // Duration scales with intensity: strong beats are slightly longer (more sustain),
+        // weak beats are shorter and crisper. Apple-style: energy-proportional duration.
+        val intensityFactor = 0.35f + 0.65f * normalizedIntensity
+        val duration = (plan.totalDurationMs * intensityFactor * style.attackScale.coerceIn(0.45f, 1.8f)).toLong().coerceIn(6L, 80L)
         val shaped = hapticSynthesizer.sculptImpact(
             event = plan.event,
             intensity = normalizedIntensity,
@@ -532,6 +538,8 @@ class HapticEngine(
             durationMs = duration,
             sharpness = style.sharpness,
             bassBoost = eventBass,
+            ampScale = style.ampScale,
+            accentScale = style.accentScale,
             thermalInput = 1f,
         )
 
@@ -666,13 +674,34 @@ class HapticEngine(
         if (prefs is com.mouya.musichaptics.hook.HookConfigPreferences) prefs.refresh()
 
         val masterState = runCatching { prefs.getBoolean("master_switch", true) }.getOrDefault(true)
+        val wasEnabled = isEngineEnabled.get()
         isEngineEnabled.set(masterState)
+        if (!masterState && wasEnabled) {
+            // Master switch turned OFF: stop everything immediately
+            hapticPaused = true
+            vibrateProxy.setPaused()
+            nativeBridge.clearHapticBuffer()
+            hapticSynthesizer.forceDecay()
+            if (nativeSchedulerActive) {
+                try { nativeBridge.stopScheduler() } catch (_: Throwable) {}
+                nativeSchedulerActive = false
+            }
+            LogBroadcaster.sendLog(context, "[MASTER] Switch OFF — all haptics stopped")
+        } else if (masterState && !wasEnabled) {
+            // Master switch turned back ON: restart scheduler
+            hapticPaused = false
+            vibrateProxy.setResumed()
+            if (!nativeSchedulerActive && nativeBridge.isLoaded) {
+                nativeSchedulerActive = nativeBridge.startScheduler()
+            }
+            LogBroadcaster.sendLog(context, "[MASTER] Switch ON — scheduler restarted=${nativeSchedulerActive}")
+        }
 
         val baseAmplitude = runCatching { prefs.getFloat("haptic_amplitude", 2.3f) }.getOrDefault(2.3f)
         val uiPreset = runCatching { prefs.getInt("selected_preset", 2) }.getOrDefault(2)
         val presetGain = floatArrayOf(0.70f, 0.90f, 1.00f, 1.20f).getOrElse(uiPreset) { 1.00f }
         val style = StylePreset.fromKey(runCatching { prefs.getString("style_preset", "balanced") }.getOrDefault("balanced"))
-        val outputAmp = (baseAmplitude * presetGain * 1.20f).coerceIn(0.3f, 6.0f)
+        val outputAmp = (baseAmplitude * presetGain * 0.65f).coerceIn(0.3f, 2.0f)
         val lowCutoffFreq = style.lowCutHz
         val highCutoffFreq = style.highCutHz
 

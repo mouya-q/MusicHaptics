@@ -83,6 +83,8 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
         durationMs: Long,
         sharpness: Float,
         bassBoost: Float,
+        ampScale: Float = 1.0f,
+        accentScale: Float = 1.0f,
         thermalInput: Float = 1f,
     ): SculptedImpact {
         val now = SystemClock.elapsedRealtime()
@@ -101,7 +103,10 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
         }
         val sharp = sharpness.coerceIn(0.05f, 1f)
         val resonanceScale = sqrt((LRA_F0 / config.lraF0).coerceIn(0.6f, 1.7f))
-        val peak = (intensity.pow(0.78f) * levelScale * eventGain * config.masterGain * thermalInput * 255f).coerceIn(10f, 255f)
+        // Dynamic peak: intensity (0-1) drives the amplitude, levelScale is user gain,
+        // eventGain and accentScale shape the character without crushing dynamic range.
+        // Using pow(0.7) for wider dynamic range (gentler compression than 0.78).
+        val peak = (intensity.pow(0.7f) * levelScale * eventGain * accentScale * ampScale * config.masterGain * thermalInput * 255f).coerceIn(5f, 255f)
         val qTail = (config.lraQ / profile.actuator.qFactor.coerceAtLeast(5f)).coerceIn(0.65f, 1.65f)
         val attackSource = if (continuous) config.attackTauContinuous else config.attackTauImpact
         val decaySource = if (continuous) config.decayTauContinuous else config.decayTauImpact
@@ -115,7 +120,11 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
         val tail = snap(decayMs + releaseMs)
         val total = durationMs.coerceIn(12L, 220L)
         val body = (total - attack - tail).coerceAtLeast(1L)
-        val sustain = if (continuous) config.sustainLevel else config.sustainLevel * (1f - sharp * 0.55f)
+        // Intensity-dependent sustain: strong hits have less sustain (punchier),
+        // weak hits have more sustain (smoother). Apple-style energy-proportional shaping.
+        val intensityShape = intensity.coerceIn(0f, 1f)
+        val sustain = if (continuous) config.sustainLevel
+        else config.sustainLevel * (1f - sharp * 0.55f) * (0.6f + 0.4f * (1f - intensityShape))
         val releaseLevel = (0.08f + (1f - sharp) * 0.18f).coerceIn(0.06f, 0.3f)
         val peakInt = peak.toInt().coerceIn(1, 255)
         val bodyInt = (peak * sustain).toInt().coerceIn(1, peakInt)

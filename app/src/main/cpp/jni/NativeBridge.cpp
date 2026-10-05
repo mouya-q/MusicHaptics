@@ -619,9 +619,14 @@ static void* scheduler_thread_func(void* arg) {
                     
                     
                     if (onBeatTrigger) {
+                        // Dynamic intensity: onset value (0.0-1.0) mapped directly to 0-255.
+                        // Event type provides a character scaling factor, but the onset
+                        // strength is the primary driver — quiet beats feel quiet, loud
+                        // beats feel loud. Apple-style energy-proportional output.
+                        const float eventCharScale = eventType == 1 ? 1.0f : eventType == 2 ? 0.85f : eventType == 3 ? 0.60f : 0.50f;
                         const int intensity = static_cast<int>(std::clamp(
-                            eventValue * (eventType == 1 ? 255.0f : eventType == 2 ? 220.0f : eventType == 3 ? 170.0f : 150.0f),
-                            18.0f, 255.0f));
+                            eventValue * eventCharScale * 255.0f,
+                            10.0f, 255.0f));
                         jstring eventName = eventType == 1 ? evKick : eventType == 2 ? evSnare : eventType == 3 ? evVocal : evBody;
                         if (eventName) {
                             env->CallVoidMethod(bridgeRef, onBeatTrigger, eventName, static_cast<jint>(intensity));
@@ -632,17 +637,44 @@ static void* scheduler_thread_func(void* arg) {
                     
                     
                     
-                    
-                    if (use_direct_drive &&
-                        g_direct_driver_kind.load(std::memory_order_acquire) == static_cast<int>(DirectDriverKind::StrikeOnly)) {
-                            const int duration = eventType == 1 ? 16 : eventType == 2 ? 13 : eventType == 3 ? 9 : 11;
-                            const int amplitude = static_cast<int>(std::clamp(
-                                eventValue * (eventType == 1 ? 255.0f : eventType == 2 ? 220.0f : eventType == 3 ? 170.0f : 150.0f),
-                                18.0f, 255.0f));
-                            trigger_direct_drive(duration, amplitude);
-                    }
+                    // REMOVED: direct-drive beat trigger for StrikeOnly devices.
+                    // Previously this fired a raw sysfs write AND the Kotlin onBeatTrigger
+                    // callback, causing double-fire. Now only onBeatTrigger fires, and
+                    // Kotlin handles the shaped waveform output.
                     
                     g_last_beat_trigger_ns = nowNs;
+                }
+            }
+        }
+
+        // RMS-based texture pulsing for StrikeOnly devices.
+        // Even though the device can only do one-shot strikes, we can create a
+        // perceived continuous texture by pulsing at ~50Hz with amplitude
+        // proportional to the audio's RMS energy. This gives the "textures"
+        // sensation that Apple Music Haptics provides.
+        if (use_direct_drive &&
+            g_direct_driver_kind.load(std::memory_order_acquire) == static_cast<int>(DirectDriverKind::StrikeOnly)) {
+            haptic::SemanticHapticFrame texFrames[1];
+            const int texN = engine->getSemanticFrames(texFrames, 1);
+            if (texN > 0) {
+                const float texEnergy =
+                      texFrames[0].kickAmp  * 0.45f
+                    + texFrames[0].snareAmp * 0.20f
+                    + texFrames[0].vocalAmp * 0.15f
+                    + texFrames[0].bodyAmp  * 0.30f;
+                const float styleAmpScale = engine->getOutputStyleAmpScale();
+                const float masterGain = engine->getOutputMasterGain();
+                const float texAmp = std::clamp(texEnergy * styleAmpScale * masterGain * 255.0f, 0.0f, 255.0f);
+                // Only pulse if energy is above a perceptual threshold
+                if (texAmp > 15.0f) {
+                    // Pulse every ~20ms (every 4th frame at 5ms) to avoid overloading
+                    // the sysfs interface, with amplitude tracking the music's energy.
+                    static int texPulseCounter = 0;
+                    texPulseCounter++;
+                    if (texPulseCounter >= 4) {
+                        texPulseCounter = 0;
+                        trigger_direct_drive(5, static_cast<int>(texAmp));
+                    }
                 }
             }
         }

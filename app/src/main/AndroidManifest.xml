@@ -12,6 +12,8 @@
     </queries>
 
     <!-- Keep the application icon. -->
+        <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <application 
         android:allowBackup="false"
         android:name=".MusicHapticsApplication"
@@ -70,5 +72,9 @@
             android:name=".VibrateProxyService"
             android:exported="true" />
 
+            <service
+            android:name=".HapticForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
     </application>
 </manifest>

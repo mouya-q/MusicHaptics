@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import android.widget.ImageView
 import androidx.activity.ComponentActivity
@@ -451,8 +452,10 @@ class HapticDashboardActivity : ComponentActivity() {
         else
             registerReceiver(logReceiver, logFilter)
 
-        // Start foreground keepalive service
-        HapticForegroundService.start(this)
+        // Start foreground keepalive service. Best effort by design: a rejection
+        // here must not take the Dashboard down with it (see HapticForegroundService).
+        runCatching { HapticForegroundService.start(this) }
+            .onFailure { Log.w("HapticDashboard", "Keepalive start failed", it) }
 
         setContent { MaterialTheme { ReducedMotionProvider { HapticDashboard() } } }
     }
@@ -460,7 +463,8 @@ class HapticDashboardActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         try { unregisterReceiver(logReceiver) } catch (_: Exception) {}
-        HapticForegroundService.stop(this)
+        runCatching { HapticForegroundService.stop(this) }
+            .onFailure { Log.w("HapticDashboard", "Keepalive stop failed", it) }
     }
 }
 

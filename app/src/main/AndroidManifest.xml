@@ -3,6 +3,15 @@
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
 
+    <!-- Foreground keepalive service (HapticForegroundService). -->
+    <!-- WAKE_LOCK is mandatory: PowerManager.newWakeLock().acquire() throws
+         SecurityException at runtime on every device if this is missing, and a
+         throw inside Service.onCreate() takes the whole process down. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+
     <!-- Declare launcher package visibility. -->
     <queries>
         <intent>
@@ -11,9 +20,6 @@
         </intent>
     </queries>
 
-    <!-- Keep the application icon. -->
-        <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <application 
         android:allowBackup="false"
         android:name=".MusicHapticsApplication"

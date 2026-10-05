@@ -1,5 +1,9 @@
 # Changes
 
+## 5.4.1
+
+- Fixed the crash-on-launch regression introduced by the 5.4.0 foreground keepalive service
+
 ## 5.4.0
 
 ### Dynamic Haptics (Apple-style)
@@ -12,10 +16,18 @@
 
 ### Fixes
 
+- Fixed crash on startup: `HapticForegroundService` acquired a partial wake lock without declaring `android.permission.WAKE_LOCK`, throwing `SecurityException` on the main thread and killing the process the moment the Dashboard opened
 - Fixed amplitude crushing: level was always clamped to 1.90, peak always 255, making every beat feel identical regardless of music energy
 - Fixed double-fire on StrikeOnly devices (AW8697): native direct-drive and Kotlin Waveform were both firing for each beat, causing a double-tap. Now only the Kotlin shaped-envelope path fires
 - Fixed fixed 33ms duration: duration now scales with intensity (6-80ms range)
 - Fixed native intensity mapping: onset values were multiplied by fixed per-event constants (255/220/170/150), now use dynamic onset strength directly
+
+### Foreground Keepalive Hardening
+
+- Every call in `HapticForegroundService` is now wrapped in `runCatching`; keepalive failures degrade to a log line instead of taking down the process
+- Wake lock is now reference-counted by an explicit flag and re-asserted on `START_STICKY` redelivery, so it can never leak or double-release
+- Foreground promotion failure now calls `stopSelf()` rather than leaving the service half-started
+- Added `POST_NOTIFICATIONS` for the Android 13+ foreground notification
 
 ### Continuous Texture
 

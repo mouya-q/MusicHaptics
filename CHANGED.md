@@ -1,7 +1,12 @@
 # Changes
-
 ## 5.4.1
-
+### Release Signing
+- Fixed the release build being signed with the CI runner's throwaway debug key, which produced a different signature for every build and made Android refuse to install over the previously installed app ("signatures do not match")
+- Release builds now use a fixed RSA-4096 signing key, delivered to CI through the repository secrets `MHX_KEYSTORE_B64`, `MHX_KEYSTORE_PASS` and `MHX_KEY_ALIAS`; the keystore is never committed to the repository
+- The CI workflow restores the keystore before Gradle runs and passes it to a dedicated `release` signing config
+- Builds without access to the secrets (fork pull requests, local builds) fall back to debug signing instead of failing
+- **Note:** the first package signed with the new key must be installed after uninstalling the existing app, because Android does not allow replacing an app whose signature differs. Every later release upgrades in place.
+### Fixes
 - Fixed the crash-on-launch regression introduced by the 5.4.0 foreground keepalive service
 
 ## 5.4.0

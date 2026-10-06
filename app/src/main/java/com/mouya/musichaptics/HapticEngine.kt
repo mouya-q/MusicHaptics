@@ -148,9 +148,9 @@ class HapticEngine(
             
             "VOCAL" to BeatShape(
                 force = BeatTiming(4.5f, 15L, 30L),
-                ampCtrl = BeatTiming(2.2f, 8L, 18L),
+                ampCtrl = BeatTiming(3.5f, 12L, 25L),
                 plain = BeatTiming(3.2f, 10L, 25L),
-                ampBase = 70f, attackFrac = 0.30f, sustainFrac = 0f,
+                ampBase = 120f, attackFrac = 0.30f, sustainFrac = 0f,
                 attackAmpFrac = 1.0f, decayAmpFrac = 0.40f
             ),
         )

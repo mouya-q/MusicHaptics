@@ -41,9 +41,11 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
 
         // Reference and ceiling for the combined level drive term. Keeping the
         // drive near unity lets a knob turn be felt without ever driving the
-        // whole waveform into the amplitude clamp.
-        const val DRIVE_REFERENCE = 2.60f
-        const val DRIVE_CEILING = 1.30f
+        // whole waveform into the amplitude clamp. A reference of 1.0 means
+        // the medium level (1.0) maps to drive 1.0, and the ceiling of 2.0
+        // gives a full 4x range from low (0.3) to ultra (2.0).
+        const val DRIVE_REFERENCE = 1.0f
+        const val DRIVE_CEILING = 2.0f
     }
 
     data class SynthConfig(

@@ -1,6 +1,29 @@
 # Changes
 
-Current source version: **5.4.2**
+Current source version: **5.4.3**
+
+## 5.4.3
+
+### UI Level Fix
+- Fixed the UI vibration level (low/medium/high/ultra) having no audible effect on the
+  native direct-drive path. The native scheduler computed `targetAmp` using only
+  `styleAmpScale * masterGain`, completely ignoring the user's amplitude setting. Now
+  `userAmplitude_` is read from the engine and multiplied into the target amplitude.
+- Fixed the drive reference normalisation crushing the UI level range. `DRIVE_REFERENCE`
+  was 2.60 and `DRIVE_CEILING` was 1.30, which mapped both low (0.3) and ultra (2.0) to
+  the same clamped drive value of 0.77. Now `DRIVE_REFERENCE` is 1.0 and `DRIVE_CEILING`
+  is 2.0, giving a full 4x range from low to ultra.
+
+### Event Diversity
+- Fixed SNARE onsets never triggering. The snare threshold was `0.50 * sqrt(floorRatio)`
+  clamped to [0.34, 0.68], which was too high for the actual low-mid band energy in
+  most music. Now `0.30 * sqrt(floorRatio)` clamped to [0.18, 0.42].
+- Fixed BODY onsets never triggering. The body threshold required `bodyStrength >= 0.35`
+  with a `dspFloor * 4.0f` offset, which was too sensitive. Now `dspFloor * 2.0f` with
+  a `bodyStrength >= 0.15` threshold and a wider output range up to 0.50.
+- Fixed VOCAL events being nearly inaudible. The `ampBase` was 70f and the `ampCtrl`
+  timing was 28.2ms total, producing a very short and quiet pulse. Now `ampBase` is
+  120f and the `ampCtrl` timing is 37ms, giving VOCAL events a clearly audible presence.
 
 ## 5.4.2
 

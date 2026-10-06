@@ -679,6 +679,7 @@ static void* scheduler_thread_func(void* arg) {
                 const float accentScaleUser = engine->getOutputAccentScale();
                 const float bassBoost = engine->getOutputBassBoost();
                 const float masterGain = engine->getOutputMasterGain();
+                const float userAmp = engine->getUserAmplitude();
                 const float attackScale = engine->getOutputAttackScale();
                 const float sharpness = engine->getOutputSharpness();
                 const float sustain = engine->getOutputSustainLevel();
@@ -689,7 +690,7 @@ static void* scheduler_thread_func(void* arg) {
 
                 beatAccent *= accentScaleUser;
                 if (onsetN > 0 && onsetFrames[0].kick > 0.0f) beatAccent *= bassBoost;
-                targetAmp = std::clamp((continuous + beatAccent) * styleAmpScale * masterGain, 0.0f, 255.0f);
+                targetAmp = std::clamp((continuous + beatAccent) * styleAmpScale * masterGain * userAmp, 0.0f, 255.0f);
 
                 const float alpha = (targetAmp > currentAmp) ? attackAlpha : releaseAlpha;
                 currentAmp += (targetAmp - currentAmp) * alpha;

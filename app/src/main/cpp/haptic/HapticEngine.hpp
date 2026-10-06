@@ -398,6 +398,7 @@ public:
     float getOutputSustainLevel() const { return outputSustainLevel_.load(std::memory_order_relaxed); }
     float getOutputLraF0() const { return outputLraF0_.load(std::memory_order_relaxed); }
     float getOutputLraQ() const { return outputLraQ_.load(std::memory_order_relaxed); }
+    float getUserAmplitude() const { return userAmplitude_.load(std::memory_order_relaxed); }
 
     void configureProfile(float dspFloor, float subMult, float kickMult, float snareMult,
                           float tickMult, float bodyMult, float refractoryScale) {
@@ -829,7 +830,7 @@ public:
             snareOnset = std::max({lowMidEnergy, lowMidFluxV, presFluxVal});
             snareOnset *= profileSnareMult_.load(std::memory_order_relaxed);
             const float floorRatio = std::clamp(profileDspFloor_.load(std::memory_order_relaxed) / 0.0040f, 0.55f, 2.00f);
-            const float snareThreshold = std::clamp(0.50f * std::sqrt(floorRatio), 0.34f, 0.68f);
+            const float snareThreshold = std::clamp(0.30f * std::sqrt(floorRatio), 0.18f, 0.42f);
             if (snareOnset < snareThreshold) snareOnset = 0.0f;  
             if (snareOnset > 0.0f) onsetRefractoryFrames_[1] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
         }
@@ -854,10 +855,10 @@ public:
         
         float bodyOnset = 0.0f;
         if (onsetRefractoryFrames_[3] == 0) {
-            const float rawBody = std::clamp((subRms - profileDspFloor_.load(std::memory_order_relaxed) * 4.0f) * 8.0f, 0.0f, 1.0f);
+            const float rawBody = std::clamp((subRms - profileDspFloor_.load(std::memory_order_relaxed) * 2.0f) * 12.0f, 0.0f, 1.0f);
             const float bodyStrength = rawBody * profileBodyMult_.load(std::memory_order_relaxed);
-            if (bodyStrength >= 0.35f) {
-                bodyOnset = std::clamp((bodyStrength - 0.35f) * 1.2f, 0.0f, 0.40f);
+            if (bodyStrength >= 0.15f) {
+                bodyOnset = std::clamp((bodyStrength - 0.15f) * 1.5f, 0.0f, 0.50f);
             }
             if (bodyOnset > 0.0f) onsetRefractoryFrames_[3] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
         }

@@ -4,34 +4,6 @@ import android.content.Context
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 object RootHapticDaemon {
     private const val TAG = "RootHapticDaemon"
     const val DAEMON_PORT = 27042

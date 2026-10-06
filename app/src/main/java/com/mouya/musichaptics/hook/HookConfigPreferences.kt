@@ -5,10 +5,6 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import com.mouya.musichaptics.BuildConfig
 
-
-
-
-
 internal class HookConfigPreferences(
     private val context: Context,
     private val targetPackage: String

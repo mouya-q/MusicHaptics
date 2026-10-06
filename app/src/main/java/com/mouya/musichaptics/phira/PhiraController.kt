@@ -10,20 +10,6 @@ import com.mouya.musichaptics.LogBroadcaster
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 class PhiraController(
     private val context: Context,
     private val engine: HapticEngine,

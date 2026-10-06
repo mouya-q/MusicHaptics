@@ -4,22 +4,6 @@ import android.os.SystemClock
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 class PhiraHapticScheduler(
     private val beats: List<PhiraHapticTimeline.Beat>,
     

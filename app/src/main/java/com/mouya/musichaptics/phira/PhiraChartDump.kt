@@ -4,19 +4,6 @@ import com.mouya.musichaptics.ActuatorProfile
 import com.mouya.musichaptics.DeviceProfile
 import java.io.File
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 object PhiraChartDump {
 
     

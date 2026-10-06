@@ -21,13 +21,6 @@
 
 #include "haptic/HapticEngine.hpp"
 
-
-
-
-
-
-
-
 static JavaVM* g_jvm = nullptr;
 static std::atomic<bool> g_scheduler_running{false};
 static pthread_t g_scheduler_thread{};
@@ -49,13 +42,8 @@ static std::atomic<int> g_direct_amplitude_fd{-1};
 static std::atomic<int> g_root_shell_fd{-1};
 static std::atomic<bool> g_use_root_shell{false};
 
-
-
-
 static std::atomic<bool> g_use_java_pipe{false};
 static std::atomic<jobject> g_java_pipe_bridge{nullptr};
-
-
 
 static std::atomic<int> g_udp_sock_fd{-1};       
 static std::atomic<bool> g_use_udp_haptic{false}; 
@@ -155,13 +143,6 @@ static bool send_haptic_udp(uint8_t amplitude, uint16_t durationMs, uint8_t flag
     return written == sizeof(packet);
 }
 
-
-
-
-
-
-
-
 bool init_direct_drive(const std::string& nodes) {
     if (g_direct_drive_fd.load() >= 0) {
         LOGI("[DD] already initialized, fd=%d", g_direct_drive_fd.load());
@@ -232,14 +213,6 @@ bool init_direct_drive(const std::string& nodes) {
     return false;
 }
 
-
-
-
-
-
-
-
-
 bool init_root_pipe(int pipe_fd, const std::string& enable_path, const std::string& amplitude_path) {
     if (g_use_root_shell.load() && g_root_shell_fd.load() >= 0) {
         LOGI("[DD] root pipe already initialized, fd=%d", g_root_shell_fd.load());
@@ -276,12 +249,6 @@ bool init_root_pipe(int pipe_fd, const std::string& enable_path, const std::stri
     LOGI("[DD] pipe_fd=%d", pipe_fd);
     return true;
 }
-
-
-
-
-
-
 
 bool init_direct_drive_from_fd(int enable_fd, int amplitude_fd, const std::string& enable_path, const std::string& amplitude_path) {
     if (g_direct_drive_fd.load() >= 0) {
@@ -320,18 +287,6 @@ bool init_direct_drive_from_fd(int enable_fd, int amplitude_fd, const std::strin
 
 static std::atomic<int> g_dd_tick_count{0};
 static std::atomic<bool> g_dd_mode_entered{false};
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -893,16 +848,6 @@ Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
     env->ReleasePrimitiveArrayCritical(outTelemetry, telemetry, 0);
 }
 
-
-
-
-
-
-
-
-
-
-
 JNIEXPORT void JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeClearHapticBuffer(
     JNIEnv* env, jobject thiz, jlong ptr) {
@@ -911,13 +856,6 @@ Java_com_mouya_musichaptics_NativeBridge_nativeClearHapticBuffer(
         engine->clearHapticBuffer();
     }
 }
-
-
-
-
-
-
-
 JNIEXPORT jboolean JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeStartScheduler(
     JNIEnv* env, jobject thiz, jlong ptr) {
@@ -964,9 +902,6 @@ Java_com_mouya_musichaptics_NativeBridge_nativeStopScheduler(
         env->DeleteGlobalRef(ref);
     }
 }
-
-
-
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     g_jvm = vm;
@@ -1039,10 +974,6 @@ Java_com_mouya_musichaptics_NativeBridge_nativeGetOnsetFrames(JNIEnv* env, jobje
     return count;
 }
 
-
-
-
-
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeSetDirectDriveFd(
     JNIEnv* env, jobject, jint enable_fd, jint amplitude_fd,
@@ -1059,11 +990,6 @@ Java_com_mouya_musichaptics_NativeBridge_nativeSetDirectDriveFd(
 
     return ok ? JNI_TRUE : JNI_FALSE;
 }
-
-
-
-
-
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeInitRootPipe(
@@ -1085,10 +1011,6 @@ Java_com_mouya_musichaptics_NativeBridge_nativeIsRootPipeAvailable(JNIEnv*, jobj
     return (g_use_root_shell.load(std::memory_order_acquire) &&
             g_root_shell_fd.load(std::memory_order_acquire) >= 0) ? JNI_TRUE : JNI_FALSE;
 }
-
-
-
-
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeInitUdpHaptic(JNIEnv*, jobject, jint port) {

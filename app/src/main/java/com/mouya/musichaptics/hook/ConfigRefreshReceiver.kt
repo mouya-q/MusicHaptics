@@ -7,14 +7,6 @@ import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
 
-
-
-
-
-
-
-
-
 internal class ConfigRefreshReceiver(
     private val onRefresh: () -> Unit
 ) : BroadcastReceiver() {

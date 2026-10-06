@@ -1,5 +1,7 @@
 # Changes
 
+Current source version: **5.4.2**
+
 ## 5.4.2
 
 ### Beat Dynamics

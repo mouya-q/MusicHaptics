@@ -2,22 +2,6 @@ package com.mouya.musichaptics.phira
 
 import com.mouya.musichaptics.DeviceProfile
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 object PhiraHapticTimeline {
 
     

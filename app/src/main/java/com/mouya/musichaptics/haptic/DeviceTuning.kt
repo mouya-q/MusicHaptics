@@ -2,14 +2,6 @@ package com.mouya.musichaptics.haptic
 
 import com.mouya.musichaptics.DeviceProfile
 
-
-
-
-
-
-
-
-
 data class DeviceTuning(
     val profileId: String = "DEFAULT",
     val impactGain: Float = 1.00f,

@@ -513,7 +513,7 @@ static std::atomic<jobject> g_bridge_ref{nullptr};
 static float g_prev_kick_onset = 0.0f;
 static float g_prev_snare_onset = 0.0f;
 static int64_t g_last_beat_trigger_ns = 0;
-static constexpr int64_t BEAT_REFRACTORY_NS = 55000000L;  
+static constexpr int64_t BEAT_REFRACTORY_NS = 30000000L;  
 
 struct SchedulerArgs {
     haptic::HapticEngine* engine;
@@ -605,27 +605,39 @@ static void* scheduler_thread_func(void* arg) {
                     eventType = 1; eventValue = kickVal;
                 } else if (snareVal >= vocalVal && snareVal >= bodyVal && snareVal > onsetThreshold) {
                     eventType = 2; eventValue = snareVal;
-                } else if (vocalVal >= bodyVal && vocalVal > onsetThreshold * 1.5f) {
+                } else if (vocalVal >= bodyVal && vocalVal > onsetThreshold * 0.8f) {
                     eventType = 3; eventValue = vocalVal;
-                } else if (bodyVal > onsetThreshold * 2.0f) {
+                } else if (bodyVal > onsetThreshold * 1.2f) {
                     eventType = 4; eventValue = bodyVal;
                 }
                 if (eventType != 0) {
                     const float accentScale = eventType == 1 ? 135.0f : eventType == 2 ? 100.0f : eventType == 3 ? 58.0f : 42.0f;
                     beatAccent = eventValue * accentScale;
 
-                    
-                    
-                    
-                    
+                    // Blend the onset transient with the continuous RMS energy
+                    // so that the same drum hit in a loud chorus produces a
+                    // stronger buzz than in a quiet verse. The onset value
+                    // alone only captures the momentary spike, not the overall
+                    // volume of the music at that point.
+                    haptic::SemanticHapticFrame semFr[1] = {};
+                    const int semN = engine->getSemanticFrames(semFr, 1);
+                    float rmsEnergy = 0.0f;
+                    if (semN > 0) {
+                        rmsEnergy = std::clamp(
+                            semFr[0].kickAmp * 0.45f
+                            + semFr[0].snareAmp * 0.25f
+                            + semFr[0].vocalAmp * 0.10f
+                            + semFr[0].bodyAmp * 0.35f, 0.0f, 1.0f);
+                    }
+
                     if (onBeatTrigger) {
-                        // Dynamic intensity: onset value (0.0-1.0) mapped directly to 0-255.
-                        // Event type provides a character scaling factor, but the onset
-                        // strength is the primary driver — quiet beats feel quiet, loud
-                        // beats feel loud. Apple-style energy-proportional output.
                         const float eventCharScale = eventType == 1 ? 1.0f : eventType == 2 ? 0.85f : eventType == 3 ? 0.60f : 0.50f;
+                        // Mix 55% onset transient + 45% continuous RMS so that
+                        // the overall music volume has a visible effect on the
+                        // haptic intensity, not just the transient sharpness.
+                        const float blended = eventValue * 0.55f + rmsEnergy * 0.45f;
                         const int intensity = static_cast<int>(std::clamp(
-                            eventValue * eventCharScale * 255.0f,
+                            blended * eventCharScale * 255.0f,
                             10.0f, 255.0f));
                         jstring eventName = eventType == 1 ? evKick : eventType == 2 ? evSnare : eventType == 3 ? evVocal : evBody;
                         if (eventName) {

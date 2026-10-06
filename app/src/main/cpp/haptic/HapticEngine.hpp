@@ -837,15 +837,14 @@ public:
         
         float vocalOnset = 0.0f;
         if (onsetRefractoryFrames_[2] == 0) {
-            float vocalEnergy = std::clamp((vocalBand - 0.05f) * 5.0f, 0.0f, 1.0f);
-            float vocalFluxV  = std::clamp(vocalFlux * 8.0f, 0.0f, 1.0f);
+            float vocalEnergy = std::clamp((vocalBand - 0.02f) * 6.0f, 0.0f, 1.0f);
+            float vocalFluxV  = std::clamp(vocalFlux * 10.0f, 0.0f, 1.0f);
             float vocalStrength = std::max(vocalEnergy, vocalFluxV);
-            
-            if (snareOnset > 0.3f) vocalStrength *= 0.2f;
-            
-            
-            if (vocalStrength >= 0.30f) {
-                vocalOnset = std::clamp((vocalStrength - 0.30f) * 0.18f, 0.0f, 0.10f);
+
+            if (snareOnset > 0.3f) vocalStrength *= 0.3f;
+
+            if (vocalStrength >= 0.12f) {
+                vocalOnset = std::clamp((vocalStrength - 0.12f) * 1.6f, 0.0f, 0.50f);
             }
             if (vocalOnset > 0.0f) onsetRefractoryFrames_[2] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
         }
@@ -855,10 +854,10 @@ public:
         
         float bodyOnset = 0.0f;
         if (onsetRefractoryFrames_[3] == 0) {
-            const float rawBody = std::clamp((subRms - profileDspFloor_.load(std::memory_order_relaxed) * 8.0f) * 6.0f, 0.0f, 1.0f);
+            const float rawBody = std::clamp((subRms - profileDspFloor_.load(std::memory_order_relaxed) * 4.0f) * 8.0f, 0.0f, 1.0f);
             const float bodyStrength = rawBody * profileBodyMult_.load(std::memory_order_relaxed);
-            if (bodyStrength >= 0.65f) {
-                bodyOnset = std::clamp((bodyStrength - 0.65f) * 0.14f, 0.0f, 0.05f);
+            if (bodyStrength >= 0.35f) {
+                bodyOnset = std::clamp((bodyStrength - 0.35f) * 1.2f, 0.0f, 0.40f);
             }
             if (bodyOnset > 0.0f) onsetRefractoryFrames_[3] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
         }

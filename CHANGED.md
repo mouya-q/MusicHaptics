@@ -19,6 +19,25 @@
   scaled by a small factor, so weak and strong hits produce measurably different
   lengths.
 
+### Event Diversity
+- Fixed VOCAL and BODY onsets never triggering. The onset detector capped vocal
+  output at 0.10 and body at 0.05, but the trigger thresholds required 0.12 and 0.16
+  respectively, making both event types mathematically impossible to fire. The caps
+  and thresholds are now aligned so that vocals and bass sustain produce haptic
+  output alongside kicks and snares.
+- Intensity now blends 55% onset transient with 45% continuous RMS energy, so the
+  same drum hit in a loud chorus produces a stronger buzz than in a quiet verse.
+  Previously the intensity only reflected the momentary onset spike, ignoring the
+  overall music volume.
+- Reduced the native scheduler refractory period from 55 ms to 30 ms and the
+  balanced style cooldown from 118 ms to 60 ms, allowing faster consecutive events
+  to produce individual haptic pulses instead of being suppressed.
+
+### Playback Stability
+- Increased the playback-paused detection timeout from 200 ms to 800 ms to stop
+  false pause triggers during brief audio gaps, which previously interrupted the
+  haptic output multiple times per song.
+
 ## 5.4.1
 ### Release Signing
 - Fixed the release build being signed with the CI runner's throwaway debug key, which produced a different signature for every build and made Android refuse to install over the previously installed app ("signatures do not match")

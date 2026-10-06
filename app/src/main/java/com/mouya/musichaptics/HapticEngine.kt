@@ -61,27 +61,27 @@ enum class StylePreset(
 ) {
     BALANCED(
         "balanced", "均衡", "Balanced",
-        118L, 1.00f, 0.32f, 1.00f, 55f, 650f, 0.08f, 1.00f
+        60L, 1.00f, 0.32f, 1.00f, 55f, 650f, 0.08f, 1.00f
     ),
     BASS(
         "bass", "低频", "Bass",
-        128L, 1.22f, 0.20f, 1.45f, 32f, 420f, 0.07f, 1.35f
+        70L, 1.22f, 0.20f, 1.45f, 32f, 420f, 0.07f, 1.35f
     ),
     CRISP(
         "crisp", "清脆", "Crisp",
-        98L, 0.92f, 0.62f, 0.55f, 90f, 1400f, 0.11f, 0.85f
+        45L, 0.92f, 0.62f, 0.55f, 90f, 1400f, 0.11f, 0.85f
     ),
     SOFT(
         "soft", "柔和", "Soft",
-        142L, 0.66f, 0.14f, 1.80f, 45f, 520f, 0.06f, 0.60f
+        80L, 0.66f, 0.14f, 1.80f, 45f, 520f, 0.06f, 0.60f
     ),
     IMMERSIVE(
         "immersive", "强劲", "Immersive",
-        108L, 1.35f, 0.42f, 0.78f, 38f, 900f, 0.05f, 1.55f
+        55L, 1.35f, 0.42f, 0.78f, 38f, 900f, 0.05f, 1.55f
     ),
     PURE(
         "pure", "纯净", "Pure",
-        260L, 1.12f, 0.74f, 0.42f, 120f, 2200f, 0.19f, 1.25f
+        120L, 1.12f, 0.74f, 0.42f, 120f, 2200f, 0.19f, 1.25f
     );
 
     companion object {
@@ -829,9 +829,9 @@ class HapticEngine(
         val lastPcmMs = pcmFallbackAtMs
         
         lifecycleScope.launch {
-            kotlinx.coroutines.delay(200)
-            if (pcmFallbackAtMs - lastPcmMs <= 50) { 
-                Log.i(TAG, "[PLAYBACK TRULY PAUSED] No PCM received for 200ms. Forcing immediate haptic decay")
+            kotlinx.coroutines.delay(800)
+            if (pcmFallbackAtMs - lastPcmMs <= 50) {
+                Log.i(TAG, "[PLAYBACK TRULY PAUSED] No PCM received for 800ms. Forcing immediate haptic decay")
                 LogBroadcaster.sendLog(context, "[PLAYBACK TRULY PAUSED] Forcing immediate haptic decay")
                 hapticPaused = true
                 pcmFallbackAtMs = 0L

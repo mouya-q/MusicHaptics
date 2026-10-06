@@ -1,5 +1,12 @@
 # MusicHapticsX
 
+[![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)](https://www.android.com/)
+[![LSPosed](https://img.shields.io/badge/LSPosed-Module-6F42C1)](https://github.com/LSPosed/LSPosed)
+[![Kotlin](https://img.shields.io/badge/Kotlin-2.4.20-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/)
+[![C++](https://img.shields.io/badge/Native-C%2B%2B-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org/)
+[![DSP](https://img.shields.io/badge/Audio-DSP-111827)](#音频分析链路)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 LSPosed 音乐触觉模块。把目标应用的 PCM 音频送入轻量 Native DSP，识别瞬态、频段和节奏事件，再根据执行器特性合成为短促、可控的触觉反馈。
 
 MusicHapticsX 让真正有意义的瞬间落在对的位置——不是把音乐“变成震动”，而是把瞬态、身体感与微细纹理重新编排成触觉。

@@ -1,4 +1,24 @@
 # Changes
+
+## 5.4.2
+
+### Beat Dynamics
+- Fixed every beat firing at an identical amplitude. The peak formula multiplied the
+  onset value by level, bass boost, impact gain, style scale and master gain, which
+  pushed the result far past 255 before the clamp, so the clamp flattened all beats
+  to the same peak regardless of how hard the hit was.
+- Fixed every beat having an identical duration. Segment lengths were rounded to a
+  16.7 ms grid derived from a fixed 60 Hz synthesis rate, which is longer than a
+  typical drum body, so all three segments collapsed onto the same value.
+- The onset band used by percussion events is now expanded onto the full amplitude
+  range, so a light hi-hat and a hard kick are no longer mapped to the same level.
+- The combined level and style multipliers are now normalised to a single drive term
+  with a bounded ceiling, so user gain still has an audible effect without driving the
+  waveform into the amplitude clamp.
+- Beat duration is now mapped onto an explicit intensity window instead of being
+  scaled by a small factor, so weak and strong hits produce measurably different
+  lengths.
+
 ## 5.4.1
 ### Release Signing
 - Fixed the release build being signed with the CI runner's throwaway debug key, which produced a different signature for every build and made Android refuse to install over the previously installed app ("signatures do not match")

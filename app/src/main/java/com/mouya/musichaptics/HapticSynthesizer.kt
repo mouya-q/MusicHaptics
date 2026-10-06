@@ -21,6 +21,29 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
         const val THERMAL_CRIT = 90f
         const val THERMAL_RTH = 25f
         const val THERMAL_CTH = 1.2f
+// The onset detector reports percussion energy inside a much narrower
+        // band than 0..255, so mapping raw intensity straight onto 0..255
+        // leaves most of the actuator unused. These bounds expand the useful
+        // band onto the full range. The floor matches the lowest style onset
+        // threshold so that no beat falls into an inaudible dead zone.
+        const val ONSET_FLOOR = 0.08f
+        const val ONSET_CEIL = 0.70f
+        const val ONSET_CURVE = 0.80f
+
+        // Segment lengths are quantised to a grid derived from the actuator, not
+        // from a fixed synthesis rate. A 60 Hz grid gives a 16.7 ms quantum,
+        // which is longer than a typical drum body, so every segment rounded up
+        // to the same value and all beats came out identical. Deriving the
+        // quantum from the actuator period keeps it a few milliseconds wide.
+        const val TIMING_QUANTUM_MIN_MS = 2f
+        const val TIMING_QUANTUM_MAX_MS = 6f
+        const val TIMING_QUANTUM_PERIOD_DIVISOR = 6f
+
+        // Reference and ceiling for the combined level drive term. Keeping the
+        // drive near unity lets a knob turn be felt without ever driving the
+        // whole waveform into the amplitude clamp.
+        const val DRIVE_REFERENCE = 2.60f
+        const val DRIVE_CEILING = 1.30f
     }
 
     data class SynthConfig(
@@ -103,18 +126,39 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
         }
         val sharp = sharpness.coerceIn(0.05f, 1f)
         val resonanceScale = sqrt((LRA_F0 / config.lraF0).coerceIn(0.6f, 1.7f))
-        // Dynamic peak: intensity (0-1) drives the amplitude, levelScale is user gain,
-        // eventGain and accentScale shape the character without crushing dynamic range.
-        // Using pow(0.7) for wider dynamic range (gentler compression than 0.78).
-        val peak = (intensity.pow(0.7f) * levelScale * eventGain * accentScale * ampScale * config.masterGain * thermalInput * 255f).coerceIn(5f, 255f)
+
+        // Expand the narrow onset band onto the full amplitude range so that a
+        // quiet hi-hat and a hard kick land at clearly different levels.
+        val onsetNorm = ((intensity - ONSET_FLOOR) / (ONSET_CEIL - ONSET_FLOOR))
+            .coerceIn(0f, 1f)
+        val shaped = onsetNorm.pow(ONSET_CURVE)
+
+        // The multipliers below only shape character. Normalising them by the
+        // drive reference keeps the product near unity, so the amplitude is
+        // driven by intensity instead of being crushed into the 255 clamp.
+        val character = (levelScale * eventGain * accentScale * ampScale
+            * config.masterGain * thermalInput).coerceAtLeast(0.01f)
+        val drive = (character / DRIVE_REFERENCE)
+            .coerceIn(1f / DRIVE_CEILING, DRIVE_CEILING)
+
+        val peak = (shaped * drive * 255f).coerceIn(5f, 255f)
         val qTail = (config.lraQ / profile.actuator.qFactor.coerceAtLeast(5f)).coerceIn(0.65f, 1.65f)
         val attackSource = if (continuous) config.attackTauContinuous else config.attackTauImpact
         val decaySource = if (continuous) config.decayTauContinuous else config.decayTauImpact
         val attackMs = (attackSource * 1000f * profile.actuator.riseScale / resonanceScale).coerceIn(1f, durationMs * 0.32f)
         val decayMs = (decaySource * 1000f * profile.actuator.fallScale * qTail * resonanceScale / sharp.pow(0.35f)).coerceIn(4f, durationMs * 0.62f)
         val releaseMs = (config.releaseTau * 1000f).coerceIn(4f, durationMs * 0.45f)
-        val quantum = (1000f / config.synthesisRateHz).coerceAtLeast(1f)
-        fun snap(v: Float): Long = (v / quantum).toInt().coerceAtLeast(1).let { (it * quantum).toLong() }
+        // Quantise to a grid derived from the actuator period. The actuator here
+        // runs at 200 Hz, so a period of 5 ms divided by six gives a ~0.83 ms
+        // grid clamped to 2 ms. The old fixed rate produced a 16.7 ms grid,
+        // which rounded every segment to the same value.
+        val periodMs = 1000f / config.lraF0.coerceAtLeast(50f)
+        val quantum = (periodMs / TIMING_QUANTUM_PERIOD_DIVISOR)
+            .coerceIn(TIMING_QUANTUM_MIN_MS, TIMING_QUANTUM_MAX_MS)
+        fun snap(v: Float): Long {
+            val n = (v / quantum).toInt().coerceAtLeast(1)
+            return (n * quantum).toLong()
+        }
 
         val attack = snap(attackMs)
         val tail = snap(decayMs + releaseMs)

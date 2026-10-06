@@ -527,10 +527,14 @@ class HapticEngine(
         // Those multipliers are applied inside sculptImpact so they shape the envelope
         // without crushing the dynamic range of the intensity signal.
         val level = activeOutputLevel.coerceIn(0.3f, 2.0f)
-        // Duration scales with intensity: strong beats are slightly longer (more sustain),
-        // weak beats are shorter and crisper. Apple-style: energy-proportional duration.
-        val intensityFactor = 0.35f + 0.65f * normalizedIntensity
-        val duration = (plan.totalDurationMs * intensityFactor * style.attackScale.coerceIn(0.45f, 1.8f)).toLong().coerceIn(6L, 80L)
+        // Duration is mapped from the plan range onto an explicit intensity
+        // window instead of being scaled by a small factor. Scaling by
+        // 0.35 + 0.65 * intensity only spans 0.78..1.0, which kept every beat
+        // in the middle of the clamp, so all durations came out identical.
+        val styleTime = style.attackScale.coerceIn(0.45f, 1.8f)
+        val planFloor = plan.totalDurationMs.coerceIn(8L, 40L)
+        val duration = (planFloor * (0.48f + 0.92f * normalizedIntensity) * styleTime)
+            .toLong().coerceIn(6L, 80L)
         val shaped = hapticSynthesizer.sculptImpact(
             event = plan.event,
             intensity = normalizedIntensity,

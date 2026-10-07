@@ -5,7 +5,9 @@ import android.util.Log
 import java.nio.ByteBuffer
 
 class NativeBridge {
-    private var nativePtr: Long = 0
+    // P1: nativePtr visibility + mutex for hook/engine/release races.
+    @Volatile private var nativePtr: Long = 0
+    private val ptrLock = Any()
 
     companion object {
         @Volatile private var libraryPreloaded = false
@@ -76,11 +78,14 @@ class NativeBridge {
     }
 
     val isLoaded: Boolean
-        get() = nativePtr != 0L
+        get() = snapshotPtr() != 0L
+
+    private fun snapshotPtr(): Long = synchronized(ptrLock) { nativePtr }
 
     fun configure(sampleRate: Float, lowCut: Float, highCut: Float, amplitude: Float, presetId: Int) {
-        if (nativePtr != 0L) {
-            nativeConfigure(nativePtr, sampleRate, lowCut, highCut, amplitude, presetId)
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
+            nativeConfigure(_ptr, sampleRate, lowCut, highCut, amplitude, presetId)
         }
     }
 
@@ -104,9 +109,10 @@ class NativeBridge {
         lraF0: Float,
         lraQ: Float
     ) {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             nativeConfigureOutput(
-                nativePtr, styleAmpScale, sharpness, attackScale, accentScale, bassBoost,
+                _ptr, styleAmpScale, sharpness, attackScale, accentScale, bassBoost,
                 impactGain, continuousGain, textureGain, masterGain, onsetThreshold,
                 attackImpactMs, decayImpactMs, attackContinuousMs, decayContinuousMs,
                 releaseMs, sustainLevel, lraF0, lraQ
@@ -115,10 +121,11 @@ class NativeBridge {
     }
 
     fun configureProfile(profile: DeviceProfile) {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
                 nativeConfigureProfile(
-                    nativePtr,
+                    _ptr,
                     profile.dspEnergyFloor,
                     profile.dspSubMult,
                     profile.dspKickMult,
@@ -134,14 +141,15 @@ class NativeBridge {
     }
 
     fun processAudioDirect(buffer: ByteBuffer, size: Int, outTelemetry: FloatArray) {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
 
                 if (!buffer.isDirect || size <= 0 || size > buffer.capacity()) {
                     Log.e("NativeBridge", "Invalid buffer params: buffer=${buffer.isDirect} size=$size capacity=${buffer.capacity()}")
                     return
                 }
-                nativeProcessAudioDirect(nativePtr, buffer, size, outTelemetry)
+                nativeProcessAudioDirect(_ptr, buffer, size, outTelemetry)
             } catch (e: Exception) {
                 Log.e("NativeBridge", "processAudioDirect crashed: ${e.message}", e)
 
@@ -150,9 +158,10 @@ class NativeBridge {
     }
 
     fun getSemanticFrames(outFrames: FloatArray, maxFrames: Int): Int {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
-                return nativeGetSemanticFrames(nativePtr, outFrames, maxFrames)
+                return nativeGetSemanticFrames(_ptr, outFrames, maxFrames)
             } catch (e: Exception) {
                 Log.e("NativeBridge", "getSemanticFrames failed: ${e.message}")
             }
@@ -161,9 +170,10 @@ class NativeBridge {
     }
 
     fun getOnsetFrames(outBuffer: FloatArray, maxFrames: Int): Int {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
-                return nativeGetOnsetFrames(nativePtr, outBuffer, maxFrames)
+                return nativeGetOnsetFrames(_ptr, outBuffer, maxFrames)
             } catch (e: Exception) {
                 Log.e("NativeBridge", "getOnsetFrames failed: ${e.message}")
             }
@@ -172,7 +182,8 @@ class NativeBridge {
     }
 
     fun setDirectDriveNodes(nodes: String) {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
                 val ok = nativeSetDirectDriveNodes(nodes)
                 Log.i("NativeBridge", "setDirectDriveNodes: result=$ok nodes=$nodes")
@@ -183,7 +194,8 @@ class NativeBridge {
     }
 
     fun setDirectDriveFd(enableFd: Int, amplitudeFd: Int, enablePath: String, amplitudePath: String): Boolean {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
                 val ok = nativeSetDirectDriveFd(enableFd, amplitudeFd, enablePath, amplitudePath)
                 Log.i("NativeBridge", "setDirectDriveFd: result=$ok enableFd=$enableFd ampFd=$amplitudeFd")
@@ -196,7 +208,8 @@ class NativeBridge {
     }
 
     fun triggerDirectDriveStrike(durationMs: Int, amplitude: Int): Boolean {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
                 return nativeTriggerDirectDriveStrike(durationMs, amplitude)
             } catch (e: Exception) {
@@ -207,7 +220,8 @@ class NativeBridge {
     }
 
     fun isDirectDriveAvailable(): Boolean {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
                 return nativeIsDirectDriveAvailable()
             } catch (e: Exception) {
@@ -218,7 +232,8 @@ class NativeBridge {
     }
 
     fun initRootPipe(pipeFd: Int, enablePath: String, amplitudePath: String): Boolean {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
                 val ok = nativeInitRootPipe(pipeFd, enablePath, amplitudePath)
                 Log.i("NativeBridge", "initRootPipe: result=$ok pipeFd=$pipeFd enablePath=$enablePath ampPath=$amplitudePath")
@@ -231,7 +246,8 @@ class NativeBridge {
     }
 
     fun isRootPipeAvailable(): Boolean {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
                 return nativeIsRootPipeAvailable()
             } catch (e: Exception) {
@@ -248,7 +264,8 @@ class NativeBridge {
     }
 
     fun initUdpHapticFromFd(fd: Int, port: Int): Boolean {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
                 val ok = nativeInitUdpHapticFromFd(fd, port)
                 Log.i("NativeBridge", "initUdpHapticFromFd: fd=$fd port=$port result=$ok")
@@ -261,7 +278,8 @@ class NativeBridge {
     }
 
     fun testUdpHaptic(): Boolean {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
                 return nativeTestUdpHaptic()
             } catch (e: Exception) {
@@ -272,7 +290,8 @@ class NativeBridge {
     }
 
     fun isUdpHapticReady(): Boolean {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
                 return nativeIsUdpHapticReady()
             } catch (e: Exception) {
@@ -283,7 +302,8 @@ class NativeBridge {
     }
 
     fun shutdownUdpHaptic() {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
                 nativeShutdownUdpHaptic()
             } catch (e: Exception) {
@@ -293,9 +313,10 @@ class NativeBridge {
     }
 
     fun clearHapticBuffer() {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
-                nativeClearHapticBuffer(nativePtr)
+                nativeClearHapticBuffer(_ptr)
             } catch (e: Exception) {
                 Log.e("NativeBridge", "clearHapticBuffer failed: ${e.message}")
             }
@@ -303,13 +324,20 @@ class NativeBridge {
     }
 
     fun release() {
-        if (nativePtr != 0L) {
+        val ptr: Long
+        synchronized(ptrLock) {
+            ptr = nativePtr
+            nativePtr = 0L
+        }
+        // P1: Clear callback before destroying engine to avoid post-destroy callback.
+        beatTriggerCallback = null
+        _rootPipeCb = null
+        if (ptr != 0L) {
             try {
-                nativeDestroyEngine(nativePtr)
+                nativeDestroyEngine(ptr)
             } catch (e: Exception) {
                 Log.e("NativeBridge", "nativeDestroyEngine failed: ${e.message}")
             }
-            nativePtr = 0L
         }
     }
 
@@ -354,7 +382,8 @@ class NativeBridge {
 
     fun enableRootPipe(cb: (Int, Int) -> Unit) {
         _rootPipeCb = cb
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
                 val ok = nativeEnableJavaPipe()
                 Log.i("NativeBridge", "nativeEnableJavaPipe: $ok")
@@ -379,9 +408,10 @@ class NativeBridge {
     }
 
     fun startScheduler(): Boolean {
-        if (nativePtr != 0L) {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
             try {
-                return nativeStartScheduler(nativePtr)
+                return nativeStartScheduler(_ptr)
             } catch (e: Throwable) {
                 Log.e("NativeBridge", "startScheduler failed: ${e.javaClass.simpleName}: ${e.message}")
             }

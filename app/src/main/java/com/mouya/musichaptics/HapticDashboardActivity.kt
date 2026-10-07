@@ -65,6 +65,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import com.mouya.musichaptics.ui.ConsoleLogState
+import com.mouya.musichaptics.hook.ConfigRefreshReceiver
 import com.mouya.musichaptics.ui.rememberConsoleLogState
 import com.mouya.musichaptics.ui.IOSConsole
 import kotlinx.coroutines.CancellationException
@@ -550,10 +551,7 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
              putInt("selected_preset", selectedPreset.ordinal)
              putFloat("haptic_amplitude", customAmplitude)
              putFloat("haptic_bass_boost", customBassBoost)
-             
-            
-            putString("style_preset", stylePreset.key)
-            
+             putString("style_preset", stylePreset.key)
              putFloat("synth_lra_f0", synthLraF0)
              putFloat("synth_lra_q", synthLraQ)
              putInt("synth_rate_hz", synthRateHz)
@@ -571,12 +569,20 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
              putFloat("synth_continuous_gain", synthContinuousGain)
              putFloat("synth_texture_gain", synthTextureGain)
              putFloat("synth_master_gain", synthMasterGain)
-          }.apply()
+         }.apply()
 
-          context.sendBroadcast(
-              Intent("com.mouya.musichaptics.ACTION_REFRESH_CONFIG").setPackage(null)
-          )
-      }
+         // P1: Deliver to whitelisted packages only; no global broadcast.
+         runCatching {
+             val wm = WhitelistManager()
+             val snap = wm.snapshot()
+             val targets = if (snap.mode == WhitelistManager.MODE_ALL) {
+                 LsposedScopeState.packages.value?.filter { it != context.packageName }.orEmpty()
+             } else {
+                 snap.packages.toList()
+             }
+             ConfigRefreshReceiver.sendRefresh(context, targets)
+         }.onFailure { Log.w("HapticDashboard", "refresh broadcast failed", it) }
+     }
 
     CompositionLocalProvider(LocalLiquidGlassBackdrop provides liquidGlassBackdrop) {
     Box(modifier = Modifier
@@ -1012,7 +1018,9 @@ private fun WhitelistPanel(
     var boost by remember(packageName) { mutableStateOf(scopedPrefs.getFloat("haptic_bass_boost", global.getFloat("haptic_bass_boost", 1.6f))) }
     LaunchedEffect(enabled, amp, boost) {
         scopedPrefs.edit().putBoolean("master_switch", enabled).putFloat("haptic_amplitude", amp).putFloat("haptic_bass_boost", boost).apply()
-        context.sendBroadcast(Intent("com.mouya.musichaptics.ACTION_REFRESH_CONFIG"))
+        // P1: Deliver to current package only; no global broadcast.
+        runCatching { ConfigRefreshReceiver.sendRefresh(context, listOf(packageName)) }
+            .onFailure { Log.w("HapticDashboard", "scoped refresh failed", it) }
     }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp, 24.dp, 16.dp, 104.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         IconButton(onClick = onBack, modifier = Modifier.size(44.dp)) {

@@ -350,7 +350,7 @@ class VibrateProxy(private val context: Context) {
             playerCls.getMethod("start").invoke(player)
             return true
         } catch (t: Throwable) {
-            if (verboseLogging) Log.d(TAG, "DynamicEffect unavailable: ${t.message}")
+            Log.w(TAG, "DynamicEffect unavailable: ${t.javaClass.simpleName}: ${t.message}")
             return false
         }
     }

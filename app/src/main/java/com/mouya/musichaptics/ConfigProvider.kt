@@ -23,9 +23,22 @@ class ConfigProvider : ContentProvider() {
             "hardware_root_verified", "hardware_profile_id", "hardware_root_fingerprint",
             "direct_drive_nodes"
         )
+        // P0: hardware paths and fingerprints must never leave the module process.
+        // Only the module UID may read them; hooked apps get audio/haptic keys.
+        private val SENSITIVE_KEYS = setOf(
+            "hardware_root_verified", "hardware_profile_id", "hardware_root_fingerprint",
+            "direct_drive_nodes"
+        )
     }
 
     override fun onCreate(): Boolean = true
+
+    private fun isModuleCaller(caller: String?): Boolean {
+        if (caller == null) return false
+        return try {
+            caller == context?.packageName || caller == BuildConfig.APPLICATION_ID
+        } catch (_: Exception) { false }
+    }
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
         val ctx = context ?: return null
@@ -35,27 +48,37 @@ class ConfigProvider : ContentProvider() {
         val packageOk = targetPackage.isNotBlank() && PACKAGE_RE.matches(targetPackage)
         if (!packageOk) return null
 
-        
-        
-        
-        
-        
-        
-        val callerMismatch = caller != null && caller != ownPackage && caller != targetPackage
-        if (callerMismatch && !WhitelistManager().isPackageAllowed(caller)) return null
+        // P0: unknown caller (null) must not read config; previously it fell through.
+        if (caller == null) return null
+        val moduleCaller = isModuleCaller(caller)
+        // Non-module callers must be the target app itself AND whitelisted.
+        if (!moduleCaller) {
+            if (caller != targetPackage) return null
+            if (!WhitelistManager().isPackageAllowed(caller)) return null
+        }
 
         val globalPrefs = ctx.getSharedPreferences("haptics_config", Context.MODE_PRIVATE)
         return when (method) {
             "get_pref" -> {
                 val key = arg ?: return null
                 if (key !in SAFE_KEYS || !globalPrefs.contains(key)) return null
+                // P0: sensitive keys never leave the module process.
+                if (key in SENSITIVE_KEYS && !moduleCaller) return null
                 bundleOfValue(key, globalPrefs.all[key])
             }
             "get_prefs" -> {
                 val scoped = ctx.getSharedPreferences("scoped_haptics_$targetPackage", Context.MODE_PRIVATE).all
                 val bundle = Bundle()
-                for ((key, value) in globalPrefs.all) if (key in SAFE_KEYS) put(bundle, key, value)
-                for ((key, value) in scoped) if (key in SAFE_KEYS) put(bundle, key, value)
+                for ((key, value) in globalPrefs.all) {
+                    if (key !in SAFE_KEYS) continue
+                    if (key in SENSITIVE_KEYS && !moduleCaller) continue
+                    put(bundle, key, value)
+                }
+                for ((key, value) in scoped) {
+                    if (key !in SAFE_KEYS) continue
+                    if (key in SENSITIVE_KEYS && !moduleCaller) continue
+                    put(bundle, key, value)
+                }
                 bundle.takeUnless { it.isEmpty }
             }
             else -> null

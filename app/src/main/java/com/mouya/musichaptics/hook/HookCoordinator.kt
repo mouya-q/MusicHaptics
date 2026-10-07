@@ -33,6 +33,7 @@ class HookCoordinator(
         private const val VISUALIZER_DELAY_MS = 1800L
         private const val PRIORITY_WINDOW_MS = 650L
         private const val MAX_WRITE_LOG_INTERVAL_MS = 5000L
+        private const val RELEASE_PAUSE_MS = 800L
 
         private val installedClassLoaders = Collections.synchronizedMap(WeakHashMap<ClassLoader, Boolean>())
     }
@@ -253,25 +254,42 @@ class HookCoordinator(
                     lastAudioWriteAtMs = now
 
                     if (!packageAllowed) return
-                    val target = engineOrNull() ?: return
-                    target.markHookAudioArrival(now)
-                    when (val input = param.args.firstOrNull()) {
-                        is ShortArray -> {
-                            val offset = (param.args.getOrNull(1) as? Int) ?: 0
-                            val samples = result.coerceAtMost((input.size - offset).coerceAtLeast(0))
-                            target.processPcm16FromHook(input, offset, samples, state.channels)
-                        }
-                        is FloatArray -> {
-                            val offset = (param.args.getOrNull(1) as? Int) ?: 0
-                            target.processPcmFloatFromHook(input, offset, result, state.channels)
-                        }
-                        is ByteArray -> {
-                            val offset = (param.args.getOrNull(1) as? Int) ?: 0
-                            target.processPcmBytesFromHook(input, offset, result, state.channels)
-                        }
-                        is ByteBuffer -> {
-                            val start = state.initialByteBufferPosition.takeIf { it >= 0 } ?: 0
-                            target.processPcmBufferFromHook(input, start, result, state.channels)
+                    // P1: never run DSP on the host audio thread. Snapshot args
+                    // and hand off to the Hook HandlerThread; AudioIngress queues.
+                    val snapshot: Any? = when (val input = param.args.firstOrNull()) {
+                        is ShortArray -> input.clone()
+                        is FloatArray -> input.clone()
+                        is ByteArray -> input.clone()
+                        is ByteBuffer -> try {
+                            // Copy readable bytes; direct ByteBuffers may not expose array().
+                            val dup = input.duplicate()
+                            val bytes = ByteArray(dup.remaining())
+                            dup.get(bytes)
+                            bytes
+                        } catch (_: Exception) { null }
+                        else -> null
+                    } ?: return
+                    val offsetArg = (param.args.getOrNull(1) as? Int) ?: 0
+                    val startPos = state.initialByteBufferPosition.takeIf { it >= 0 } ?: 0
+                    handler.post {
+                        val target = engineOrNull() ?: return@post
+                        target.markHookAudioArrival(now)
+                        when (snapshot) {
+                            is ShortArray -> {
+                                val samples = result.coerceAtMost((snapshot.size - offsetArg).coerceAtLeast(0))
+                                target.processPcm16FromHook(snapshot, offsetArg, samples, state.channels)
+                            }
+                            is FloatArray -> {
+                                target.processPcmFloatFromHook(snapshot, offsetArg, result, state.channels)
+                            }
+                            is ByteArray -> {
+                                // ByteBuffer path was flattened to ByteArray above.
+                                if (param.args.firstOrNull() is ByteBuffer) {
+                                    target.processPcmBytesFromHook(snapshot, 0, snapshot.size.coerceAtMost(result), state.channels)
+                                } else {
+                                    target.processPcmBytesFromHook(snapshot, offsetArg, result, state.channels)
+                                }
+                            }
                         }
                     }
 
@@ -312,7 +330,7 @@ class HookCoordinator(
         hook("release") { track, _ ->
             tracks.remove(track)
             handler.post {
-                if (engineOrNull() != null && SystemClock.elapsedRealtime() - lastAudioWriteAtMs > 500L) {
+                if (engineOrNull() != null && SystemClock.elapsedRealtime() - lastAudioWriteAtMs > RELEASE_PAUSE_MS) {
                     engineOrNull()?.onPlaybackPaused()
                 }
             }

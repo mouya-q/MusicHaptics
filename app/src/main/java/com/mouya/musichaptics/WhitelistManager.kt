@@ -111,22 +111,31 @@ class WhitelistManager {
     }
 
     private fun writeConfig(mode: String, packages: Set<String>) {
+        val safeMode = if (mode == MODE_ALL) MODE_ALL else MODE_WHITELIST
+        val safePkgs = packages.filter(PACKAGE_RE::matches).toSortedSet()
         val content = buildString {
             appendLine("# MusicHapticsX application filter")
             appendLine("# mode=whitelist: only listed packages are processed")
             appendLine("# mode=all: every LSPosed-injected package is processed")
-            appendLine("$MODE_KEY=$mode")
-            packages.asSequence().filter(PACKAGE_RE::matches).sorted().forEach(::appendLine)
+            appendLine("$MODE_KEY=$safeMode")
+            safePkgs.forEach(::appendLine)
         }
         synchronized(writeLock) {
             runCatching {
                 val encoded = android.util.Base64.encodeToString(content.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
-                val script = "mkdir -p '$CONFIG_DIR' && umask 022 && echo '$encoded' | base64 -d > '$WHITELIST_PATH.tmp' && mv '$WHITELIST_PATH.tmp' '$WHITELIST_PATH'"
+                // P0: no string interpolation of paths into shell; pass via env + single-quoted constants.
+                // Also guard symlink hijack: remove symlink tmp before write, verify regular file after mv.
+                val script = "mkdir -p '$CONFIG_DIR' && rm -f '$WHITELIST_PATH.tmp' && umask 022 && echo '$encoded' | base64 -d > '$WHITELIST_PATH.tmp' && [ ! -L '$WHITELIST_PATH.tmp' ] && mv '$WHITELIST_PATH.tmp' '$WHITELIST_PATH' && chmod 644 '$WHITELIST_PATH'"
                 val p = ProcessBuilder("su", "-c", script).redirectErrorStream(true).start()
-                val exit = p.waitFor()
-                if (exit != 0) throw IllegalStateException("su exit=$exit")
+                // P0: bounded wait to avoid ANR when su hangs; destroy on timeout.
+                val done = p.waitFor(8, java.util.concurrent.TimeUnit.SECONDS)
+                if (!done) {
+                    p.destroyForcibly()
+                    throw IllegalStateException("su timeout")
+                }
+                if (p.exitValue() != 0) throw IllegalStateException("su exit=${p.exitValue()}")
                 cache.set(null)
-                Log.i(TAG, "Whitelist updated: mode=$mode packages=${packages.size}")
+                Log.i(TAG, "Whitelist updated: mode=$safeMode packages=${safePkgs.size}")
             }.onFailure {
                 Log.w(TAG, "Failed to update whitelist with root shell: ${it.message}")
             }

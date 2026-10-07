@@ -138,12 +138,14 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
         // The multipliers below only shape character. Normalising them by the
         // drive reference keeps the product near unity, so the amplitude is
         // driven by intensity instead of being crushed into the 255 clamp.
-        val character = (levelScale * eventGain * accentScale * ampScale
+        // levelScale is applied separately to the final peak so that the UI
+        // level (low/medium/high/ultra) has a direct, audible effect.
+        val character = (eventGain * accentScale * ampScale
             * config.masterGain * thermalInput).coerceAtLeast(0.01f)
         val drive = (character / DRIVE_REFERENCE)
             .coerceIn(1f / DRIVE_CEILING, DRIVE_CEILING)
 
-        val peak = (shaped * drive * 255f).coerceIn(5f, 255f)
+        val peak = (shaped * drive * levelScale * 255f).coerceIn(5f, 255f)
         val qTail = (config.lraQ / profile.actuator.qFactor.coerceAtLeast(5f)).coerceIn(0.65f, 1.65f)
         val attackSource = if (continuous) config.attackTauContinuous else config.attackTauImpact
         val decaySource = if (continuous) config.decayTauContinuous else config.decayTauImpact

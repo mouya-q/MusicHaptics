@@ -14,7 +14,10 @@ class TrackRegistry {
         @Volatile var initialByteBufferPosition: Int = -1
     )
 
-    private val states = ConcurrentHashMap<AudioTrack, TrackState>()
+    // P1: AudioTrack must not be held strongly, otherwise every player
+    // instance leaks until process death. Weak keys + synchronized access.
+    private val states: MutableMap<AudioTrack, TrackState> =
+        java.util.Collections.synchronizedMap(java.util.WeakHashMap<AudioTrack, TrackState>())
 
     fun register(track: AudioTrack): TrackState {
         val state = TrackState(

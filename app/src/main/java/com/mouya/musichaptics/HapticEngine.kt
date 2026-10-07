@@ -324,47 +324,60 @@ class HapticEngine(
             val socket = DatagramSocket()
             socket.connect(java.net.InetAddress.getByName("127.0.0.1"), RootHapticDaemon.DAEMON_PORT)
 
-            
-            
-            var owner: Any? = socket
-            var impl: Any? = null
-            var c: Class<*>? = socket.javaClass
-            while (c != null && impl == null) {
-                try {
-                    val f = c.getDeclaredField("impl")
-                    f.isAccessible = true
-                    impl = f.get(socket)
-                } catch (_: NoSuchFieldException) { c = c.superclass }
-            }
-            if (impl == null) throw IllegalStateException("DatagramSocket impl unavailable")
-
-            var fdObj: java.io.FileDescriptor? = null
-            c = impl.javaClass
-            while (c != null && fdObj == null) {
-                for (name in listOf("fd", "fileDescriptor")) {
-                    try {
-                        val f = c.getDeclaredField(name)
-                        f.isAccessible = true
-                        fdObj = f.get(impl) as? java.io.FileDescriptor
-                        if (fdObj != null) break
-                    } catch (_: NoSuchFieldException) { }
+            // P1: Prefer public API (API 31+); reflection is legacy fallback only.
+            // Reflection is legacy fallback only with try/catch; failure degrades only.
+            var parcel: ParcelFileDescriptor? = null
+            var rawFd = -1
+            var nativeFd = -1
+            runCatching {
+                if (android.os.Build.VERSION.SDK_INT >= 31) {
+                    parcel = ParcelFileDescriptor.fromDatagramSocket(socket)
+                    rawFd = parcel!!.fd
+                } else {
+                    throw UnsupportedOperationException("pre-S")
                 }
-                c = c.superclass
+            }.onFailure {
+                // Legacy reflection fallback
+                var impl: Any? = null
+                var c: Class<*>? = socket.javaClass
+                while (c != null && impl == null) {
+                    try {
+                        val f = c.getDeclaredField("impl")
+                        f.isAccessible = true
+                        impl = f.get(socket)
+                    } catch (_: NoSuchFieldException) { c = c.superclass }
+                }
+                if (impl == null) throw IllegalStateException("DatagramSocket impl unavailable")
+                var fdObj: java.io.FileDescriptor? = null
+                c = impl.javaClass
+                while (c != null && fdObj == null) {
+                    for (name in listOf("fd", "fileDescriptor")) {
+                        try {
+                            val f = c.getDeclaredField(name)
+                            f.isAccessible = true
+                            fdObj = f.get(impl) as? java.io.FileDescriptor
+                            if (fdObj != null) break
+                        } catch (_: NoSuchFieldException) { }
+                    }
+                    c = c.superclass
+                }
+                if (fdObj == null) throw IllegalStateException("DatagramSocket fd unavailable")
+                val descriptor = java.io.FileDescriptor::class.java.getDeclaredField("descriptor")
+                descriptor.isAccessible = true
+                rawFd = descriptor.getInt(fdObj)
+                parcel = ParcelFileDescriptor.fromFd(rawFd)
             }
-            if (fdObj == null) throw IllegalStateException("DatagramSocket fd unavailable")
-            val descriptor = java.io.FileDescriptor::class.java.getDeclaredField("descriptor")
-            descriptor.isAccessible = true
-            val rawFd = descriptor.getInt(fdObj)
-            val parcel = ParcelFileDescriptor.fromFd(rawFd)
-            val ok = nativeBridge.initUdpHapticFromFd(parcel.fd, RootHapticDaemon.DAEMON_PORT)
-            Log.i(TAG, "[UDP] Java socket fd=$rawFd nativeFd=${parcel.fd} init=$ok")
-            LogBroadcaster.sendLog(context, "[UDP] transport init=$ok rawFd=$rawFd nativeFd=${parcel.fd}")
+            val p = parcel ?: throw IllegalStateException("parcel unavailable")
+            nativeFd = p.fd
+            val ok = nativeBridge.initUdpHapticFromFd(nativeFd, RootHapticDaemon.DAEMON_PORT)
+            Log.i(TAG, "[UDP] Java socket fd=$rawFd nativeFd=$nativeFd init=$ok")
+            LogBroadcaster.sendLog(context, "[UDP] transport init=$ok rawFd=$rawFd nativeFd=$nativeFd")
             if (!ok) {
-                parcel.close()
+                p.close()
                 socket.close()
             } else {
                 udpSocket = socket
-                udpParcel = parcel
+                udpParcel = p
             }
         } catch (t: Throwable) {
             Log.e(TAG, "[UDP] transport init failed: ${t.javaClass.simpleName}: ${t.message}", t)
@@ -703,9 +716,9 @@ class HapticEngine(
 
         val baseAmplitude = runCatching { prefs.getFloat("haptic_amplitude", 2.3f) }.getOrDefault(2.3f)
         val uiPreset = runCatching { prefs.getInt("selected_preset", 2) }.getOrDefault(2)
-        val presetGain = floatArrayOf(0.70f, 0.90f, 1.00f, 1.20f).getOrElse(uiPreset) { 1.00f }
+        val presetGain = floatArrayOf(0.45f, 0.75f, 1.10f, 1.60f).getOrElse(uiPreset) { 1.10f }
         val style = StylePreset.fromKey(runCatching { prefs.getString("style_preset", "balanced") }.getOrDefault("balanced"))
-        val outputAmp = (baseAmplitude * presetGain * 0.65f).coerceIn(0.3f, 2.0f)
+        val outputAmp = (baseAmplitude * presetGain).coerceIn(0.3f, 2.0f)
         val lowCutoffFreq = style.lowCutHz
         val highCutoffFreq = style.highCutHz
 

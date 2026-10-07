@@ -1,6 +1,24 @@
 # Changes
 
-Current source version: **5.4.3**
+Current source version: **5.4.4**
+
+## 5.4.4
+
+### UI Level Fix (Second Pass)
+- Removed the `0.65f` compression factor from `outputAmp` calculation. Previously
+  `outputAmp = baseAmplitude * presetGain * 0.65f`, which cut 35% off the amplitude
+  before it even reached the synthesizer. Now `outputAmp = baseAmplitude * presetGain`.
+- Widened the preset gain range from [0.70, 1.20] to [0.45, 1.60], so the difference
+  between low and ultra is now 3.6x instead of 1.7x.
+- Moved `levelScale` out of the `character` product and applied it directly to the
+  final peak. Previously `levelScale` was multiplied inside `character` along with
+  `eventGain * accentScale * ampScale * masterGain` (product ~3.6), then divided by
+  `DRIVE_REFERENCE=1.0` and clamped to `DRIVE_CEILING=2.0` — so levelScale was always
+  crushed by the ceiling clamp. Now levelScale multiplies the final peak directly:
+  `peak = shaped * drive * levelScale * 255`.
+- Added failure logging to `performDynamicEffect` so that `path=Waveform` in the BEAT
+  log line is now accompanied by a `DynamicEffect unavailable: ExceptionClass: message`
+  warning, enabling diagnosis of why the DynamicEffect path fails.
 
 ## 5.4.3
 

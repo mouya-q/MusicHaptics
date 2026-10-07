@@ -603,15 +603,18 @@ static void* scheduler_thread_func(void* arg) {
                             + semFr[0].bodyAmp * 0.35f, 0.0f, 1.0f);
                     }
 
+                    // Character scale per event type, shared by both the
+                    // Kotlin callback and the StrikeOnly direct-drive strike.
+                    const float eventCharScale = eventType == 1 ? 1.0f : eventType == 2 ? 0.85f : eventType == 3 ? 0.60f : 0.50f;
+                    // Mix 55% onset transient + 45% continuous RMS so that
+                    // the overall music volume has a visible effect on the
+                    // haptic intensity, not just the transient sharpness.
+                    const float blended = eventValue * 0.55f + rmsEnergy * 0.45f;
+                    const int intensity = static_cast<int>(std::clamp(
+                        blended * eventCharScale * 255.0f,
+                        10.0f, 255.0f));
+
                     if (onBeatTrigger) {
-                        const float eventCharScale = eventType == 1 ? 1.0f : eventType == 2 ? 0.85f : eventType == 3 ? 0.60f : 0.50f;
-                        // Mix 55% onset transient + 45% continuous RMS so that
-                        // the overall music volume has a visible effect on the
-                        // haptic intensity, not just the transient sharpness.
-                        const float blended = eventValue * 0.55f + rmsEnergy * 0.45f;
-                        const int intensity = static_cast<int>(std::clamp(
-                            blended * eventCharScale * 255.0f,
-                            10.0f, 255.0f));
                         jstring eventName = eventType == 1 ? evKick : eventType == 2 ? evSnare : eventType == 3 ? evVocal : evBody;
                         if (eventName) {
                             env->CallVoidMethod(bridgeRef, onBeatTrigger, eventName, static_cast<jint>(intensity));

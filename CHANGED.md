@@ -1,6 +1,52 @@
 # Changes
 
-Current source version: **5.4.4**
+Current source version: **5.4.5**
+
+## 5.4.5
+
+### StrikeOnly Output Path Restored
+- Restored the direct-drive beat strike for StrikeOnly drivers (AW8697 and
+  similar). It had been removed to avoid double-firing with the Kotlin
+  callback, but that left the device with no real output: the Kotlin path
+  degrades to `DEFAULT_AMPLITUDE` one-shots on drivers without amplitude
+  control, which are barely perceptible. The scheduler now fires
+  `trigger_direct_drive(5, intensity * userAmp)` for StrikeOnly drivers in
+  addition to the callback.
+- Kotlin `triggerBeatVibration` now detects when the native scheduler is
+  already driving the hardware (direct fd, root pipe or UDP transport) and
+  skips its own vibration call, so the strike is not duplicated. The BEAT
+  log line reports `path=NativeDD` in that case.
+- Fixed the driver kind never being set when `open()` on the sysfs node
+  fails. The hooked app process has no write permission to `/sys`, so
+  `init_direct_drive` always returned false and left the driver kind as
+  `Unknown` — which meant the StrikeOnly branches (beat strike and texture
+  pulsing) were never taken even though UDP or the root pipe was doing the
+  actual writing. The kind is now preset from the node path name.
+
+### UI Level Reaches Every Output Path
+- Added `userAmplitude` to the StrikeOnly texture pulsing amplitude. It was
+  previously `texEnergy * styleAmpScale * masterGain * 255`, so the UI level
+  slider had no effect on the texture layer at all.
+
+### AW8697 Gain Encoding
+- The root UDP daemon now writes the AW8697 `gain` node as a hex value in
+  the 0x00-0xc8 range (amplitude 0-255 mapped to 0-200), matching what the
+  native root pipe and direct fd paths already did. Previously the daemon
+  wrote a decimal value, which the gain register did not interpret as
+  intended.
+
+### Playback Pause Debounce
+- Raised the `PLAYBACK TRULY PAUSED` timeout from 800 ms to 2000 ms. Apple
+  Music briefly interrupts its audio stream on seek and track change, and
+  800 ms was short enough to trigger the full haptic teardown
+  (`hapticPaused`, `vibrateProxy.setPaused()`, `clearHapticBuffer()`,
+  `forceDecay()`) several times per track.
+
+### Documentation
+- Added `docs/NATIVE_ENGINE.md` describing the native analysis and output
+  pipeline: FFT band split, onset detection, semantic frames, the 5 ms
+  scheduler loop, the three output transports, and the AW8697 strike
+  semantics.
 
 ## 5.4.4
 

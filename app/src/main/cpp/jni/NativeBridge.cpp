@@ -516,7 +516,6 @@ int fd = g_direct_drive_fd.load(std::memory_order_acquire);
     if (durWritten < 0) {
         LOGW("[DD] enable write failed: errno=%d (%s)", errno, strerror(errno));
     }
-    }
 
     
     int tick = g_dd_tick_count.fetch_add(1, std::memory_order_relaxed);

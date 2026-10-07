@@ -14,11 +14,11 @@ internal class ConfigRefreshReceiver(
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ACTION) return
         // Accept only directed broadcast from own dashboard; reject spoofed refresh.
-        val sender = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            getSendingPackage()
-        } else {
-            null
-        }
+        // getSendingPackage() is hidden API on SDK < 34; use reflection to avoid compile error.
+        val sender = try {
+            val m = this.javaClass.getMethod("getSendingPackage")
+            m.invoke(this) as? String
+        } catch (_: Throwable) { null }
         val selfPkg = context.packageName
         if (sender != null && sender != selfPkg && sender != "com.mouya.musichaptics") {
             Log.w(TAG, "[cfg] rejected refresh from $sender")

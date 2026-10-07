@@ -66,25 +66,25 @@ object RootHapticDaemon {
                 append("; echo RHD_READY")
                 append("; while true; do ")
                 // Single packet waits at most 2s; avoid stuck nc blocking restart.
-                append("pkt=$(nc -u -l -p $DAEMON_PORT -w 2 127.0.0.1 2>/dev/null | dd bs=$UDP_PACKET_LEN count=1 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \\n'); ")
+                append("pkt=${'$'}(nc -u -l -p ${'$'}DAEMON_PORT -w 2 127.0.0.1 2>/dev/null | dd bs=${'$'}UDP_PACKET_LEN count=1 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \\n'); ")
                 // Length must be 10 bytes -> 20 hex chars.
                 append("if [ ${'$'}{#pkt} -ne 20 ]; then continue; fi; ")
-                append("case \"$pkt\" in $UDP_MAGIC_LE*) ;; *) continue;; esac; ")
+                append("case \"${'$'}pkt\" in ${'$'}UDP_MAGIC_LE*) ;; *) continue;; esac; ")
                 // Version LE 01 00 at hex chars 9-12.
-                append("ver=$(expr substr \"$pkt\" 9 4 2>/dev/null); ")
-                append("if [ \"$ver\" != \"0100\" ]; then continue; fi; ")
+                append("ver=${'$'}(expr substr \"${'$'}pkt\" 9 4 2>/dev/null); ")
+                append("if [ \"${'$'}ver\" != \"0100\" ]; then continue; fi; ")
                 // duration BE at hex chars 13-16, amplitude at 17-18.
-                append("dur_hex=$(expr substr \"$pkt\" 13 4 2>/dev/null); amp_hex=$(expr substr \"$pkt\" 17 2 2>/dev/null); ")
-                append("dur=$((16_${'$'}dur_hex)) 2>/dev/null || continue; amp=$((16_${'$'}amp_hex)) 2>/dev/null || continue; ")
-                append("if [ \"$dur\" -lt 1 ]; then dur=5; fi; if [ \"$dur\" -gt 5000 ]; then dur=5000; fi; ")
-                append("if [ \"$amp\" -lt 0 ]; then amp=0; fi; if [ \"$amp\" -gt 255 ]; then amp=255; fi; ")
+                append("dur_hex=${'$'}(expr substr \"${'$'}pkt\" 13 4 2>/dev/null); amp_hex=${'$'}(expr substr \"${'$'}pkt\" 17 2 2>/dev/null); ")
+                append("dur=${'$'}((16_${'$'}{dur_hex})) 2>/dev/null || continue; amp=${'$'}((16_${'$'}{amp_hex})) 2>/dev/null || continue; ")
+                append("if [ \"${'$'}dur\" -lt 1 ]; then dur=5; fi; if [ \"${'$'}dur\" -gt 5000 ]; then dur=5000; fi; ")
+                append("if [ \"${'$'}amp\" -lt 0 ]; then amp=0; fi; if [ \"${'$'}amp\" -gt 255 ]; then amp=255; fi; ")
                 if (ampPath != null) {
-                    append("echo \"$amp\" >&4 2>/dev/null; ")
+                    append("echo \"${'$'}amp\" >&4 2>/dev/null; ")
                 }
                 if (isActivateNode) {
                     append("echo 1 >&3 2>/dev/null; ")
                 } else {
-                    append("echo \"$dur\" >&3 2>/dev/null; ")
+                    append("echo \"${'$'}dur\" >&3 2>/dev/null; ")
                 }
                 append("done")
             }

@@ -1,6 +1,19 @@
 # Changes
 
-Current source version: **5.4.5**
+Current source version: **5.4.6**
+
+## 5.4.6
+
+### AW8697 Four-Sequence Fix (Hardware-Verified)
+- **Root cause**: The AW8697 driver defaults to `activate_mode=2` (rtp mode). Writing only `activate=1` in rtp mode replays an empty RAM waveform, causing the chip to immediately erase → stop → standby. The motor never moves.
+- **Fix**: All three output paths (UDP daemon shell script, root pipe, direct fd) now execute the hardware-verified four-step sequence:
+  1. `activate_mode=0` (switch to ram mode)
+  2. `duration=<ms>` (set duration)
+  3. `gain=<hex>` (set amplitude, 1:1 mapping)
+  4. `activate=1` (trigger)
+- **Gain mapping corrected**: Removed the incorrect `*200/255` scaling. Hardware testing confirmed gain maps 1:1 onto the driver `level` register (writing `0x80` yields `level=0x80`). Clamped to `0x00-0x7f`.
+- **RootHapticDaemon.kt**: Daemon script now opens `activate_mode` (fd5) and `duration` (fd6) alongside `activate` (fd3) and `gain` (fd4), and writes all four in correct order.
+- **NativeBridge.cpp**: `trigger_direct_drive` root pipe and direct fd paths both use `write_node()` for the four-step sequence when AW8697 is detected.
 
 ## 5.4.5
 

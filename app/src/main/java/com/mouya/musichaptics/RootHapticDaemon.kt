@@ -59,10 +59,28 @@ object RootHapticDaemon {
             // Drop on length/magic/version mismatch; no blind activate on any bytes.
             val isActivateNode = activatePath.contains("activate")
             val isGainNode = ampPath?.contains("gain") == true
+            // AW8697 needs a four-step write sequence. The stock driver leaves
+            // activate_mode in rtp mode (2), where writing activate replays an
+            // empty RAM waveform and the chip immediately erases -> stop ->
+            // standby, so the motor never moves. Hardware-verified sequence:
+            //   1) activate_mode = 0 (ram mode)
+            //   2) duration      = per-packet ms
+            //   3) gain          = amplitude (1:1, 0x00-0x7f)
+            //   4) activate      = 1
+            val nodeDir = activatePath.substringBeforeLast('/', "")
+            val activateModePath = if (nodeDir.isNotEmpty()) "$nodeDir/activate_mode" else ""
+            val durationPath = if (nodeDir.isNotEmpty()) "$nodeDir/duration" else ""
+            val useFourStep = isActivateNode &&
+                activateModePath.isNotEmpty() && isSafeNode(activateModePath) &&
+                durationPath.isNotEmpty() && isSafeNode(durationPath)
             val script = buildString {
                 append("exec 3>'$activatePath'")
                 if (ampPath != null) {
                     append(" && exec 4>'$ampPath'")
+                }
+                if (useFourStep) {
+                    append(" && exec 5>'$activateModePath'")
+                    append(" && exec 6>'$durationPath'")
                 }
                 append("; echo RHD_READY")
                 append("; while true; do ")
@@ -81,15 +99,22 @@ object RootHapticDaemon {
                 append("if [ \"${'$'}amp\" -lt 0 ]; then amp=0; fi; if [ \"${'$'}amp\" -gt 255 ]; then amp=255; fi; ")
                 if (ampPath != null) {
                     if (isGainNode) {
-                        // AW8697 gain register expects hex value 0x00-0xc8 (0-200).
-                        // Map amplitude 0-255 to gain 0-200 and write as hex.
-                        append("gain_val=${'$'}(( ${'$'}amp * 200 / 255 )); ")
-                        append("printf '0x%02x' ${'$'}{gain_val} >&4 2>/dev/null; ")
+                        // Hardware-verified: gain maps 1:1 onto the driver
+                        // level register (writing 0x80 yields level=0x80).
+                        // Do NOT rescale; clamp to the 0x00-0x7f safe range.
+                        append("g=${'$'}amp; if [ \"${'$'}g\" -gt 127 ]; then g=127; fi; ")
+                        append("printf '0x%02x' ${'$'}g >&4 2>/dev/null; ")
                     } else {
                         append("echo \"${'$'}amp\" >&4 2>/dev/null; ")
                     }
                 }
-                if (isActivateNode) {
+                if (useFourStep) {
+                    // Four-step sequence: mode -> duration -> (gain above) -> activate.
+                    // Order matters: mode/duration must land before activate.
+                    append("echo 0 >&5 2>/dev/null; ")
+                    append("echo \"${'$'}dur\" >&6 2>/dev/null; ")
+                    append("echo 1 >&3 2>/dev/null; ")
+                } else if (isActivateNode) {
                     append("echo 1 >&3 2>/dev/null; ")
                 } else {
                     append("echo \"${'$'}dur\" >&3 2>/dev/null; ")

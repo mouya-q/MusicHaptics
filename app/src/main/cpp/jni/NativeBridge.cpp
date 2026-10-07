@@ -29,6 +29,32 @@ static pthread_t g_scheduler_thread{};
 static std::atomic<int> g_direct_drive_fd{-1};
 static std::string g_direct_drive_path = "";
 static std::string g_direct_amplitude_path = "";
+// Directory holding the haptic sysfs nodes. AW8697 needs a four-step write
+// sequence (activate_mode, duration, gain, activate) so the sibling node
+// paths must stay available even when only the activate fd could be opened.
+static std::string g_direct_node_dir = "";
+
+// AW8697 strike modes, verified against the driver on a 0809 X-axis LRA.
+// activate_mode 0 = ram mode (a real one-shot strike), 1 = cont mode,
+// 2 = rtp mode (replays the RAM waveform buffer, which is empty unless a
+// custom waveform was uploaded). The stock Android vibrator service leaves
+// the node in rtp mode, so writing only "activate" does nothing audible.
+static constexpr int AW8697_MODE_RAM = 0;
+
+static bool write_node(const std::string& dir, const char* name, const char* value);
+static bool is_safe_node_path(const std::string& path);
+
+static bool write_node(const std::string& dir, const char* name, const char* value) {
+    if (dir.empty()) return false;
+    std::string path = dir + "/" + name;
+    if (!is_safe_node_path(path)) return false;
+    int fd = open(path.c_str(), O_WRONLY | O_NONBLOCK);
+    if (fd < 0) return false;
+    const size_t len = strlen(value);
+    ssize_t written = write(fd, value, len);
+    close(fd);
+    return written == static_cast<ssize_t>(len);
+}
 
 enum class DirectDriverKind : int {
     Unknown = 0,
@@ -184,6 +210,7 @@ bool init_direct_drive(const std::string& nodes) {
             
             size_t lastSlash = path.rfind('/');
             std::string dirPath = (lastSlash != std::string::npos) ? path.substr(0, lastSlash) : path;
+            g_direct_node_dir = dirPath;
 
             
             
@@ -252,6 +279,13 @@ bool init_root_pipe(int pipe_fd, const std::string& enable_path, const std::stri
 
     g_direct_drive_path = enable_path;
     g_direct_amplitude_path = amplitude_path;
+    // Record the node directory so the AW8697 four-step strike sequence can
+    // reach activate_mode and duration even when only the activate node was
+    // opened by the root helper.
+    if (!enable_path.empty()) {
+        size_t lastSlash = enable_path.rfind('/');
+        if (lastSlash != std::string::npos) g_direct_node_dir = enable_path.substr(0, lastSlash);
+    }
     const bool strikeOnly = enable_path.find("activate") != std::string::npos ||
                              enable_path.find("aw8697") != std::string::npos ||
                              enable_path.find("aw86224") != std::string::npos;
@@ -388,8 +422,20 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
         
         if (!g_direct_amplitude_path.empty() && amplitude > 0) {
             bool isGainNode = g_direct_amplitude_path.find("gain") != std::string::npos;
-            if (isGainNode) {
-                int gainVal = static_cast<int>(std::clamp(amplitude, 0, 255) * 200 / 255);
+            bool isAW8697Pipe = g_direct_drive_path.find("activate") != std::string::npos;
+            if (isAW8697Pipe && !g_direct_node_dir.empty()) {
+                // Hardware-verified four-step sequence for AW8697:
+                // activate_mode=0 (ram) -> duration -> gain (1:1) -> activate=1.
+                // Writing only activate while the chip is in rtp mode replays an
+                // empty RAM waveform and the motor never moves.
+                int gainVal = std::clamp(amplitude, 0, 127);
+                cmdLen = snprintf(cmd, sizeof(cmd),
+                    "echo 0 > %s/activate_mode; echo %d > %s/duration; echo 0x%02x > %s; echo 1 > %s\n",
+                    g_direct_node_dir.c_str(), duration_ms, g_direct_node_dir.c_str(),
+                    gainVal, g_direct_amplitude_path.c_str(), g_direct_drive_path.c_str());
+            } else if (isGainNode) {
+                // gain maps 1:1 onto the driver level register; clamp only.
+                int gainVal = std::clamp(amplitude, 0, 127);
                 cmdLen = snprintf(cmd, sizeof(cmd), "echo 0x%02x > %s; echo 1 > %s\n",
                     gainVal, g_direct_amplitude_path.c_str(), g_direct_drive_path.c_str());
             } else {
@@ -397,9 +443,13 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
                     amplitude, g_direct_amplitude_path.c_str(), g_direct_drive_path.c_str());
             }
         } else {
-            
             bool isAW8697 = g_direct_drive_path.find("activate") != std::string::npos;
-            if (isAW8697) {
+            if (isAW8697 && !g_direct_node_dir.empty()) {
+                cmdLen = snprintf(cmd, sizeof(cmd),
+                    "echo 0 > %s/activate_mode; echo %d > %s/duration; echo 1 > %s\n",
+                    g_direct_node_dir.c_str(), duration_ms, g_direct_node_dir.c_str(),
+                    g_direct_drive_path.c_str());
+            } else if (isAW8697) {
                 cmdLen = snprintf(cmd, sizeof(cmd), "echo 1 > %s\n", g_direct_drive_path.c_str());
             } else {
                 cmdLen = snprintf(cmd, sizeof(cmd), "echo %d > %s\n", duration_ms, g_direct_drive_path.c_str());
@@ -421,27 +471,31 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
     }
 
     
-    int fd = g_direct_drive_fd.load(std::memory_order_acquire);
+int fd = g_direct_drive_fd.load(std::memory_order_acquire);
     if (fd < 0) return;
 
     int amp_fd = g_direct_amplitude_fd.load(std::memory_order_acquire);
-
     ssize_t ampWritten = -1;
+    ssize_t durWritten = -1;
+    bool isAW8697 = g_direct_drive_path.find("activate") != std::string::npos;
 
-    
+    // AW8697 four-step sequence: activate_mode=0 -> duration -> gain -> activate.
+    // The stock driver leaves activate_mode in rtp mode (2); writing only
+    // activate replays an empty RAM waveform and the motor never moves.
+    if (isAW8697 && !g_direct_node_dir.empty()) {
+        write_node(g_direct_node_dir, "activate_mode", "0");
+        write_node(g_direct_node_dir, "duration", std::to_string(duration_ms).c_str());
+    }
+
     if (amp_fd >= 0 && amplitude > 0) {
-        
         bool isGainNode = g_direct_amplitude_path.find("gain") != std::string::npos;
-
         char amp_str[16];
         int amp_len;
         if (isGainNode) {
-            
-            
-            int gainVal = static_cast<int>(std::clamp(amplitude, 0, 255) * 200 / 255);
+            // gain maps 1:1 onto the driver level register; clamp only.
+            int gainVal = std::clamp(amplitude, 0, 127);
             amp_len = snprintf(amp_str, sizeof(amp_str), "0x%02x", gainVal);
         } else {
-            
             amp_len = snprintf(amp_str, sizeof(amp_str), "%d", amplitude);
         }
         ampWritten = write(amp_fd, amp_str, amp_len);
@@ -450,18 +504,10 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
         }
     }
 
-    
-    
-    
-    ssize_t durWritten = -1;
-    bool isAW8697 = g_direct_drive_path.find("activate") != std::string::npos;
-
     if (isAW8697) {
-        
         const char* trigger = "1";
         durWritten = write(fd, trigger, 1);
     } else {
-        
         char dur_str[16];
         int dur_len = snprintf(dur_str, sizeof(dur_str), "%d", duration_ms);
         durWritten = write(fd, dur_str, dur_len);
@@ -469,6 +515,7 @@ void trigger_direct_drive(int duration_ms, int amplitude) {
 
     if (durWritten < 0) {
         LOGW("[DD] enable write failed: errno=%d (%s)", errno, strerror(errno));
+    }
     }
 
     

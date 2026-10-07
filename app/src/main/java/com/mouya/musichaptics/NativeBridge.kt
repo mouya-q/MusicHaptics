@@ -218,8 +218,7 @@ class NativeBridge {
         }
         return false
     }
-
-    fun isDirectDriveAvailable(): Boolean {
+fun isDirectDriveAvailable(): Boolean {
         val _ptr = snapshotPtr()
         if (_ptr != 0L) {
             try {

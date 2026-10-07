@@ -517,6 +517,17 @@ class HapticEngine(
     private fun triggerBeatVibration(event: String, intensity: Int) {
         if (!vibrateProxy.hasVibrator || hapticPaused || !isEngineEnabled.get()) return
 
+        // If the C++ native scheduler is active and driving the hardware
+        // via direct-drive (root pipe / UDP / fd), the beat has already
+        // been fired as a raw sysfs write with the full intensity. In that
+        // case we only log the event here and skip the weak Kotlin
+        // waveform fallback (which degrades to DEFAULT_AMPLITUDE on
+        // StrikeOnly drivers and produces barely-perceptible buzzes).
+        val nativeDrivingDirect = nativeSchedulerActive &&
+            (nativeBridge.isDirectDriveAvailable() ||
+             rootPipeActive ||
+             udpSocket != null)
+
         val style = activeStyle
         val normalizedIntensity = (intensity / 255f).coerceIn(0f, 1f)
         if (normalizedIntensity < style.onsetThreshold) return
@@ -536,14 +547,7 @@ class HapticEngine(
         if (!lastVibrationMs.compareAndSet(previous, now)) return
 
         val eventBass = if (event.equals("KICK", true) || event.equals("SUB", true)) activeBassBoost else 1f
-        // level = user gain only (0.3-2.0), not crushed by style/bass multipliers.
-        // Those multipliers are applied inside sculptImpact so they shape the envelope
-        // without crushing the dynamic range of the intensity signal.
         val level = activeOutputLevel.coerceIn(0.3f, 2.0f)
-        // Duration is mapped from the plan range onto an explicit intensity
-        // window instead of being scaled by a small factor. Scaling by
-        // 0.35 + 0.65 * intensity only spans 0.78..1.0, which kept every beat
-        // in the middle of the clamp, so all durations came out identical.
         val styleTime = style.attackScale.coerceIn(0.45f, 1.8f)
         val planFloor = plan.totalDurationMs.coerceIn(8L, 40L)
         val duration = (planFloor * (0.48f + 0.92f * normalizedIntensity) * styleTime)
@@ -561,14 +565,20 @@ class HapticEngine(
         )
 
         val useDynamic = !vibrateProxy.forceDefaultAmplitude
-        val usedDynamic = useDynamic && vibrateProxy.performDynamicEffect(
-            amplitude = shaped.peakAmplitude / 255f,
-            sharpness = style.sharpness.coerceIn(0.05f, 1f),
-            durationSec = (shaped.totalDurationMs / 1000f).coerceIn(0.012f, 0.22f),
-            attackSec = (shaped.timings.firstOrNull() ?: 1L).coerceIn(1L, 25L) / 1000f
-        )
+        val usedDynamic = if (nativeDrivingDirect) {
+            // Skip Kotlin vibration path entirely — the C++ scheduler
+            // has already fired the hardware strike.
+            false
+        } else {
+            useDynamic && vibrateProxy.performDynamicEffect(
+                amplitude = shaped.peakAmplitude / 255f,
+                sharpness = style.sharpness.coerceIn(0.05f, 1f),
+                durationSec = (shaped.totalDurationMs / 1000f).coerceIn(0.012f, 0.22f),
+                attackSec = (shaped.timings.firstOrNull() ?: 1L).coerceIn(1L, 25L) / 1000f
+            )
+        }
 
-        if (!usedDynamic) {
+        if (!usedDynamic && !nativeDrivingDirect) {
             runCatching {
                 vibrateProxy.performWaveform(shaped.timings, shaped.amplitudes)
             }.onFailure { Log.w(TAG, "Haptic output failed: ${it.message}") }
@@ -577,7 +587,8 @@ class HapticEngine(
         lastBeatEvent = plan.event
         val beatCounter = beatLogCounter.incrementAndGet()
         if (beatCounter <= 12 || beatCounter % 40 == 0L) {
-            val msg = "[BEAT] #$beatCounter ${plan.event} raw=$intensity style=${style.key} level=${"%.2f".format(level)} peak=${shaped.peakAmplitude} duration=${shaped.totalDurationMs}ms cooldown=${effectiveCooldown}ms path=${if (usedDynamic) "DynamicEffect" else "Waveform"}"
+            val pathLabel = if (nativeDrivingDirect) "NativeDD" else if (usedDynamic) "DynamicEffect" else "Waveform"
+            val msg = "[BEAT] #$beatCounter ${plan.event} raw=$intensity style=${style.key} level=${"%.2f".format(level)} peak=${shaped.peakAmplitude} duration=${shaped.totalDurationMs}ms cooldown=${effectiveCooldown}ms path=$pathLabel"
             Log.i(TAG, msg)
             LogBroadcaster.sendLog(context, msg)
         }
@@ -842,9 +853,9 @@ class HapticEngine(
         val lastPcmMs = pcmFallbackAtMs
         
         lifecycleScope.launch {
-            kotlinx.coroutines.delay(800)
+            kotlinx.coroutines.delay(2000)
             if (pcmFallbackAtMs - lastPcmMs <= 50) {
-                Log.i(TAG, "[PLAYBACK TRULY PAUSED] No PCM received for 800ms. Forcing immediate haptic decay")
+                Log.i(TAG, "[PLAYBACK TRULY PAUSED] No PCM received for 2000ms. Forcing immediate haptic decay")
                 LogBroadcaster.sendLog(context, "[PLAYBACK TRULY PAUSED] Forcing immediate haptic decay")
                 hapticPaused = true
                 pcmFallbackAtMs = 0L

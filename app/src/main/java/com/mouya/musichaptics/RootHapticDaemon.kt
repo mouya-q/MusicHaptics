@@ -58,6 +58,7 @@ object RootHapticDaemon {
             // magic u32 LE=4d584831 | ver u16 LE=0100 | dur u16 BE | amp u8 | flags u8
             // Drop on length/magic/version mismatch; no blind activate on any bytes.
             val isActivateNode = activatePath.contains("activate")
+            val isGainNode = ampPath?.contains("gain") == true
             val script = buildString {
                 append("exec 3>'$activatePath'")
                 if (ampPath != null) {
@@ -79,7 +80,14 @@ object RootHapticDaemon {
                 append("if [ \"${'$'}dur\" -lt 1 ]; then dur=5; fi; if [ \"${'$'}dur\" -gt 5000 ]; then dur=5000; fi; ")
                 append("if [ \"${'$'}amp\" -lt 0 ]; then amp=0; fi; if [ \"${'$'}amp\" -gt 255 ]; then amp=255; fi; ")
                 if (ampPath != null) {
-                    append("echo \"${'$'}amp\" >&4 2>/dev/null; ")
+                    if (isGainNode) {
+                        // AW8697 gain register expects hex value 0x00-0xc8 (0-200).
+                        // Map amplitude 0-255 to gain 0-200 and write as hex.
+                        append("gain_val=${'$'}(( ${'$'}amp * 200 / 255 )); ")
+                        append("printf '0x%02x' ${'$'}{gain_val} >&4 2>/dev/null; ")
+                    } else {
+                        append("echo \"${'$'}amp\" >&4 2>/dev/null; ")
+                    }
                 }
                 if (isActivateNode) {
                     append("echo 1 >&3 2>/dev/null; ")

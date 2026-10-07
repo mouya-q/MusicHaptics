@@ -210,6 +210,24 @@ bool init_direct_drive(const std::string& nodes) {
     }
 
     LOGE("[DD] no usable node found; root-assisted transport will be handled by Kotlin");
+
+    // Even though we could not open() the node directly (the target process
+    // lacks write permission), we still record the driver kind from the path
+    // name so that the scheduler's StrikeOnly logic (beat trigger + texture
+    // pulsing) works correctly when the actual writes go through UDP or the
+    // root pipe instead.
+    if (g_direct_driver_kind.load(std::memory_order_acquire) ==
+        static_cast<int>(DirectDriverKind::Unknown)) {
+        bool strikeOnly = nodes.find("activate") != std::string::npos ||
+                           nodes.find("aw8697") != std::string::npos ||
+                           nodes.find("aw86224") != std::string::npos;
+        g_direct_driver_kind.store(
+            static_cast<int>(strikeOnly ? DirectDriverKind::StrikeOnly : DirectDriverKind::Continuous),
+            std::memory_order_release);
+        LOGI("[DD] driver kind preset to %s based on node path (open failed but UDP/root-pipe may still work)",
+             strikeOnly ? "StrikeOnly" : "Continuous");
+    }
+
     return false;
 }
 
@@ -601,14 +619,27 @@ static void* scheduler_thread_func(void* arg) {
                         }
                     }
 
-                    
-                    
-                    
-                    // REMOVED: direct-drive beat trigger for StrikeOnly devices.
-                    // Previously this fired a raw sysfs write AND the Kotlin onBeatTrigger
-                    // callback, causing double-fire. Now only onBeatTrigger fires, and
-                    // Kotlin handles the shaped waveform output.
-                    
+                    // For StrikeOnly devices (AW8697 etc), the Kotlin waveform
+                    // path degrades to DEFAULT_AMPLITUDE one-shots which are
+                    // barely perceptible. Instead, fire a direct-drive strike
+                    // with the full intensity so the hardware LRA actually
+                    // moves. The Kotlin callback is still invoked for logging
+                    // but the real haptic output comes from this sysfs write.
+                    if (use_direct_drive &&
+                        g_direct_driver_kind.load(std::memory_order_acquire) ==
+                            static_cast<int>(DirectDriverKind::StrikeOnly)) {
+                        // Scale the beat intensity into a gain value the AW8697
+                        // understands. The intensity is already 10-255 from
+                        // the blended onset+RMS calculation above.
+                        // Use the user amplitude to scale the final gain so
+                        // the UI level slider has a real effect on strike power.
+                        const float userAmp = engine->getUserAmplitude();
+                        const int strikeAmp = static_cast<int>(
+                            std::clamp(intensity * userAmp, 10.0f, 255.0f));
+                        // Duration: short strike (5ms default for AW8697 activate).
+                        trigger_direct_drive(5, strikeAmp);
+                    }
+
                     g_last_beat_trigger_ns = nowNs;
                 }
             }
@@ -631,7 +662,8 @@ static void* scheduler_thread_func(void* arg) {
                     + texFrames[0].bodyAmp  * 0.30f;
                 const float styleAmpScale = engine->getOutputStyleAmpScale();
                 const float masterGain = engine->getOutputMasterGain();
-                const float texAmp = std::clamp(texEnergy * styleAmpScale * masterGain * 255.0f, 0.0f, 255.0f);
+                const float userAmp = engine->getUserAmplitude();
+                const float texAmp = std::clamp(texEnergy * styleAmpScale * masterGain * userAmp * 255.0f, 0.0f, 255.0f);
                 // Only pulse if energy is above a perceptual threshold
                 if (texAmp > 15.0f) {
                     // Pulse every ~20ms (every 4th frame at 5ms) to avoid overloading

@@ -1,6 +1,25 @@
 # Changes
 
-Current source version: **5.4.6**
+Current source version: **5.4.7**
+
+## 5.4.7
+
+### Root Cause: No AudioTrack.write Hook Trigger
+
+**Critical fix for "no vibration at all" on v5.4.6.**
+
+The v5.4.6 log revealed 0 `[BEAT]` events and 4 `[PLAYBACK TRULY PAUSED]` triggers. Investigation confirmed the root cause: **AudioTrack write hooks were never firing**, causing `pcmFallbackAtMs` to remain 0 forever. The false-positive `[PLAYBACK TRULY PAUSED]` then latched `hapticPaused=true`, killing all vibration.
+
+#### Fixes
+
+1. **`markCandidateStopped()` guard** (`HapticEngine.kt`): skip false-positive pause when no PCM has ever been received (`pcmFallbackAtMs == 0 && nativeLastAudioTime == 0`)
+
+2. **Scheduler start logging** (`HapticEngine.kt`): log `startScheduler` return value via dashboard for diagnostics
+
+3. **Write hook diagnostics** (`HookCoordinator.kt`):
+   - Log count of hooked `AudioTrack.write` methods at install time
+   - Warn when 0 methods hooked (indicates signature mismatch or hook framework failure)
+   - Write trigger logs now use `Log.i` + `LogBroadcaster` (was `Log.d` only) so they appear in dashboard exports
 
 ## 5.4.6
 

@@ -232,6 +232,7 @@ class HookCoordinator(
     }
 
     private fun hookWriteMethods(clazz: Class<*>) {
+        var hookedCount = 0
         for (method in clazz.declaredMethods) {
             if (method.name != "write" || method.parameterTypes.isEmpty()) continue
             if (!isSupportedWriteSignature(method)) continue
@@ -295,10 +296,17 @@ class HookCoordinator(
 
                     if (now - lastWriteLogAtMs >= MAX_WRITE_LOG_INTERVAL_MS) {
                         lastWriteLogAtMs = now
-                        Log.d(TAG, "[$targetPackage] AudioTrack.write result=$result sr=${state.sampleRate} ch=${state.channels}")
+                        val msg = "[$targetPackage] AudioTrack.write result=$result sr=${state.sampleRate} ch=${state.channels}"
+                        Log.i(TAG, msg)
+                        contextProvider()?.let { LogBroadcaster.sendLog(it, msg) }
                     }
                 }
             })
+            hookedCount++
+        }
+        Log.i(TAG, "[$targetPackage] AudioTrack.write: hooked $hookedCount methods")
+        if (hookedCount == 0) {
+            Log.w(TAG, "[$targetPackage] WARNING: no AudioTrack.write methods hooked!")
         }
     }
 

@@ -286,14 +286,8 @@ class HapticEngine(
             LogBroadcaster.sendLog(context, beatMsg)
 
             nativeSchedulerActive = nativeBridge.startScheduler()
+            LogBroadcaster.sendLog(context, "[Scheduler] startScheduler returned=$nativeSchedulerActive")
 
-            
-            
-            
-            
-            
-            
-            
             if (nativeSchedulerActive) {
                 
                 
@@ -851,7 +845,11 @@ class HapticEngine(
     
     private fun markCandidateStopped() {
         val lastPcmMs = pcmFallbackAtMs
-        
+        if (lastPcmMs == 0L && nativeLastAudioTime == 0L) {
+            Log.d(TAG, "[PLAYBACK PAUSED CANDIDATE] No PCM ever received, not pausing (guard against false positive)")
+            return
+        }
+
         lifecycleScope.launch {
             kotlinx.coroutines.delay(2000)
             if (pcmFallbackAtMs - lastPcmMs <= 50) {

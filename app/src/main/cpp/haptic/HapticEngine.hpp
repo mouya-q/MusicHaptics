@@ -347,6 +347,20 @@ public:
     int onsetRefractoryFrames_[4] = {0, 0, 0, 0}; 
     static constexpr int ONSET_REFRACTORY_FRAMES = 2; 
 
+    // Bounded adaptive onset gating.
+    //
+    // The fixed thresholds below alone cannot cover the dynamic range between a
+    // quiet acoustic passage and a loud electronic chorus: the same absolute
+    // flux means "a drum hit" in one and "noise floor" in the other. A slow EMA
+    // of the raw onset energy raises the gate only while recent material stays
+    // consistently energetic, and the gate is clamped to a small multiple of
+    // the fixed threshold so a loud section can never gate out real transients.
+    float kickOnsetEma_ = 0.0f;
+    float snareOnsetEma_ = 0.0f;
+    static constexpr float ONSET_ADAPT_ALPHA = 0.02f;
+    static constexpr float ONSET_ADAPT_MAX_RATIO = 1.45f;
+    static constexpr float ONSET_ADAPT_SHARE = 0.75f;
+
 public:
     HapticEngine() {
         configure(48000.0f, 60.0f, 200.0f, 2.0f, 0);
@@ -474,6 +488,8 @@ private:
         spectrumSamples_ = 0;
         pitchUpdateCounter_ = 0;
         spectralFlux_ = bassSpectralFlux_ = highSpectralFlux_ = spectralCentroidHz_ = 0.0f;
+        kickOnsetEma_ = 0.0f;
+        snareOnsetEma_ = 0.0f;
         kickProbability_ = snareProbability_ = hatProbability_ = 0.0f;
         vocalProbability_ = pluckedProbability_ = harmonicProbability_ = 0.0f;
         bassSustainProbability_ = pitchConfidence_ = 0.0f;
@@ -815,9 +831,16 @@ public:
             kickOnset *= profileKickMult_.load(std::memory_order_relaxed);
             
             const float floorRatio = std::clamp(profileDspFloor_.load(std::memory_order_relaxed) / 0.0040f, 0.55f, 2.00f);
-            const float kickThreshold = std::clamp(0.40f * std::sqrt(floorRatio), 0.28f, 0.58f);
+            const float kickBase = std::clamp(0.40f * std::sqrt(floorRatio), 0.28f, 0.58f);
+            // Gate rises with sustained energy but never past a bounded share of
+            // the recent mean, so genuine transients in loud material survive.
+            const float kickThreshold = std::clamp(
+                kickBase * std::max(1.0f, std::min(1.0f + kickOnsetEma_ * ONSET_ADAPT_SHARE,
+                                                   ONSET_ADAPT_MAX_RATIO)),
+                kickBase, kickBase * ONSET_ADAPT_MAX_RATIO);
             if (kickOnset < kickThreshold) kickOnset = 0.0f;  
             if (kickOnset > 0.0f) onsetRefractoryFrames_[0] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
+            kickOnsetEma_ += ONSET_ADAPT_ALPHA * (kickOnset - kickOnsetEma_);
         }
 
         
@@ -830,9 +853,14 @@ public:
             snareOnset = std::max({lowMidEnergy, lowMidFluxV, presFluxVal});
             snareOnset *= profileSnareMult_.load(std::memory_order_relaxed);
             const float floorRatio = std::clamp(profileDspFloor_.load(std::memory_order_relaxed) / 0.0040f, 0.55f, 2.00f);
-            const float snareThreshold = std::clamp(0.30f * std::sqrt(floorRatio), 0.18f, 0.42f);
+            const float snareBase = std::clamp(0.30f * std::sqrt(floorRatio), 0.18f, 0.42f);
+            const float snareThreshold = std::clamp(
+                snareBase * std::max(1.0f, std::min(1.0f + snareOnsetEma_ * ONSET_ADAPT_SHARE,
+                                                    ONSET_ADAPT_MAX_RATIO)),
+                snareBase, snareBase * ONSET_ADAPT_MAX_RATIO);
             if (snareOnset < snareThreshold) snareOnset = 0.0f;  
             if (snareOnset > 0.0f) onsetRefractoryFrames_[1] = std::max(1, static_cast<int>(std::lround(ONSET_REFRACTORY_FRAMES * profileRefractoryScale_.load(std::memory_order_relaxed))));
+            snareOnsetEma_ += ONSET_ADAPT_ALPHA * (snareOnset - snareOnsetEma_);
         }
 
         

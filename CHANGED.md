@@ -1,6 +1,73 @@
 # Changes
 
-Current source version: **5.4.7**
+Current source version: **5.5.0**
+
+## 5.5.0
+
+### Root Cause: Permanent hapticPaused Deadlock
+
+The v5.4.7 trace finally produced a `[BEAT]` line, immediately followed by a
+`[PLAYBACK TRULY PAUSED]` that silenced everything again. Reading the loop
+structure showed why that state was terminal.
+
+#### Fixes
+
+1. **Un-latch was unreachable code** (`HapticEngine.kt`)
+
+   `runSemanticFrameLoop` opened with `if (hapticPaused) { delay(); continue }`,
+   while the only recovery branch (`hasAudioActivity && hapticPaused`) sat *below*
+   that guard. Once a spurious pause latched `hapticPaused = true` the branch
+   could never be evaluated again, so the engine stayed silent for the rest of the
+   session. Recovery is now evaluated before the guard, using two independent
+   PCM-liveness sources (the `AudioTrack.write` timestamp and a native DSP block
+   counter that no consumer drains).
+
+2. **Native onset clears a stale latch** (`HapticEngine.kt`)
+
+   Both `beatTriggerCallback` assignments now route through `onNativeBeat`, which
+   treats a C++ onset as first-hand proof that audio is flowing and un-latches
+   before dispatching. Previously `triggerBeatVibration` discarded the event on
+   its first line while paused, so the one signal that could prove audio was live
+   was the signal being dropped.
+
+3. **UDP transport liveness, not mere existence** (`HapticEngine.kt` / `NativeBridge.cpp`)
+
+   `nativeDrivingDirect` counted a merely-constructed `DatagramSocket` as direct
+   drive. When `su` is refused the root daemon never starts, so no packet is ever
+   consumed — yet Kotlin still skipped its own vibration path and the hardware
+   stayed silent. `nativeIsUdpHapticReady` now reports whether sends are actually
+   accepted: the socket is `connect()`ed to loopback, so the kernel raises
+   `ECONNREFUSED` on the next send when nothing is bound to the daemon port, and
+   that demotes the transport immediately. The engine therefore falls back to its
+   own vibration path within one beat instead of going quiet for the session.
+
+4. **False-positive pause suppression** (`HapticEngine.kt`)
+
+   `markCandidateStopped()` now requires *both* liveness sources to be stale
+   before latching, and skips entirely when no PCM has ever arrived. Previously
+   the hook timestamp alone decided, so a never-firing `AudioTrack.write` hook
+   made every live session look paused after 2 s.
+
+5. **`nativeAudioSilenceMs()` probe** (`NativeBridge.cpp` / `NativeBridge.kt`)
+
+   New JNI call returning milliseconds since the last PCM block reached the DSP,
+   or `-1` when none ever has. Kept separate from the semantic/onset rings because
+   the native scheduler drains those; a drained count cannot serve as a liveness
+   signal.
+
+6. **Bounded adaptive onset gating** (`HapticEngine.hpp`)
+
+   The kick/snare onset gates were fixed constants (`0.40` / `0.30`), which cannot
+   span a quiet acoustic passage and a loud electronic chorus — the same absolute
+   flux is a drum hit in one and noise floor in the other. A slow EMA of the onset
+   energy now raises the gate with sustained energy, clamped to `1.45x` the fixed
+   base so a loud section can still never gate out real transients.
+
+7. **Pause/resume diagnostics exported to dashboard** (`HapticEngine.kt`)
+
+   `[PLAYBACK PAUSED CAUGHT]`, `[PLAYBACK FALSE PAUSED]` and the true-pause line
+   now reach `LogBroadcaster` with the measured native silence age, so the next
+   trace can distinguish a real pause from a hook failure without a logcat session.
 
 ## 5.4.7
 

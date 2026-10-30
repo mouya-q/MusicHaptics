@@ -279,7 +279,7 @@ class HapticEngine(
             
             
             nativeBridge.beatTriggerCallback = { event, intensity ->
-                triggerBeatVibration(event, intensity)
+                onNativeBeat(event, intensity)
             }
             val beatMsg = "[Beat] beatTriggerCallback registered: hasVibrator=${vibrateProxy.hasVibrator} primitives: click=${vibrateProxy.primitiveClickSupported} tick=${vibrateProxy.primitiveTickSupported} heavyClick=${vibrateProxy.primitiveHeavyClickSupported}"
             Log.i(TAG, beatMsg)
@@ -372,6 +372,15 @@ class HapticEngine(
             } else {
                 udpSocket = socket
                 udpParcel = p
+                // A constructed socket proves nothing by itself: the root daemon
+                // that consumes the packets is started separately and never starts
+                // when su is refused. Native now reports the transport as ready
+                // only while sends are actually accepted, so log both sides for
+                // the next trace.
+                LogBroadcaster.sendLog(
+                    context,
+                    "[UDP] transport ready=${nativeBridge.isUdpHapticReady()}"
+                )
             }
         } catch (t: Throwable) {
             Log.e(TAG, "[UDP] transport init failed: ${t.javaClass.simpleName}: ${t.message}", t)
@@ -463,7 +472,7 @@ class HapticEngine(
 
                 
                 nativeBridge.beatTriggerCallback = { event, intensity ->
-                    triggerBeatVibration(event, intensity)
+                    onNativeBeat(event, intensity)
                 }
 
             } catch (e: Exception) {
@@ -504,8 +513,56 @@ class HapticEngine(
             rootPipeActive = false
         }
     }
-
     fun emitPhiraBeat(event: String, intensity: Int) = triggerBeatVibration(event, intensity)
+
+    /**
+     * Entry point for beats produced by the C++ scheduler.
+     *
+     * A native onset is first-hand proof that PCM is still flowing through the
+     * engine, so it must clear a stale hapticPaused latch. Without this the
+     * Kotlin latch (set by a spurious "playback truly paused" event) would
+     * silently swallow every native beat: the only unlock path lived inside
+     * runSemanticFrameLoop *after* its `if (hapticPaused) continue` guard, which
+     * is unreachable code once the latch is set.
+     */
+    private fun onNativeBeat(event: String, intensity: Int) {
+        nativeLastAudioTime = SystemClock.elapsedRealtime()
+        if (hapticPaused) {
+            hapticPaused = false
+            vibrateProxy.setResumed()
+            nativeBridge.clearHapticBuffer()
+            val msg = "[PLAYBACK RESUMED] native onset while latched — hapticPaused cleared"
+            Log.i(TAG, msg)
+            LogBroadcaster.sendLog(context, msg)
+        }
+        triggerBeatVibration(event, intensity)
+    }
+
+    /**
+     * Whether the C++ scheduler is actually able to drive the motor by itself.
+     *
+     * A non-null [udpSocket] only proves the datagram socket was created; it
+     * says nothing about whether a listener exists on the other end. The root
+     * daemon that consumes those packets is started separately and is refused
+     * outright when `su` is unavailable, so counting the bare socket as a
+     * working transport makes Kotlin skip its own vibration path while nothing
+     * fires the hardware at all. Gate on transports that are confirmed live.
+     */
+    private fun isNativeDrivingDirect(): Boolean {
+        if (!nativeSchedulerActive) return false
+        // Only transports with a confirmed consumer count:
+        //  - the direct fd was opened successfully, or
+        //  - the Java pipe daemon answered its handshake, or
+        //  - UDP sends are being accepted by a bound receiver.
+        // A bare DatagramSocket is deliberately excluded: when su is refused
+        // nobody consumes those packets, so claiming direct drive would make
+        // Kotlin skip its own vibration path for no reason. The native flag is
+        // demoted on the first ECONNREFUSED, so this self-heals within a beat.
+        return nativeBridge.isDirectDriveAvailable() ||
+            rootPipeActive ||
+            nativeBridge.isUdpHapticReady()
+    }
+
 
     
     private fun triggerBeatVibration(event: String, intensity: Int) {
@@ -517,10 +574,7 @@ class HapticEngine(
         // case we only log the event here and skip the weak Kotlin
         // waveform fallback (which degrades to DEFAULT_AMPLITUDE on
         // StrikeOnly drivers and produces barely-perceptible buzzes).
-        val nativeDrivingDirect = nativeSchedulerActive &&
-            (nativeBridge.isDirectDriveAvailable() ||
-             rootPipeActive ||
-             udpSocket != null)
+        val nativeDrivingDirect = isNativeDrivingDirect()
 
         val style = activeStyle
         val normalizedIntensity = (intensity / 255f).coerceIn(0f, 1f)
@@ -599,14 +653,32 @@ class HapticEngine(
 
         var lastBeatMs = 0L
         val beatRefractoryMs = DeviceTuningRegistry.current(deviceProfile).minIntervalMs.coerceIn(24L, 72L)
-
         while (true) {
             val frameStartTime = SystemClock.elapsedRealtime()
 
             try {
+                // Recovery must be evaluated *before* the paused guard below.
+                // Two independent PCM-liveness signals are consulted: the hook
+                // timestamp updated by the AudioTrack.write path, and the DSP
+                // block counter reported by native. Both keep advancing while
+                // this loop is latched, whereas checking them after `continue`
+                // made the un-latch branch unreachable code.
                 if (hapticPaused) {
-                    kotlinx.coroutines.delay(pullIntervalMs)
-                    continue
+                    val hookPcmAgeNow = frameStartTime - nativeLastAudioTime
+                    val nativeAgeNow = nativeBridge.audioSilenceMs()
+                    val flowing = (nativeLastAudioTime > 0L && hookPcmAgeNow < silenceTimeoutMs) ||
+                        (nativeAgeNow >= 0L && nativeAgeNow < silenceTimeoutMs)
+                    if (flowing) {
+                        hapticPaused = false
+                        vibrateProxy.setResumed()
+                        nativeBridge.clearHapticBuffer()
+                        val msg = "[PLAYBACK RESUMED] PCM activity detected, clearing hapticPaused latch"
+                        Log.i(TAG, msg)
+                        LogBroadcaster.sendLog(context, msg)
+                    } else {
+                        kotlinx.coroutines.delay(pullIntervalMs)
+                        continue
+                    }
                 }
 
                 val semanticFrameCount = if (nativeBridge.isLoaded && !nativeSchedulerActive) {
@@ -617,7 +689,7 @@ class HapticEngine(
                     nativeBridge.getOnsetFrames(onsetBuffer, 64)
                 } else 0
 
-                if (onsetFrameCount > 0 && !hapticPaused) {
+                if (onsetFrameCount > 0) {
                     val now = SystemClock.elapsedRealtime()
                     for (i in 0 until onsetFrameCount) {
                         val k = onsetBuffer[i * 4 + 0]
@@ -661,11 +733,6 @@ class HapticEngine(
                     vibrateProxy.setResumed()
                 }
 
-                if (hasAudioActivity && hapticPaused) {
-                    hapticPaused = false
-                    Log.i(TAG, "[PLAYBACK RESUMED] PCM activity detected, clearing hapticPaused latch")
-                    LogBroadcaster.sendLog(context, "[PLAYBACK RESUMED] haptic engine unpaused")
-                }
 
 
 
@@ -838,31 +905,43 @@ class HapticEngine(
     }
 
     fun onPlaybackPaused() {
-        Log.w(TAG, "[PLAYBACK PAUSED CAUGHT] Marking as candidate stopped, deferring immediate haptic decay...")
-        
+        val msg = "[PLAYBACK PAUSED CAUGHT] Marking as candidate stopped, deferring immediate haptic decay..."
+        Log.w(TAG, msg)
+        LogBroadcaster.sendLog(context, msg)
         markCandidateStopped()
     }
     
     private fun markCandidateStopped() {
         val lastPcmMs = pcmFallbackAtMs
         if (lastPcmMs == 0L && nativeLastAudioTime == 0L) {
-            Log.d(TAG, "[PLAYBACK PAUSED CANDIDATE] No PCM ever received, not pausing (guard against false positive)")
-            return
+            val nativeAge = nativeBridge.audioSilenceMs()
+            if (nativeAge < 0) {
+                Log.d(TAG, "[PLAYBACK PAUSED CANDIDATE] No PCM ever received, not pausing (guard against false positive)")
+                return
+            }
         }
 
         lifecycleScope.launch {
             kotlinx.coroutines.delay(2000)
-            if (pcmFallbackAtMs - lastPcmMs <= 50) {
-                Log.i(TAG, "[PLAYBACK TRULY PAUSED] No PCM received for 2000ms. Forcing immediate haptic decay")
+            // Two independent liveness sources: the AudioTrack.write timestamp
+            // and the DSP block counter. Requiring *both* to be stale before
+            // latching avoids killing haptics when only the hook path is
+            // unavailable (the write hooks never fired in the v5.4.7 trace while
+            // audio was plainly still playing).
+            val hookStillFlowing = pcmFallbackAtMs - lastPcmMs > 50
+            val nativeAge = nativeBridge.audioSilenceMs()
+            val nativeStillFlowing = nativeAge >= 0L && nativeAge < 2500L
+            if (hookStillFlowing || nativeStillFlowing) {
+                Log.i(TAG, "[PLAYBACK FALSE PAUSED] PCM is still arriving (nativeAge=${nativeAge}ms). Ignoring pause/release event.")
+            } else {
+                Log.i(TAG, "[PLAYBACK TRULY PAUSED] No PCM for 2000ms (nativeAge=${nativeAge}ms). Forcing immediate haptic decay")
                 LogBroadcaster.sendLog(context, "[PLAYBACK TRULY PAUSED] Forcing immediate haptic decay")
                 hapticPaused = true
                 pcmFallbackAtMs = 0L
                 vibrateProxy.setPaused()
                 nativeBridge.clearHapticBuffer()
-                                pendingSemanticLabel = "NONE"
+                pendingSemanticLabel = "NONE"
                 hapticSynthesizer.forceDecay()
-                    } else {
-                Log.i(TAG, "[PLAYBACK FALSE PAUSED] PCM is still arriving. Ignoring pause/release event.")
             }
         }
     }

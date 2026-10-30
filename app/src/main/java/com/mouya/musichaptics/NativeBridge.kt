@@ -300,6 +300,24 @@ fun isDirectDriveAvailable(): Boolean {
         return false
     }
 
+    /**
+     * Milliseconds since the last PCM block reached the DSP, or -1 when no
+     * block has ever arrived. Used to decide whether a latched pause should be
+     * released: unlike the frame rings this reading is not consumed by anyone,
+     * so it stays valid while the native scheduler drains them.
+     */
+    fun audioSilenceMs(): Long {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
+            try {
+                return nativeAudioSilenceMs()
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "audioSilenceMs failed: ${e.message}")
+            }
+        }
+        return -1L
+    }
+
     fun shutdownUdpHaptic() {
         val _ptr = snapshotPtr()
         if (_ptr != 0L) {
@@ -351,6 +369,7 @@ fun isDirectDriveAvailable(): Boolean {
         releaseMs: Float, sustainLevel: Float, lraF0: Float, lraQ: Float
     )
     private external fun nativeProcessAudioDirect(ptr: Long, directBuffer: ByteBuffer, size: Int, outTelemetry: FloatArray)
+    private external fun nativeAudioSilenceMs(): Long
     private external fun nativeGetSemanticFrames(ptr: Long, outFrames: FloatArray, maxFrames: Int): Int
     private external fun nativeClearHapticBuffer(ptr: Long)
     private external fun nativeStartScheduler(ptr: Long): Boolean

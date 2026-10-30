@@ -75,6 +75,10 @@ static std::atomic<int> g_udp_sock_fd{-1};
 static std::atomic<bool> g_use_udp_haptic{false}; 
 static struct sockaddr_in g_udp_daemon_addr;       
 
+// Whether the UDP transport has a confirmed live consumer. Defined next to the
+// socket state so send_haptic_udp can demote it when a send fails.
+static std::atomic<bool> g_udp_peer_alive{false};
+
 
 #pragma pack(push, 1)
 struct HapticUdpPacket {
@@ -97,6 +101,17 @@ static bool is_safe_node_path(const std::string& path) {
         return false;
     }
     return true;
+}
+
+// Timestamp (monotonic ms) of the most recent PCM block handed to the DSP.
+// Used by the Kotlin layer to tell "user really paused" apart from a spurious
+// pause event, without draining the semantic/onset rings the scheduler owns.
+static std::atomic<int64_t> g_last_audio_block_ms{0};
+
+static int64_t monotonic_ms() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000L + ts.tv_nsec / 1000000L;
 }
 
 static bool init_haptic_udp(int port) {
@@ -130,6 +145,9 @@ static bool init_haptic_udp_from_fd(int fd, int port) {
     g_udp_daemon_addr = addr;
     g_udp_sock_fd.store(fd, std::memory_order_release);
     g_use_udp_haptic.store(true, std::memory_order_release);
+    // Arm the liveness flag; the first failed send (ECONNREFUSED on a
+    // connect()ed loopback socket) demotes it again when no daemon is listening.
+    g_udp_peer_alive.store(true, std::memory_order_release);
 
     LOGI("[UDP] Haptic UDP initialized from Java fd=%d port=%d", fd, port);
     return true;
@@ -166,7 +184,19 @@ static bool send_haptic_udp(uint8_t amplitude, uint16_t durationMs, uint8_t flag
         sizeof(g_udp_daemon_addr)
     );
 
-    return written == sizeof(packet);
+    if (written != sizeof(packet)) {
+        // The socket is connect()ed to loopback: when nothing is bound to the
+        // daemon port the kernel reports ECONNREFUSED here, which is the only
+        // reliable evidence that the receiver is gone. Demote the transport so
+        // the engine stops believing direct drive works and falls back to its
+        // own vibration path instead of going silent.
+        if (errno == ECONNREFUSED || errno == EPIPE || errno == ENOTCONN) {
+            g_udp_peer_alive.store(false, std::memory_order_release);
+        }
+        return false;
+    }
+
+    return true;
 }
 
 bool init_direct_drive(const std::string& nodes) {
@@ -336,9 +366,14 @@ bool init_direct_drive_from_fd(int enable_fd, int amplitude_fd, const std::strin
     return true;
 }
 
-
 static std::atomic<int> g_dd_tick_count{0};
 static std::atomic<bool> g_dd_mode_entered{false};
+
+// Whether the UDP transport is initialised and has not yet been caught failing.
+static bool udp_peer_alive() {
+    return g_use_udp_haptic.load(std::memory_order_acquire) &&
+           g_udp_peer_alive.load(std::memory_order_acquire);
+}
 
 
 
@@ -928,6 +963,22 @@ Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
     if (!telemetry) return;
     engine->processAudioBlock(inputPtr, size, telemetry);
     env->ReleasePrimitiveArrayCritical(outTelemetry, telemetry, 0);
+    // Record arrival only after the DSP accepted the block: a crashed or
+    // rejected block must not look like healthy audio activity.
+    g_last_audio_block_ms.store(monotonic_ms(), std::memory_order_release);
+}
+
+// Milliseconds since the last PCM block reached the DSP, or -1 when no block
+// has ever arrived in this process. The Kotlin gate uses this instead of a
+// drained-frame count because it must keep working while the onset and
+// semantic rings are being consumed by the native scheduler thread.
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeAudioSilenceMs(JNIEnv*, jobject) {
+    const int64_t last = g_last_audio_block_ms.load(std::memory_order_acquire);
+    if (last <= 0) return -1;
+    const int64_t now = monotonic_ms();
+    const int64_t age = now - last;
+    return age > 0 ? static_cast<jlong>(age) : 0;
 }
 
 JNIEXPORT void JNICALL
@@ -1117,7 +1168,10 @@ Java_com_mouya_musichaptics_NativeBridge_nativeTestUdpHaptic(JNIEnv*, jobject) {
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeIsUdpHapticReady(JNIEnv*, jobject) {
-    return g_use_udp_haptic.load(std::memory_order_acquire) ? JNI_TRUE : JNI_FALSE;
+    // Reports a *working* transport, not merely an initialised one: a socket
+    // whose sends are refused (no daemon bound to the port) must not be counted
+    // as direct drive, or the engine skips its own vibration path for nothing.
+    return udp_peer_alive() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL

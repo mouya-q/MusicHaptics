@@ -328,21 +328,50 @@ class HookCoordinator(
         }
         hook("pause") { track, state ->
             state.playing = false
-            if (tracks.isOnlyTrackStopped(track)) handler.post { engineOrNull()?.onPlaybackPaused() }
+            // Pause is not proof of silence: players routinely pause()/flush()
+            // the AudioTrack while re-buffering, seeking, or swapping tracks, and
+            // reporting every one of those as a playback pause latched the engine
+            // into "[PLAYBACK TRULY PAUSED]" while music was still audible (the
+            // v5.5.0 trace shows six consecutive pause reports). Only report when
+            // no other track keeps playing AND the PCM stream has actually gone
+            // quiet, which markCandidateStopped verifies before latching.
+            if (tracks.isOnlyTrackStopped(track) && audioWritesHaveStalled()) {
+                handler.post { engineOrNull()?.onPlaybackPaused() }
+            }
         }
         hook("stop") { track, state ->
             state.playing = false
-            if (tracks.isOnlyTrackStopped(track)) handler.post { engineOrNull()?.onPlaybackPaused() }
+            if (tracks.isOnlyTrackStopped(track) && audioWritesHaveStalled()) {
+                handler.post { engineOrNull()?.onPlaybackPaused() }
+            }
         }
         hook("flush") { _, state -> state.lastPcmAtMs = 0L }
         hook("release") { track, _ ->
             tracks.remove(track)
             handler.post {
-                if (engineOrNull() != null && SystemClock.elapsedRealtime() - lastAudioWriteAtMs > RELEASE_PAUSE_MS) {
-                    engineOrNull()?.onPlaybackPaused()
+                if (engineOrNull() != null && !audioWritesHaveStalled()) {
+                    // Another AudioTrack is still writing: this release was a
+                    // track swap, not a real stop.
+                    return@post
                 }
+                engineOrNull()?.onPlaybackPaused()
             }
         }
+    }
+
+    /**
+     * Whether PCM writes have actually stopped, as opposed to a lifecycle event
+     * having been reported on a track whose audio is still audible.
+     *
+     * [lastAudioWriteAtMs] is updated by the AudioTrack.write hook on every
+     * successful write, so a recent timestamp means audio is still flowing and
+     * any pause/stop/release arriving now is a transient (re-buffer, seek,
+     * track swap) rather than a user-visible stop.
+     */
+    private fun audioWritesHaveStalled(): Boolean {
+        val last = lastAudioWriteAtMs
+        if (last == 0L) return true
+        return SystemClock.elapsedRealtime() - last > RELEASE_PAUSE_MS
     }
 
     private fun hookMediaPlayers(classLoader: ClassLoader) {

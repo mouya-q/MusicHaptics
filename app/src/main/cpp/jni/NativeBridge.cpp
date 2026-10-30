@@ -75,9 +75,15 @@ static std::atomic<int> g_udp_sock_fd{-1};
 static std::atomic<bool> g_use_udp_haptic{false}; 
 static struct sockaddr_in g_udp_daemon_addr;       
 
-// Whether the UDP transport has a confirmed live consumer. Defined next to the
-// socket state so send_haptic_udp can demote it when a send fails.
-static std::atomic<bool> g_udp_peer_alive{false};
+// UDP receiver state: 0 = unverified, 1 = verified alive, 2 = confirmed dead.
+//
+// A connect()ed loopback UDP socket cannot be validated with one probe: the
+// first sendto always succeeds, and the ICMP port-unreachable raised when
+// nothing is bound to the daemon port only surfaces on the *following* call.
+// Two clean probes are therefore required before the transport is trusted, and
+// a single ECONNREFUSED is enough to condemn it.
+static std::atomic<int> g_udp_peer_state{0};
+static std::atomic<int> g_udp_probe_count{0};
 
 
 #pragma pack(push, 1)
@@ -145,9 +151,10 @@ static bool init_haptic_udp_from_fd(int fd, int port) {
     g_udp_daemon_addr = addr;
     g_udp_sock_fd.store(fd, std::memory_order_release);
     g_use_udp_haptic.store(true, std::memory_order_release);
-    // Arm the liveness flag; the first failed send (ECONNREFUSED on a
-    // connect()ed loopback socket) demotes it again when no daemon is listening.
-    g_udp_peer_alive.store(true, std::memory_order_release);
+    // Reset verification: a fresh socket has an unproven receiver. Native probes
+    // twice before trusting it and remembers a refusal permanently.
+    g_udp_peer_state.store(0, std::memory_order_release);
+    g_udp_probe_count.store(0, std::memory_order_release);
 
     LOGI("[UDP] Haptic UDP initialized from Java fd=%d port=%d", fd, port);
     return true;
@@ -191,7 +198,7 @@ static bool send_haptic_udp(uint8_t amplitude, uint16_t durationMs, uint8_t flag
         // the engine stops believing direct drive works and falls back to its
         // own vibration path instead of going silent.
         if (errno == ECONNREFUSED || errno == EPIPE || errno == ENOTCONN) {
-            g_udp_peer_alive.store(false, std::memory_order_release);
+            g_udp_peer_state.store(2, std::memory_order_release);
         }
         return false;
     }
@@ -369,10 +376,10 @@ bool init_direct_drive_from_fd(int enable_fd, int amplitude_fd, const std::strin
 static std::atomic<int> g_dd_tick_count{0};
 static std::atomic<bool> g_dd_mode_entered{false};
 
-// Whether the UDP transport is initialised and has not yet been caught failing.
+// Whether the UDP transport is initialised and its receiver has been verified.
 static bool udp_peer_alive() {
     return g_use_udp_haptic.load(std::memory_order_acquire) &&
-           g_udp_peer_alive.load(std::memory_order_acquire);
+           g_udp_peer_state.load(std::memory_order_acquire) == 1;
 }
 
 
@@ -634,7 +641,7 @@ static void* scheduler_thread_func(void* arg) {
             (g_direct_drive_fd.load(std::memory_order_acquire) >= 0) ||
             (g_use_root_shell.load(std::memory_order_acquire) && 
              g_root_shell_fd.load(std::memory_order_acquire) >= 0) ||
-            (g_use_udp_haptic.load(std::memory_order_acquire)) ||
+            udp_peer_alive() ||
             (g_use_java_pipe.load(std::memory_order_acquire));
 
         
@@ -1078,11 +1085,21 @@ Java_com_mouya_musichaptics_NativeBridge_nativeTriggerDirectDriveStrike(JNIEnv*,
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeIsDirectDriveAvailable(JNIEnv*, jobject) {
+    // Only transports with a *verified* receiver count as available.
+    //
+    // Previously this returned true as soon as g_use_udp_haptic was set, which
+    // happens the moment a DatagramSocket is created -- even when su is refused
+    // and no daemon is listening. Kotlin then classified the beat as
+    // "NativeDD" and skipped its own vibration path, so the device went
+    // completely silent while native believed it was driving the hardware.
+    // That single optimistic check is the root cause of the "no vibration at
+    // all" reports on v5.4.6/v5.4.7/v5.5.0.
     const bool available =
         g_direct_drive_fd.load(std::memory_order_acquire) >= 0 ||
-        (g_use_root_shell.load(std::memory_order_acquire) && g_root_shell_fd.load(std::memory_order_acquire) >= 0) ||
-        g_use_udp_haptic.load(std::memory_order_acquire) ||
-        g_use_java_pipe.load(std::memory_order_acquire);
+        (g_use_root_shell.load(std::memory_order_acquire) &&
+         g_root_shell_fd.load(std::memory_order_acquire) >= 0) ||
+        g_use_java_pipe.load(std::memory_order_acquire) ||
+        udp_peer_alive();
     return available ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -1168,10 +1185,45 @@ Java_com_mouya_musichaptics_NativeBridge_nativeTestUdpHaptic(JNIEnv*, jobject) {
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeIsUdpHapticReady(JNIEnv*, jobject) {
-    // Reports a *working* transport, not merely an initialised one: a socket
-    // whose sends are refused (no daemon bound to the port) must not be counted
-    // as direct drive, or the engine skips its own vibration path for nothing.
-    return udp_peer_alive() ? JNI_TRUE : JNI_FALSE;
+    // Reports a transport with a *verified* receiver, not merely a live socket.
+    //
+    // A connect()ed loopback UDP socket cannot be validated with a single send:
+    // the first sendto always succeeds and the ICMP port-unreachable raised when
+    // nothing is bound to the daemon port only surfaces on the *following* call.
+    // Two clean probes are therefore required before the transport is trusted,
+    // which is exactly the difference between "a socket exists" (always true,
+    // even with su refused and no daemon) and "someone is reading the packets".
+    if (!g_use_udp_haptic.load(std::memory_order_acquire)) return JNI_FALSE;
+    const int fd = g_udp_sock_fd.load(std::memory_order_acquire);
+    if (fd < 0) return JNI_FALSE;
+    // 2 = already condemned; a dead daemon never comes back without a re-init.
+    if (g_udp_peer_state.load(std::memory_order_acquire) == 2) return JNI_FALSE;
+
+    HapticUdpPacket probe{};
+    probe.magic = MHX_UDP_MAGIC;
+    probe.version = MHX_UDP_VERSION;
+    probe.durationMs = 0;
+    probe.amplitude = 0;
+    probe.flags = 0;
+
+    errno = 0;
+    const ssize_t written = sendto(
+        fd, &probe, sizeof(probe), MSG_DONTWAIT,
+        reinterpret_cast<const sockaddr*>(&g_udp_daemon_addr), sizeof(g_udp_daemon_addr));
+
+    if (written != sizeof(probe) ||
+        errno == ECONNREFUSED || errno == EPIPE || errno == ENOTCONN) {
+        g_udp_peer_state.store(2, std::memory_order_release);
+        LOGI("[UDP] peer probe failed (errno=%d) -> transport confirmed dead", errno);
+        return JNI_FALSE;
+    }
+
+    const int probes = g_udp_probe_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (probes >= 2) {
+        const int prev = g_udp_peer_state.exchange(1, std::memory_order_acq_rel);
+        if (prev != 1) LOGI("[UDP] peer verified alive after %d probes", probes);
+    }
+    return g_udp_peer_state.load(std::memory_order_acquire) == 1 ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL

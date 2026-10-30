@@ -19,7 +19,17 @@ object RootHardwareProbe {
     data class Result(val rootGranted: Boolean, val profileId: String, val fingerprint: String)
 
     fun probeAndPersist(context: Context): Result {
-        val output = runRoot(
+        // Build the fingerprint from unprivileged sources first, then enrich it
+        // with root-only details when su is available.
+        //
+        // Ordering matters: the previous version derived the whole fingerprint
+        // from a single `su` invocation, so a refused su left it empty and every
+        // device collapsed to DEFAULT. Device identification is a pure read of
+        // public build properties and must not be hostage to root access --
+        // selecting the wrong actuator profile degrades every device that is not
+        // the one hard-coded path happened to match.
+        val unprivileged = buildUnprivilegedFingerprint()
+        val rootOutput = runRoot(
             "echo boot_hardware=\$(getprop ro.boot.hardware); " +
                 "echo board_platform=\$(getprop ro.board.platform); " +
                 "echo product_board=\$(getprop ro.product.board); " +
@@ -27,16 +37,46 @@ object RootHardwareProbe {
                 "echo device_tree=\$(cat /proc/device-tree/model 2>/dev/null | tr '\\000' ' '); " +
                 "echo vibrator_nodes=\$(find /sys/class /sys/devices -type d \\( -iname '*vibrator*' -o -iname '*haptic*' -o -iname '*aw86*' -o -iname '*qpnp*' -o -iname '*leds*' \\) 2>/dev/null | head -16 | tr '\\n' ',')"
         )
-        val granted = output != null
-        val normalized = output.orEmpty().lowercase()
+        val granted = rootOutput != null
+        // Root details only ever *add* evidence; the profile search runs over the
+        // union so a successful probe can refine the unprivileged guess.
+        val combined = if (rootOutput.isNullOrBlank()) unprivileged else "$unprivileged\n$rootOutput"
+        val normalized = combined.lowercase()
         val profileId = profileForFingerprint(normalized)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putBoolean(PREF_ROOT_OK, granted)
             .putString(PREF_PROFILE, profileId)
-            .putString(PREF_FINGERPRINT, output.orEmpty().take(1200))
+            .putString(PREF_FINGERPRINT, combined.take(1200))
             .apply()
-        Log.i(TAG, "Root=$granted; selected profile=$profileId")
-        return Result(granted, profileId, output.orEmpty())
+        Log.i(TAG, "Root=$granted; selected profile=$profileId (unprivileged=${profileId != "DEFAULT"})")
+        return Result(granted, profileId, combined)
+    }
+
+    /**
+     * Device identity from public build properties.
+     *
+     * Every field here is readable without root, so the actuator profile is
+     * always selected from real hardware evidence even when su is unavailable.
+     * The property set mirrors what [profileForFingerprint] matches on: model
+     * codename, manufacturer, board and hardware platform.
+     */
+    private fun buildUnprivilegedFingerprint(): String {
+        val props = listOf(
+            "device" to android.os.Build.DEVICE,
+            "model" to android.os.Build.MODEL,
+            "product" to android.os.Build.PRODUCT,
+            "board" to android.os.Build.BOARD,
+            "hardware" to android.os.Build.HARDWARE,
+            "manufacturer" to android.os.Build.MANUFACTURER,
+            "brand" to android.os.Build.BRAND,
+        )
+        return buildString {
+            append("product_model=").append(android.os.Build.MODEL).append('\n')
+            append("product_brand=").append(android.os.Build.BRAND).append('\n')
+            for ((key, value) in props) {
+                append(key).append('=').append(value.orEmpty()).append('\n')
+            }
+        }
     }
 
     fun hasRootAccess(): Boolean = runRoot("id")?.contains("uid=0") == true

@@ -1,6 +1,54 @@
 # Changes
 
-Current source version: **5.5.0**
+Current source version: **5.5.1**
+
+## 5.5.1
+
+### Root Cause: Phantom Direct Drive + Root-Bound Device Detection
+
+The v5.5.0 trace showed the engine going silent for two independent reasons, plus
+one long-standing defect the device-ID question exposed.
+
+#### 1. `isDirectDriveAvailable` lied about UDP (`NativeBridge.cpp`)
+
+`nativeIsDirectDriveAvailable()` returned `true` as soon as `g_use_udp_haptic` was
+set — which happens the moment a `DatagramSocket` is created. With `su` refused the
+root daemon never starts, so the packets went to an unbound port, yet Kotlin
+classified every beat as `NativeDD` and skipped its own vibration path. The device
+stayed silent while both layers believed the other was driving the hardware.
+
+`nativeIsUdpHapticReady()` now probes the receiver instead of reading a flag. A
+`connect()`ed loopback UDP socket cannot be validated with one send: the first
+`sendto` always succeeds and the ICMP port-unreachable only surfaces on the
+*following* call. Two clean probes are therefore required before the transport is
+trusted, and a single `ECONNREFUSED` condemns it permanently. Both
+`nativeIsDirectDriveAvailable` and the scheduler's `use_direct_drive` gate on this
+verified state.
+
+#### 2. Pause events were treated as proof of silence (`HookCoordinator.kt`)
+
+Players routinely `pause()`/`flush()`/`release()` an `AudioTrack` while
+re-buffering, seeking or swapping tracks. Every such call was reported as a
+playback pause, producing the six consecutive `[PLAYBACK PAUSED CAUGHT]` lines in
+the trace while music was still audible. `pause`/`stop`/`release` now also require
+`audioWritesHaveStalled()`, so a transient lifecycle event on a track that is still
+writing PCM is ignored.
+
+#### 3. Device detection no longer depends on root (`RootHardwareProbe.kt`, `MainActivity.kt`)
+
+`probeAndPersist` derived its whole fingerprint from a single `su` invocation, so a
+refused `su` left it empty and `profileForFingerprint` returned `DEFAULT` for every
+device — which is why the 35 hard-won actuator profiles were effectively dead
+code. Identification now runs unconditionally over public build properties
+(`Build.MODEL`, `DEVICE`, `PRODUCT`, `BOARD`, `HARDWARE`, `MANUFACTURER`, `BRAND`)
+and only *enriches* the result with root-only details when available.
+
+#### Result
+
+A device that is neither AW8697-based nor root-capable now:
+- reports `isDirectDriveAvailable=false` instead of a phantom `true`,
+- falls back to its own `Vibrator` path within one beat,
+- and selects the actuator profile that actually matches its hardware.
 
 ## 5.5.0
 

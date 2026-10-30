@@ -26,8 +26,13 @@ class MainActivity : ComponentActivity() {
         }
 
         Thread {
+            // Device identification runs unconditionally: it reads public build
+            // properties and no longer depends on su. Gating it behind root meant
+            // the profile was never written when su was refused, so every device
+            // silently fell back to DEFAULT and the actuator matching work was
+            // effectively dead code.
+            runCatching { RootHardwareProbe.probeAndPersist(this) }
             if (runCatching { RootHardwareProbe.hasRootAccess() }.getOrDefault(false)) {
-                runCatching { RootHardwareProbe.probeAndPersist(this) }
                 runCatching { startRootHapticDaemon() }
             }
             runCatching { NativeBridge.preloadLibrary(this) }

@@ -289,6 +289,15 @@ class HapticEngine(
             nativeSchedulerActive = nativeBridge.startScheduler()
             LogBroadcaster.sendLog(context, "[Scheduler] startScheduler returned=$nativeSchedulerActive")
 
+            // Report which analyser is live. This is the first thing to check in
+            // an exported log: a false here means the Rust archive did not link
+            // and the C++ analyser is running instead.
+            val rustReady = nativeBridge.isRustCoreAvailable()
+            val backend = nativeBridge.analysisBackend()
+            val dspMsg = "[DSP] Rust core available=$rustReady backend=${if (backend == 0) "Rust" else "C++"}"
+            Log.i(TAG, dspMsg)
+            LogBroadcaster.sendLog(context, dspMsg)
+
             if (nativeSchedulerActive) {
                 
                 

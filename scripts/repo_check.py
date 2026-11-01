@@ -103,6 +103,65 @@ cmake = (CPP / "CMakeLists.txt").read_text(encoding="utf-8", errors="ignore")
 for flag in ("max-page-size=16384", "common-page-size=16384"):
     if flag not in cmake: errors.append(f"missing 16KB flag: {flag}")
 
+# --- Rust DSP core -----------------------------------------------------------
+#
+# The Rust core is linked into libnative-bridge.so as a static archive, so a
+# missing or desynced build breaks the whole native library at link time rather
+# than at runtime. These checks fail fast with a clear message.
+RUST = APP / "rust"
+rust_src = RUST / "src"
+for rel in ("Cargo.toml", "src/lib.rs", "src/engine.rs", "src/onset.rs",
+            "src/filter.rs", "src/ring.rs", "src/ffi.rs", "build-android.sh"):
+    if not (RUST / rel).exists():
+        errors.append(f"missing rust source: {rel}")
+
+abi_header = CPP / "jni" / "mhx_dsp_abi.h"
+if not abi_header.exists():
+    errors.append("missing Rust ABI header: app/src/main/cpp/jni/mhx_dsp_abi.h")
+
+if rust_src.exists() and abi_header.exists():
+    rust_text = "\n".join(
+        p.read_text(encoding="utf-8", errors="ignore")
+        for p in rust_src.glob("*.rs")
+    )
+    header_text = abi_header.read_text(encoding="utf-8", errors="ignore")
+
+    # Every extern "C" symbol declared in the header must be defined with
+    # #[no_mangle] in Rust, and vice versa. A mismatch links to a null reference
+    # and presents as "analysis returns zeros" -- silent by nature.
+    header_symbols = set(re.findall(r"\b(mhx_[a-z0-9_]+)\s*\(", header_text))
+    rust_exports = set(re.findall(r"#\[no_mangle\]\s*pub\s+(?:unsafe\s+)?extern\s+\"C\"\s+fn\s+(mhx_[a-z0-9_]+)", rust_text))
+    for name in sorted(header_symbols - rust_exports):
+        errors.append(f"rust symbol not exported: {name}")
+    for name in sorted(rust_exports - header_symbols):
+        errors.append(f"rust symbol missing from abi header: {name}")
+
+    # The telemetry array size is duplicated in three places; assert they agree.
+    m = re.search(r"MHX_TELEMETRY_LEN\s*=\s*(\d+)", header_text)
+    if m:
+        header_len = int(m.group(1))
+        m2 = re.search(r"TELEMETRY_LEN:\s*usize\s*=\s*(\d+)", rust_text)
+        if m2 and int(m2.group(1)) != header_len:
+            errors.append(
+                f"telemetry length mismatch: header={header_len} rust={m2.group(1)}"
+            )
+
+    # The ABI version must match too, otherwise a stale archive is accepted.
+    m = re.search(r"MHX_DSP_ABI_VERSION\s*=\s*(\d+)", header_text)
+    m2 = re.search(r"fn\s+mhx_abi_version\s*\(\s*\)\s*->\s*u32\s*\{\s*(\d+)", rust_text)
+    if m and m2 and m.group(1) != m2.group(1):
+        errors.append(f"ABI version mismatch: header={m.group(1)} rust={m2.group(1)}")
+
+# The Rust archive must be produced before CMake configures, or the build dies
+# with the FATAL_ERROR in CMakeLists. Check the CI workflow still sequences it.
+workflow = ROOT / ".github" / "workflows" / "build.yml"
+if workflow.exists():
+    wf = workflow.read_text(encoding="utf-8", errors="ignore")
+    if "build-android.sh" not in wf:
+        errors.append("CI workflow does not build the Rust core")
+    if "cargo test" not in wf:
+        errors.append("CI workflow does not run the Rust tests")
+
 if errors:
     print("repository check failed")
     for error in errors: print("-", error)

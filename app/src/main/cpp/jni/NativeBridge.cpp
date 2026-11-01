@@ -20,10 +20,76 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 #include "haptic/HapticEngine.hpp"
+#include "mhx_dsp_abi.h"
+
+// Analysis source selection.
+//
+// The Rust core runs alongside the existing C++ analyser rather than replacing
+// it outright. Two reasons:
+//
+//  * The C++ path is the one that finally produced working vibration in
+//    v5.5.3, so it stays available as an instant fallback if the Rust core
+//    misbehaves on a device we cannot test locally.
+//  * Both can run over the same PCM for one release, so the telemetry of the
+//    two implementations can be compared on real music instead of trusting a
+//    port by inspection.
+//
+// Selection is per-engine and defaults to Rust; mhxSetAnalysisBackend() lets the
+// Kotlin side (and the dashboard) switch at runtime.
+enum class AnalysisBackend : int {
+    Rust = 0,
+    Cpp = 1,
+};
+
+// A C++ analyser that additionally owns a Rust core.
+//
+// Inheriting rather than wrapping keeps every existing call site valid: the
+// scheduler thread, the direct-drive paths and all JNI signatures still see a
+// `haptic::HapticEngine*`, so the verified v5.5.3 output chain is untouched. The
+// Rust core is consulted only for analysis, and only when selected.
+struct EngineSlot : public haptic::HapticEngine {
+    MhxEngineHandle rust = nullptr;
+    std::atomic<int> backend{static_cast<int>(AnalysisBackend::Rust)};
+    // Set once the Rust core has been proven linkable and callable.
+    std::atomic<bool> rust_ready{false};
+    /// Counters for the diagnostic line.
+    std::atomic<uint64_t> rust_calls{0};
+    std::atomic<uint64_t> rust_onsets{0};
+};
 
 static JavaVM* g_jvm = nullptr;
 static std::atomic<bool> g_scheduler_running{false};
 static pthread_t g_scheduler_thread{};
+
+// Read one semantic frame from whichever analyser is active.
+//
+// Centralised so the four call sites in the scheduler and the JNI accessor all
+// agree on the fallback rules instead of each duplicating the backend check.
+// Returns the number of frames produced (0 or 1).
+static int read_semantic_frame(haptic::HapticEngine* engine,
+                               haptic::SemanticHapticFrame* out,
+                               int maxFrames) {
+    if (!engine) return 0;
+    auto* slot = static_cast<EngineSlot*>(engine);
+    const bool rustActive = slot->rust_ready.load(std::memory_order_acquire) &&
+                            slot->backend.load(std::memory_order_acquire) ==
+                                static_cast<int>(AnalysisBackend::Rust);
+    if (!rustActive) {
+        return engine->getSemanticFrames(out, maxFrames);
+    }
+
+    // The Rust core reports already-scaled 0..1 band energies; the C++ semantic
+    // frame carries the same four channels plus no loudness, so they map
+    // directly. Values are scaled by 255 to match the C++ amplitude convention
+    // the downstream strike math expects.
+    float frame[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    if (!mhx_engine_pop_semantic(slot->rust, frame)) return 0;
+    out[0].kickAmp = frame[0] * 255.0f;
+    out[0].snareAmp = frame[1] * 255.0f;
+    out[0].vocalAmp = frame[2] * 255.0f;
+    out[0].bodyAmp = frame[3] * 255.0f;
+    return 1;
+}
 
 
 static std::atomic<int> g_direct_drive_fd{-1};
@@ -648,7 +714,28 @@ static void* scheduler_thread_func(void* arg) {
         
         
         haptic::HapticEngine::OnsetFrame onsetFrames[1] = {};
-        const int onsetN = engine->getOnsetFrames(onsetFrames, 1);
+        int onsetN = 0;
+
+        // Pull onsets from whichever analyser is active. The Rust core exposes
+        // its frames through mhx_engine_pop_onset; the C++ analyser through
+        // getOnsetFrames. Both feed the same downstream strike logic, so the
+        // hardware side is unaffected by the choice.
+        auto* slot = static_cast<EngineSlot*>(engine);
+        const bool rustActive = slot->rust_ready.load(std::memory_order_acquire) &&
+                                slot->backend.load(std::memory_order_acquire) ==
+                                    static_cast<int>(AnalysisBackend::Rust);
+        if (rustActive) {
+            float rustFrame[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            if (mhx_engine_pop_onset(slot->rust, rustFrame)) {
+                onsetFrames[0].kick = rustFrame[0];
+                onsetFrames[0].snare = rustFrame[1];
+                onsetFrames[0].vocal = rustFrame[2];
+                onsetFrames[0].body = rustFrame[3];
+                onsetN = 1;
+            }
+        } else {
+            onsetN = engine->getOnsetFrames(onsetFrames, 1);
+        }
         float beatAccent = 0.0f;
         if (onsetN > 0) {
             struct timespec ts;
@@ -681,7 +768,7 @@ static void* scheduler_thread_func(void* arg) {
                     // alone only captures the momentary spike, not the overall
                     // volume of the music at that point.
                     haptic::SemanticHapticFrame semFr[1] = {};
-                    const int semN = engine->getSemanticFrames(semFr, 1);
+                    const int semN = read_semantic_frame(engine, semFr, 1);
                     float rmsEnergy = 0.0f;
                     if (semN > 0) {
                         rmsEnergy = std::clamp(
@@ -744,7 +831,7 @@ static void* scheduler_thread_func(void* arg) {
         if (use_direct_drive &&
             g_direct_driver_kind.load(std::memory_order_acquire) == static_cast<int>(DirectDriverKind::StrikeOnly)) {
             haptic::SemanticHapticFrame texFrames[1];
-            const int texN = engine->getSemanticFrames(texFrames, 1);
+            const int texN = read_semantic_frame(engine, texFrames, 1);
             if (texN > 0) {
                 const float texEnergy =
                       texFrames[0].kickAmp  * 0.45f
@@ -786,7 +873,7 @@ static void* scheduler_thread_func(void* arg) {
             
             if (!strikeOnlyDriver) {
                 haptic::SemanticHapticFrame semFrames[1];
-                const int semN = engine->getSemanticFrames(semFrames, 1);
+                const int semN = read_semantic_frame(engine, semFrames, 1);
 
                 float continuous = 0.0f;
                 if (semN > 0) {
@@ -885,8 +972,57 @@ Java_com_mouya_musichaptics_NativeBridge_nativeSetDirectDriveNodes(
 
 JNIEXPORT jlong JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeCreateEngine(JNIEnv* env, jobject thiz) {
-    auto* engine = new haptic::HapticEngine();
-    return reinterpret_cast<jlong>(engine);
+    auto* slot = new EngineSlot();
+
+    // Prove the Rust archive actually linked before trusting it with audio.
+    // A failed static link can still yield a loadable .so whose analysis calls
+    // resolve to nothing, which would look exactly like "no beats" -- the exact
+    // failure mode this refactor is meant to eliminate.
+    const uint32_t abi = mhx_abi_version();
+    if (abi != MHX_DSP_ABI_VERSION) {
+        LOGE("[DSP] ABI mismatch: header=%u library=%u -- Rust core disabled",
+             MHX_DSP_ABI_VERSION, abi);
+    } else if (mhx_self_test() != 0) {
+        LOGE("[DSP] Rust self-test failed -- falling back to the C++ analyser");
+    } else {
+        slot->rust = mhx_engine_create(48000.0f);
+        if (slot->rust) {
+            slot->rust_ready.store(true, std::memory_order_release);
+            LOGI("[DSP] Rust core ready (abi=%u)", abi);
+        } else {
+            LOGE("[DSP] mhx_engine_create returned null -- falling back to C++");
+        }
+    }
+
+    return reinterpret_cast<jlong>(slot);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeIsRustCoreAvailable(JNIEnv*, jobject, jlong ptr) {
+    if (ptr == 0) return JNI_FALSE;
+    auto* slot = reinterpret_cast<EngineSlot*>(ptr);
+    return slot->rust_ready.load(std::memory_order_acquire) ? JNI_TRUE : JNI_FALSE;
+}
+
+// 0 = Rust, 1 = C++. Returns the backend actually in effect, so the caller can
+// report a fallback instead of silently believing the switch took.
+JNIEXPORT jint JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeSetAnalysisBackend(JNIEnv*, jobject, jlong ptr, jint backend) {
+    if (ptr == 0) return 1;
+    auto* slot = reinterpret_cast<EngineSlot*>(ptr);
+    if (backend == 0 && !slot->rust_ready.load(std::memory_order_acquire)) {
+        slot->backend.store(1, std::memory_order_release);
+        return 1;
+    }
+    slot->backend.store(backend == 0 ? 0 : 1, std::memory_order_release);
+    return slot->backend.load(std::memory_order_acquire);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeGetAnalysisBackend(JNIEnv*, jobject, jlong ptr) {
+    if (ptr == 0) return 1;
+    auto* slot = reinterpret_cast<EngineSlot*>(ptr);
+    return slot->backend.load(std::memory_order_acquire);
 }
 
 JNIEXPORT void JNICALL
@@ -900,8 +1036,15 @@ Java_com_mouya_musichaptics_NativeBridge_nativeDestroyEngine(JNIEnv* env, jobjec
     }
 
     if (ptr != 0) {
-        auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
-        delete engine;
+        auto* slot = reinterpret_cast<EngineSlot*>(ptr);
+        // Release the Rust core first: the scheduler is already joined above, so
+        // no analysis call can be in flight.
+        if (slot->rust) {
+            mhx_engine_destroy(slot->rust);
+            slot->rust = nullptr;
+            slot->rust_ready.store(false, std::memory_order_release);
+        }
+        delete slot;
         LOGI("[DD] engine deleted (ptr=%lld)", (long long)ptr);
     }
 
@@ -923,6 +1066,15 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigure(
     auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
     if (engine) {
         engine->configure(sampleRate, lowCut, highCut, amp, presetId);
+        // Keep the Rust analyser on the same rate. Without this its band filters
+        // keep the construction-time coefficients, and a track at 44.1 kHz would
+        // be analysed with 48 kHz edges -- a ~9% shift across every band.
+        auto* slot = static_cast<EngineSlot*>(engine);
+        if (slot->rust_ready.load(std::memory_order_acquire) && slot->rust) {
+            if (mhx_engine_set_sample_rate(slot->rust, sampleRate) == 1) {
+                LOGI("[DSP] Rust core rebuilt band filters for %.0f Hz", sampleRate);
+            }
+        }
     }
 }
 
@@ -939,6 +1091,15 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigureOutput(
                                 impactGain, continuousGain, textureGain, masterGain, onsetThreshold,
                                 attackImpactMs, decayImpactMs, attackContinuousMs, decayContinuousMs,
                                 releaseMs, sustainLevel, lraF0, lraQ);
+        // Mirror the two knobs the Rust analyser owns: the UI level scales
+        // published band energy, and the onset gate is derived from sensitivity.
+        auto* slot = static_cast<EngineSlot*>(engine);
+        if (slot->rust_ready.load(std::memory_order_acquire) && slot->rust) {
+            mhx_engine_set_user_amplitude(slot->rust, styleAmpScale);
+            // `sharpness` in the C++ path biases the transient gate; map it onto
+            // the Rust sensitivity so the UI style still has an audible effect.
+            mhx_engine_set_sensitivity(slot->rust, 0.5f + sharpness);
+        }
     }
 }
 
@@ -968,7 +1129,25 @@ Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
     
     jfloat* telemetry = static_cast<jfloat*>(env->GetPrimitiveArrayCritical(outTelemetry, nullptr));
     if (!telemetry) return;
-    engine->processAudioBlock(inputPtr, size, telemetry);
+
+    auto* slot = static_cast<EngineSlot*>(engine);
+    const bool useRust = slot->rust_ready.load(std::memory_order_acquire) &&
+                         slot->backend.load(std::memory_order_acquire) ==
+                             static_cast<int>(AnalysisBackend::Rust);
+
+    if (useRust) {
+        // Rust writes its own telemetry layout into the shared array. Onsets are
+        // drained from the Rust rings by the scheduler thread through
+        // mhx_engine_pop_onset, so nothing extra is needed here beyond the
+        // counters used by the diagnostic line.
+        mhx_engine_process(slot->rust, inputPtr, size, telemetry);
+        slot->rust_calls.fetch_add(1, std::memory_order_relaxed);
+        const uint64_t emitted = static_cast<uint64_t>(telemetry[13] < 0.0f ? 0.0f : telemetry[13]);
+        slot->rust_onsets.store(emitted, std::memory_order_relaxed);
+    } else {
+        engine->processAudioBlock(inputPtr, size, telemetry);
+    }
+
     env->ReleasePrimitiveArrayCritical(outTelemetry, telemetry, 0);
     // Record arrival only after the DSP accepted the block: a crashed or
     // rejected block must not look like healthy audio activity.
@@ -994,6 +1173,10 @@ Java_com_mouya_musichaptics_NativeBridge_nativeClearHapticBuffer(
     auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
     if (engine) {
         engine->clearHapticBuffer();
+        auto* slot = static_cast<EngineSlot*>(engine);
+        if (slot->rust_ready.load(std::memory_order_acquire) && slot->rust) {
+            mhx_engine_reset(slot->rust);
+        }
     }
 }
 JNIEXPORT jboolean JNICALL
@@ -1057,7 +1240,7 @@ Java_com_mouya_musichaptics_NativeBridge_nativeGetSemanticFrames(JNIEnv* env, jo
     const int framesToRead = std::min(static_cast<int>(capacity), std::min(static_cast<int>(maxFrames), 64));
     if (framesToRead <= 0) return 0;
     haptic::SemanticHapticFrame frames[64] = {};
-    const int count = engine->getSemanticFrames(frames, framesToRead);
+    const int count = read_semantic_frame(engine, frames, framesToRead);
     if (count <= 0) return 0;
     float flat[64 * 4] = {};
     for (int i = 0; i < count; ++i) {

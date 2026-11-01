@@ -1,0 +1,23 @@
+[package]
+name = "mhx_dsp"
+version = "6.0.0"
+edition = "2021"
+description = "Real-time music haptics DSP core for MusicHapticsX"
+
+[lib]
+name = "mhx_dsp"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+
+[profile.release]
+# The DSP runs on a dedicated THREAD_PRIORITY_AUDIO worker and must never hold
+# a lock across a callback or allocate on the hot path; these settings keep the
+# codegen predictable rather than maximally clever.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+overflow-checks = false
+debug-assertions = false

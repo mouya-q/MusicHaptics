@@ -301,6 +301,56 @@ fun isDirectDriveAvailable(): Boolean {
     }
 
     /**
+     * Whether the Rust DSP core linked successfully and is ready to analyse.
+     *
+     * False means the C++ analyser is in use. Reported to the dashboard so a
+     * failed static link shows up as a build problem rather than a silent
+     * behaviour difference.
+     */
+    fun isRustCoreAvailable(): Boolean {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
+            try {
+                return nativeIsRustCoreAvailable(_ptr)
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "isRustCoreAvailable failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    /**
+     * Select the analysis backend: 0 = Rust, 1 = C++.
+     *
+     * Returns the backend actually in effect. A request for Rust on an engine
+     * without a linked core returns 1, so callers can log the fallback instead of
+     * assuming the switch took.
+     */
+    fun setAnalysisBackend(backend: Int): Int {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
+            try {
+                return nativeSetAnalysisBackend(_ptr, backend)
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "setAnalysisBackend failed: ${e.message}")
+            }
+        }
+        return 1
+    }
+
+    fun analysisBackend(): Int {
+        val _ptr = snapshotPtr()
+        if (_ptr != 0L) {
+            try {
+                return nativeGetAnalysisBackend(_ptr)
+            } catch (e: Exception) {
+                Log.e("NativeBridge", "analysisBackend failed: ${e.message}")
+            }
+        }
+        return 1
+    }
+
+    /**
      * Milliseconds since the last PCM block reached the DSP, or -1 when no
      * block has ever arrived. Used to decide whether a latched pause should be
      * released: unlike the frame rings this reading is not consumed by anyone,
@@ -379,6 +429,9 @@ fun isDirectDriveAvailable(): Boolean {
     private external fun nativeSetDirectDriveFd(enableFd: Int, amplitudeFd: Int, enablePath: String, amplitudePath: String): Boolean
     private external fun nativeTriggerDirectDriveStrike(durationMs: Int, amplitude: Int): Boolean
     private external fun nativeIsDirectDriveAvailable(): Boolean
+    private external fun nativeIsRustCoreAvailable(ptr: Long): Boolean
+    private external fun nativeSetAnalysisBackend(ptr: Long, backend: Int): Int
+    private external fun nativeGetAnalysisBackend(ptr: Long): Int
     private external fun nativeInitRootPipe(pipeFd: Int, enablePath: String, amplitudePath: String): Boolean
     private external fun nativeIsRootPipeAvailable(): Boolean
     private external fun nativeInitUdpHaptic(port: Int): Boolean

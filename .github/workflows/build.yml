@@ -61,6 +61,25 @@ jobs:
           "$SDKMGR" --sdk_root="$ANDROID_HOME" --install \
             "ndk;27.0.12077973" "build-tools;35.0.0" "cmake;3.22.1" "platforms;android-35"
 
+      # The Rust core is compiled to a static archive that CMake links into
+      # libnative-bridge.so. Its unit tests run on the host target first, so a
+      # logic regression fails the build instead of shipping and presenting as
+      # "no vibration" on device.
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Test Rust DSP core (host)
+        working-directory: app/src/main/rust
+        run: cargo test --verbose
+
+      - name: Build Rust DSP core (arm64)
+        run: |
+          chmod +x app/src/main/rust/build-android.sh
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+          ./app/src/main/rust/build-android.sh
+
       - name: Repository checks
         run: python3 scripts/repo_check.py
 

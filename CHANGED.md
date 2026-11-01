@@ -1,6 +1,77 @@
 # Changes
 
-Current source version: **5.5.3**
+Current source version: **6.0.0**
+
+## 6.0.0
+
+### Rust DSP Core
+
+Vibration finally works in 5.5.3. This release replaces the analysis core with a
+Rust implementation, and fixes seven quality defects that the working trace made
+visible for the first time.
+
+The JNI surface, every Kotlin binding and all direct-drive hardware paths are
+unchanged. The Rust core is compiled to a static archive and linked into
+`libnative-bridge.so`, so the loader contract inside the hooked process is still a
+single `System.loadLibrary("native-bridge")`.
+
+#### Defects this release fixes
+
+These were measured from `MusicHapticsX_log_20261101_111815.txt`:
+
+1. **`texRms` pinned at exactly 0.1.** Band energy was a sum of FFT magnitudes,
+   which scales with window gain and therefore carries no audible information.
+   Bands are now RMS of band-limited signals, so the value tracks content.
+
+2. **`BODY` always zero.** The body term multiplied out to nothing whenever the
+   air band was idle. It is now a real measurement over low-mid, vocal, presence
+   and air.
+
+3. **VOCAL outranked KICK.** Classification compared raw magnitudes while vocal
+   onset used a `threshold * 0.8` relaxation. Bands are scored by ratio to their
+   own recent peak, with kick weighted highest, so a real kick wins.
+
+4. **Every strike saturated at `peak=255`.** Activation was clamped, erasing
+   dynamics. It is now reported as how far past the gate the winner was, squashed
+   into 0..1, which preserves relative strength.
+
+5. **Fixed 60 ms cooldown regardless of tempo.** Refractory is now expressed in
+   milliseconds and converted per window period.
+
+6. **Sample-rate changes left stale filter coefficients.** The trace shows
+   44100 -> 48000 mid-session; reusing the old coefficients shifts every band edge
+   by ~9%. Coefficients are rebuilt on rate change and the rebuild is logged.
+
+7. **Analysis lagged behind ingest.** `accepted` ran ~4% ahead of `processed`
+   because the queue could not hold a full write. The engine now consumes every
+   sample it is given and reports both counters.
+
+#### Verification
+
+- 40+ unit tests cover the ring, filters, FFT, detector and engine. They are
+  safe-Rust and run on the host in CI before the Android build, so a logic
+  regression fails the build instead of shipping as silent silence.
+- `repo_check.py` now cross-checks the C ABI header against the Rust exports and
+  asserts the telemetry length and ABI version agree on both sides.
+- A runtime self-test (`mhx_self_test`) runs at engine creation. A failed static
+  link is reported as `Rust core available=false` instead of presenting as a
+  device fault.
+- The C++ analyser remains selectable at runtime as an instant fallback, so a
+  problem in the new core cannot again leave the device silent.
+
+#### Layout
+
+```text
+app/src/main/rust/
+  Cargo.toml           profile: fat LTO, panic=abort, strip
+  build-android.sh     NDK cross-compile + symbol verification
+  src/ring.rs          lock-free SPSC frame transport
+  src/filter.rs        biquad sections, block RMS, radix-2 FFT
+  src/onset.rs         adaptive per-band onset detection
+  src/engine.rs        PCM -> bands -> onsets + telemetry
+  src/ffi.rs           the C ABI consumed by NativeBridge.cpp
+app/src/main/cpp/jni/mhx_dsp_abi.h   the contract, shared by both sides
+```
 
 ## 5.5.3
 

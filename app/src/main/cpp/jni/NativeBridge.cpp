@@ -1,8 +1,10 @@
 #include <jni.h>
 #include <cmath>
+#include <algorithm>
 #include <pthread.h>
 #include <time.h>
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <fcntl.h>
 #include <unistd.h>
@@ -55,6 +57,11 @@ struct EngineSlot : public haptic::HapticEngine {
     /// Counters for the diagnostic line.
     std::atomic<uint64_t> rust_calls{0};
     std::atomic<uint64_t> rust_onsets{0};
+    std::atomic<float> input_sample_rate{48000.0f};
+    // The Rust Engine has one mutable producer. Serialize PCM processing,
+    // preference updates and reset calls; scheduler consumers only pop from
+    // the independent lock-free rings and never take this mutex.
+    std::mutex rustProducerMutex;
 };
 
 static JavaVM* g_jvm = nullptr;
@@ -687,7 +694,7 @@ static void* scheduler_thread_func(void* arg) {
 
     
     jclass bridgeClass = env->GetObjectClass(bridgeRef);
-    jmethodID onBeatTrigger = env->GetMethodID(bridgeClass, "onBeatTrigger", "(Ljava/lang/String;I)V");
+    jmethodID onBeatTrigger = env->GetMethodID(bridgeClass, "onBeatTrigger", "(Ljava/lang/String;IZ)V");
     env->DeleteLocalRef(bridgeClass);
     if (!onBeatTrigger) {
         LOGW("[DD] beat callback method unavailable; event output disabled");
@@ -828,7 +835,12 @@ static void* scheduler_thread_func(void* arg) {
                     if (onBeatTrigger) {
                         jstring eventName = eventType == 1 ? evKick : eventType == 2 ? evSnare : eventType == 3 ? evVocal : evBody;
                         if (eventName) {
-                            env->CallVoidMethod(bridgeRef, onBeatTrigger, eventName, static_cast<jint>(intensity));
+                            // Pass the scheduler's exact path decision. Kotlin
+                            // must not re-probe asynchronously or it can skip the
+                            // waveform fallback after the native route has died.
+                            env->CallVoidMethod(bridgeRef, onBeatTrigger, eventName,
+                                                static_cast<jint>(intensity),
+                                                use_direct_drive ? JNI_TRUE : JNI_FALSE);
                             if (env->ExceptionCheck()) env->ExceptionClear();
                         }
                     }
@@ -1196,6 +1208,7 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigure(
         // be analysed with 48 kHz edges -- a ~9% shift across every band.
         auto* slot = static_cast<EngineSlot*>(engine);
         if (slot->rust_ready.load(std::memory_order_acquire) && slot->rust) {
+            std::lock_guard<std::mutex> rustLock(slot->rustProducerMutex);
             if (mhx_engine_set_sample_rate(slot->rust, sampleRate) == 1) {
                 LOGI("[DSP] Rust core rebuilt band filters for %.0f Hz", sampleRate);
             }
@@ -1232,6 +1245,7 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigureOutput(
         // at, so "bass" and "crisp" produced almost identical haptics.
         auto* slot = static_cast<EngineSlot*>(engine);
         if (slot->rust_ready.load(std::memory_order_acquire) && slot->rust) {
+            std::lock_guard<std::mutex> rustLock(slot->rustProducerMutex);
             // Publish pre-output band energy. The shared scheduler applies user,
             // style and master gains once; baking styleAmpScale here caused a
             // second multiplication and made quiet/loud passages collapse.
@@ -1270,7 +1284,8 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigureProfile(
 
 JNIEXPORT void JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
-    JNIEnv* env, jobject thiz, jlong ptr, jobject directInputBuffer, jint size, jfloatArray outTelemetry) {
+    JNIEnv* env, jobject thiz, jlong ptr, jobject directInputBuffer, jint size,
+    jfloat sampleRateHz, jfloatArray outTelemetry) {
 
     auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
     if (!engine || !directInputBuffer || !outTelemetry) return;
@@ -1278,34 +1293,75 @@ Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
     auto* inputPtr = static_cast<float*>(env->GetDirectBufferAddress(directInputBuffer));
     if (!inputPtr) return;
 
-    
-    
-    
-    
-    jfloat* telemetry = static_cast<jfloat*>(env->GetPrimitiveArrayCritical(outTelemetry, nullptr));
-    if (!telemetry) return;
-
     auto* slot = static_cast<EngineSlot*>(engine);
     const bool useRust = slot->rust_ready.load(std::memory_order_acquire) &&
                          slot->backend.load(std::memory_order_acquire) ==
                              static_cast<int>(AnalysisBackend::Rust);
+    std::unique_lock<std::mutex> rustLock(slot->rustProducerMutex, std::defer_lock);
+    if (useRust) rustLock.lock();
+
+    jfloat* telemetry = static_cast<jfloat*>(env->GetPrimitiveArrayCritical(outTelemetry, nullptr));
+    if (!telemetry) return;
+    const float safeRate = std::clamp(
+        std::isfinite(sampleRateHz) ? sampleRateHz : 48000.0f,
+        8000.0f, 384000.0f);
+    const float previousRate = slot->input_sample_rate.load(std::memory_order_relaxed);
+    if (std::fabs(previousRate - safeRate) >= 0.5f) {
+        // Apply the rate attached to this queued PCM block, not the last
+        // AudioTrack constructor observed by the app. This keeps interleaved
+        // track formats from silently changing one another's filter coefficients.
+        engine->setInputSampleRate(safeRate);
+        if (useRust && slot->rust) {
+            // One DSP producer calls this between process blocks. The scheduler
+            // consumes only the independent lock-free onset/semantic queues.
+            mhx_engine_set_sample_rate(slot->rust, safeRate);
+        }
+        slot->input_sample_rate.store(safeRate, std::memory_order_relaxed);
+        LOGI("[DSP] active AudioTrack source rate -> %.0f Hz", safeRate);
+    }
 
     if (useRust) {
-        // Rust writes its own telemetry layout into the shared array. Onsets are
-        // drained from the Rust rings by the scheduler thread through
-        // mhx_engine_pop_onset, so nothing extra is needed here beyond the
-        // counters used by the diagnostic line.
-        mhx_engine_process(slot->rust, inputPtr, size, telemetry);
+        // Rust exposes 15 telemetry values; Kotlin and the legacy C++ backend
+        // consume a 32-slot contract. Translate explicitly rather than letting
+        // the Rust indices masquerade as the C++ indices (which left onsets
+        // 20..23 stuck at zero in the dashboard).
+        float rustTelemetry[MHX_TELEMETRY_LEN] = {};
+        mhx_engine_process(slot->rust, inputPtr, size, rustTelemetry);
+
+        const jsize outLength = env->GetArrayLength(outTelemetry);
+        std::fill_n(telemetry, outLength, 0.0f);
+        const float kick = rustTelemetry[7];
+        const float snare = rustTelemetry[8];
+        const float vocal = rustTelemetry[9];
+        const float body = rustTelemetry[10];
+        const float strongest = std::max(std::max(kick, snare), std::max(vocal, body));
+
+        if (outLength > 0) telemetry[0] = rustTelemetry[0]; // sub RMS
+        if (outLength > 1) telemetry[1] = rustTelemetry[1]; // low-mid RMS
+        if (outLength > 2) telemetry[2] = rustTelemetry[6]; // body / texture RMS
+        if (outLength > 4) telemetry[4] = -1.0f;             // Rust backend has no actuator temperature sensor
+        if (outLength > 5) telemetry[5] = 1.0f;              // no thermal derating estimate available
+        if (outLength > 6) telemetry[6] = strongest;
+        if (outLength > 7) telemetry[7] = strongest > 0.0f ? 1.0f : 0.0f;
+        if (outLength > 9) telemetry[9] = strongest;
+        if (outLength > 11) telemetry[11] = rustTelemetry[12]; // analysis windows
+        if (outLength > 12) telemetry[12] = rustTelemetry[11]; // processed blocks
+        if (outLength > 13) telemetry[13] = rustTelemetry[13]; // emitted onsets
+        if (outLength > 14) telemetry[14] = rustTelemetry[14]; // dropped onsets
+        if (outLength > 20) telemetry[20] = kick;
+        if (outLength > 21) telemetry[21] = snare;
+        if (outLength > 22) telemetry[22] = vocal;
+        if (outLength > 23) telemetry[23] = body;
+
         slot->rust_calls.fetch_add(1, std::memory_order_relaxed);
-        const uint64_t emitted = static_cast<uint64_t>(telemetry[13] < 0.0f ? 0.0f : telemetry[13]);
+        const uint64_t emitted = static_cast<uint64_t>(
+            rustTelemetry[13] < 0.0f ? 0.0f : rustTelemetry[13]);
         slot->rust_onsets.store(emitted, std::memory_order_relaxed);
     } else {
         engine->processAudioBlock(inputPtr, size, telemetry);
     }
 
     env->ReleasePrimitiveArrayCritical(outTelemetry, telemetry, 0);
-    // Record arrival only after the DSP accepted the block: a crashed or
-    // rejected block must not look like healthy audio activity.
     g_last_audio_block_ms.store(monotonic_ms(), std::memory_order_release);
 }
 
@@ -1330,6 +1386,7 @@ Java_com_mouya_musichaptics_NativeBridge_nativeClearHapticBuffer(
         engine->clearHapticBuffer();
         auto* slot = static_cast<EngineSlot*>(engine);
         if (slot->rust_ready.load(std::memory_order_acquire) && slot->rust) {
+            std::lock_guard<std::mutex> rustLock(slot->rustProducerMutex);
             mhx_engine_reset(slot->rust);
         }
     }
@@ -1414,8 +1471,9 @@ Java_com_mouya_musichaptics_NativeBridge_nativeTriggerDirectDriveStrike(JNIEnv*,
     bool hasDirectFd = g_direct_drive_fd.load(std::memory_order_acquire) >= 0;
     bool hasRootPipe = g_use_root_shell.load(std::memory_order_acquire) &&
                        g_root_shell_fd.load(std::memory_order_acquire) >= 0;
-    bool hasUdp = g_use_udp_haptic.load(std::memory_order_acquire);
-    bool hasJavaPipe = g_use_java_pipe.load(std::memory_order_acquire);
+    bool hasUdp = udp_peer_alive();
+    bool hasJavaPipe = g_use_java_pipe.load(std::memory_order_acquire) &&
+                       g_java_pipe_bridge.load(std::memory_order_acquire) != nullptr;
     if (!hasDirectFd && !hasRootPipe && !hasUdp && !hasJavaPipe) return JNI_FALSE;
     trigger_direct_drive(durationMs, amplitude);
     return JNI_TRUE;

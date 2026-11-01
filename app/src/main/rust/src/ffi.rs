@@ -25,9 +25,10 @@
 //! touched only by the producer, which is why the pop/stats entry points take
 //! `&Engine` and read nothing but those atomics.
 //!
-//! Configuration setters ([mhx_engine_set_sample_rate] and friends) must be
-//! called while the producer is quiescent -- in practice from the Kotlin
-//! configure path, which runs before playback starts.
+//! Calls that mutate Engine state (`mhx_engine_process`, configuration setters,
+//! and reset) must be serialized by the host. The Android JNI bridge protects
+//! those calls with one per-engine producer mutex; scheduler consumers only pop
+//! from the independent lock-free onset/semantic rings and do not take that lock.
 //!
 //! No function here panics: the crate is built with `panic = "abort"` and no path
 //! contains an unchecked slice index on caller-controlled data.

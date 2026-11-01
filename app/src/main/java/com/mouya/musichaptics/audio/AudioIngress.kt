@@ -19,13 +19,11 @@ class AudioIngress(
     companion object {
         private const val TAG = "MusicHapticsX-Ingress"
         // A single AudioTrack.write call can carry far more than a few hundred
-        // frames: the kugou trace shows result=376832 bytes, which is 94208
-        // stereo frames (~2s at 48kHz). With the old 256-frame batches and 16
-        // slots the queue held 4096 frames, so 96% of every write was dropped
-        // and the DSP saw a shredded signal. Onset detection works on
-        // frame-to-frame spectral flux, so a 96% dropout makes it structurally
-        // unable to trigger -- which is exactly the "no vibration" symptom.
-        // Sized so one large write fits without dropping:
+        // frames. Its return value is API-dependent (FloatArray/ShortArray
+        // return samples; byte-oriented overloads return bytes), so never infer
+        // frame count from the raw return value without its overload metadata.
+        // The queue is sized to retain a large write while the DSP worker drains
+        // it, rather than silently truncating the tail:
         //   4096 frames/batch * 64 slots = 262144 frames (~5.4s @ 48kHz)
         private const val MAX_BATCH_FRAMES = 4096
         private const val QUEUE_CAPACITY = 64
@@ -44,6 +42,7 @@ class AudioIngress(
         val telemetry = FloatArray(TELEMETRY_SIZE)
         val readySequence = AtomicLong(0L)
         var frames = 0
+        @Volatile var sampleRateHz: Int = 48000
     }
 
     private val slots = Array(QUEUE_CAPACITY) { Slot() }
@@ -78,7 +77,8 @@ class AudioIngress(
         data: ShortArray,
         offsetSamples: Int,
         sampleCount: Int,
-        channels: Int
+        channels: Int,
+        sampleRateHz: Int = 48000
     ): Int {
         val safeOffset = offsetSamples.coerceIn(0, data.size)
         val safeCount = min(sampleCount.coerceAtLeast(0), data.size - safeOffset)
@@ -109,7 +109,7 @@ class AudioIngress(
             }
             mono.clear()
             mono.put(scratch, 0, batch)
-            publish(sequence, slot, batch)
+            publish(sequence, slot, batch, sampleRateHz)
             frameOffset += batch
         }
         return frameOffset
@@ -119,7 +119,8 @@ class AudioIngress(
         data: FloatArray,
         offsetFrames: Int,
         frameCount: Int,
-        channels: Int
+        channels: Int,
+        sampleRateHz: Int = 48000
     ): Int {
         val start = offsetFrames.coerceAtLeast(0)
         val ch = channels.coerceAtLeast(1)
@@ -156,7 +157,7 @@ class AudioIngress(
             }
             mono.clear()
             mono.put(scratch, 0, batch)
-            publish(sequence, slot, batch)
+            publish(sequence, slot, batch, sampleRateHz)
             frameOffset += batch
         }
         return frameOffset
@@ -167,7 +168,8 @@ class AudioIngress(
         offsetBytes: Int,
         byteCount: Int,
         channels: Int,
-        encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT
+        encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT,
+        sampleRateHz: Int = 48000
     ): Int {
         val safeOffset = offsetBytes.coerceIn(0, data.size)
         val available = min(byteCount.coerceAtLeast(0), data.size - safeOffset)
@@ -199,7 +201,7 @@ class AudioIngress(
             }
             slot.mono.clear()
             slot.mono.put(scratch, 0, batch)
-            publish(sequence, slot, batch)
+            publish(sequence, slot, batch, sampleRateHz)
             frameOffset += batch
         }
         return frameOffset
@@ -210,7 +212,8 @@ class AudioIngress(
         startPosition: Int,
         byteCount: Int,
         channels: Int,
-        encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT
+        encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT,
+        sampleRateHz: Int = 48000
     ): Int {
         val ch = channels.coerceAtLeast(1)
         val start = startPosition.coerceIn(0, buffer.limit())
@@ -242,7 +245,7 @@ class AudioIngress(
             }
             slot.mono.clear()
             slot.mono.put(scratch, 0, batch)
-            publish(sequence, slot, batch)
+            publish(sequence, slot, batch, sampleRateHz)
             frameOffset += batch
         }
         return frameOffset
@@ -327,8 +330,9 @@ class AudioIngress(
         return -1L
     }
 
-    private fun publish(sequence: Long, slot: Slot, frames: Int) {
+    private fun publish(sequence: Long, slot: Slot, frames: Int, sampleRateHz: Int) {
         slot.frames = frames
+        slot.sampleRateHz = sampleRateHz.coerceIn(8000, 384000)
         slot.readySequence.lazySet(sequence + 1L)
         wakeSignal.release()
     }
@@ -343,7 +347,9 @@ class AudioIngress(
                 if (slot.readySequence.get() != sequence + 1L) break
 
                 try {
-                    nativeBridge.processAudioDirect(slot.pcm, slot.frames, slot.telemetry)
+                    nativeBridge.processAudioDirect(
+                        slot.pcm, slot.frames, slot.telemetry, slot.sampleRateHz
+                    )
                     onTelemetry(slot.telemetry, slot.frames)
                     processedFrameCount.addAndGet(slot.frames.toLong())
                 } catch (t: Throwable) {

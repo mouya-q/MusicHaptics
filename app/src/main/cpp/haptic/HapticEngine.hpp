@@ -384,6 +384,20 @@ public:
         pendingConfigRevision_.fetch_add(1, std::memory_order_release);
     }
 
+    // AudioTrack instances inside one player may use different sample rates.
+    // The ingress queue carries the rate alongside each PCM block, and this
+    // method applies that rate in FIFO order on the DSP worker instead of
+    // letting a constructor callback globally reconfigure unrelated tracks.
+    void setInputSampleRate(float sampleRate) {
+        const float safeRate = std::clamp(
+            std::isfinite(sampleRate) ? sampleRate : 48000.0f,
+            8000.0f, 384000.0f);
+        const float current = pendingSampleRate_.load(std::memory_order_relaxed);
+        if (std::fabs(current - safeRate) < 0.5f) return;
+        pendingSampleRate_.store(safeRate, std::memory_order_relaxed);
+        pendingConfigRevision_.fetch_add(1, std::memory_order_release);
+    }
+
     void configureOutput(float styleAmpScale, float sharpness, float attackScale, float accentScale, float bassBoost,
                          float impactGain, float continuousGain, float textureGain, float masterGain,
                          float onsetThreshold, float attackImpactMs, float decayImpactMs,

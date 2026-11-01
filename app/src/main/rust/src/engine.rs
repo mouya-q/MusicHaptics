@@ -167,6 +167,11 @@ pub struct Engine {
     onsets: FrameRing<OnsetFrame, ONSET_RING>,
     semantics: FrameRing<AnalysisFrame, SEMANTIC_RING>,
 
+    /// Last complete-window band measurements. Small AudioTrack writes can be
+    /// shorter than WINDOW; keep the most recent valid levels instead of
+    /// reporting a misleading all-zero dashboard between analysis windows.
+    last_band_telemetry: [f32; 7],
+
     /// Cumulative counters, exposed for telemetry.
     blocks: u64,
     windows: u64,
@@ -266,6 +271,7 @@ impl Engine {
             detector: OnsetDetector::new(DetectorConfig::default()),
             onsets: FrameRing::new(OnsetFrame::default()),
             semantics: FrameRing::new(AnalysisFrame::default()),
+            last_band_telemetry: [0.0; 7],
             blocks: 0,
             windows: 0,
             onsets_emitted: 0,
@@ -422,6 +428,7 @@ impl Engine {
         self.detector.reset();
         self.onsets.clear();
         self.semantics.clear();
+        self.last_band_telemetry = [0.0; 7];
         self.onsets_emitted = 0;
         // `blocks` and `windows` are deliberately kept: they count work done by
         // this engine instance, and zeroing them would make the "is the DSP
@@ -438,6 +445,20 @@ impl Engine {
     /// ```
     pub fn process(&mut self, mono: &[f32], out_telemetry: &mut [f32]) -> usize {
         self.blocks = self.blocks.wrapping_add(1);
+
+        // A single AudioTrack.write may contain zero, one, or many analysis
+        // windows. Telemetry is a per-write snapshot: retain the latest valid
+        // band levels when this write is shorter than WINDOW, but clear onset
+        // fields first so a previous write's transient is never repeated.
+        let mut block_onsets = [0.0f32; 4];
+        if out_telemetry.len() >= 15 {
+            out_telemetry[..7].copy_from_slice(&self.last_band_telemetry);
+            out_telemetry[7..11].fill(0.0);
+            out_telemetry[11] = self.blocks as f32;
+            out_telemetry[12] = self.windows as f32;
+            out_telemetry[13] = self.onsets_emitted as f32;
+            out_telemetry[14] = self.onsets.dropped() as f32;
+        }
 
         // Accumulate into the ring, analysing once per full window.
         let mut consumed = 0usize;
@@ -461,6 +482,12 @@ impl Engine {
 
             if self.filled == WINDOW {
                 self.analyse_window(out_telemetry);
+                if out_telemetry.len() >= 15 {
+                    self.last_band_telemetry.copy_from_slice(&out_telemetry[..7]);
+                    for (index, value) in out_telemetry[7..11].iter().copied().enumerate() {
+                        block_onsets[index] = block_onsets[index].max(value);
+                    }
+                }
                 // Stateful IIR filters must consume every source sample exactly
                 // once. A half-overlapped analysis window would replay 512 samples
                 // through each filter and corrupt its delay state. Keep a
@@ -468,6 +495,16 @@ impl Engine {
                 // scheduler remains independently paced at 5 ms.
                 self.filled = 0;
             }
+        }
+        if out_telemetry.len() >= 15 {
+            // Preserve any onset found in any completed window of this write.
+            // Previously a later quiet window overwrote an earlier transient
+            // with zero, making large FloatArray writes appear event-free.
+            out_telemetry[7..11].copy_from_slice(&block_onsets);
+            out_telemetry[11] = self.blocks as f32;
+            out_telemetry[12] = self.windows as f32;
+            out_telemetry[13] = self.onsets_emitted as f32;
+            out_telemetry[14] = self.onsets.dropped() as f32;
         }
         consumed
     }
@@ -711,6 +748,47 @@ mod tests {
         assert_eq!(e.windows(), 1, "the next half-window is not replayed");
         e.process(&block, &mut telemetry);
         assert_eq!(e.windows(), 2, "second frame requires another 1024 samples");
+    }
+
+    #[test]
+    fn short_audio_writes_keep_last_band_levels_but_clear_onsets() {
+        let mut e = engine();
+        let mut telemetry = [0.0f32; 15];
+        e.process(&sine(60.0, 48000.0, WINDOW, 0.6), &mut telemetry);
+        let measured_sub = telemetry[0];
+        assert!(measured_sub > 0.01, "first complete window should produce a band level");
+
+        // AudioTrack commonly delivers sub-window writes (e.g. 960 frames at
+        // 48 kHz). Keep the latest level for UI continuity, but never repeat
+        // transient flags from the preceding write.
+        e.process(&vec![0.0; 256], &mut telemetry);
+        assert_eq!(telemetry[0], measured_sub);
+        assert!(telemetry[7..11].iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn per_write_onset_telemetry_aggregates_all_completed_windows() {
+        let mut e = engine();
+        let mut telemetry = [0.0f32; 15];
+        let rate = 48000usize;
+        let mut block = vec![0.0f32; rate * 2];
+        let mut pos = 0usize;
+        while pos + 960 < block.len() {
+            for i in 0..960 {
+                let t = i as f32 / rate as f32;
+                block[pos + i] = 0.8 * (2.0 * core::f32::consts::PI * 60.0 * t).sin();
+            }
+            pos += rate / 4;
+        }
+        // One large write contains many transient windows followed by quiet
+        // windows. The final quiet window must not erase earlier detections.
+        e.process(&block, &mut telemetry);
+        assert!(e.onsets_emitted() > 0, "burst should emit at least one onset");
+        let telemetry_peak = telemetry[7..11]
+            .iter()
+            .copied()
+            .fold(0.0f32, |peak, value| peak.max(value));
+        assert!(telemetry_peak > 0.0, "a later quiet window must not erase a transient in the same write");
     }
 
     #[test]

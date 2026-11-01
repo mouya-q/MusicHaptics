@@ -142,7 +142,7 @@ class NativeBridge {
         }
     }
 
-    fun processAudioDirect(buffer: ByteBuffer, size: Int, outTelemetry: FloatArray) {
+    fun processAudioDirect(buffer: ByteBuffer, size: Int, outTelemetry: FloatArray, sampleRateHz: Int) {
         val _ptr = snapshotPtr()
         if (_ptr != 0L) {
             try {
@@ -151,7 +151,7 @@ class NativeBridge {
                     Log.e("NativeBridge", "Invalid buffer params: buffer=${buffer.isDirect} size=$size capacity=${buffer.capacity()}")
                     return
                 }
-                nativeProcessAudioDirect(_ptr, buffer, size, outTelemetry)
+                nativeProcessAudioDirect(_ptr, buffer, size, sampleRateHz.toFloat(), outTelemetry)
             } catch (e: Exception) {
                 Log.e("NativeBridge", "processAudioDirect crashed: ${e.message}", e)
 
@@ -421,7 +421,7 @@ fun isDirectDriveAvailable(): Boolean {
         releaseMs: Float, sustainLevel: Float, lraF0: Float, lraQ: Float,
         cooldownMs: Float, maxAmplitude: Float
     )
-    private external fun nativeProcessAudioDirect(ptr: Long, directBuffer: ByteBuffer, size: Int, outTelemetry: FloatArray)
+    private external fun nativeProcessAudioDirect(ptr: Long, directBuffer: ByteBuffer, size: Int, sampleRateHz: Float, outTelemetry: FloatArray)
     private external fun nativeAudioSilenceMs(): Long
     private external fun nativeGetSemanticFrames(ptr: Long, outFrames: FloatArray, maxFrames: Int): Int
     private external fun nativeClearHapticBuffer(ptr: Long)
@@ -452,7 +452,7 @@ fun isDirectDriveAvailable(): Boolean {
 
 
 
-    @Volatile var beatTriggerCallback: ((String, Int) -> Unit)? = null
+    @Volatile var beatTriggerCallback: ((String, Int, Boolean) -> Unit)? = null
 
     fun enableRootPipe(cb: (Int, Int) -> Unit) {
         _rootPipeCb = cb
@@ -477,8 +477,8 @@ fun isDirectDriveAvailable(): Boolean {
     }
 
     
-    fun onBeatTrigger(event: String, intensity: Int) {
-        beatTriggerCallback?.invoke(event, intensity)
+    fun onBeatTrigger(event: String, intensity: Int, nativeDirectDriveSelected: Boolean) {
+        beatTriggerCallback?.invoke(event, intensity, nativeDirectDriveSelected)
     }
 
     fun startScheduler(): Boolean {

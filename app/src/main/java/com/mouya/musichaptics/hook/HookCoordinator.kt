@@ -230,8 +230,11 @@ class HookCoordinator(
             XposedBridge.hookMethod(constructor, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val track = param.thisObject as? AudioTrack ?: return
-                    val state = tracks.register(track)
-                    handler.post { engineOrNull()?.reconfigure(state.sampleRate, state.channels) }
+                    // Register metadata only. The native DSP is configured from
+                    // the sample rate attached to each actual PCM write; changing
+                    // a global analyser here lets a newly-created, still-silent
+                    // AudioTrack overwrite the format of the currently playing one.
+                    tracks.register(track)
                 }
             })
         }
@@ -301,10 +304,31 @@ class HookCoordinator(
                             is ShortArray -> {
                                 val samples = result.coerceAtMost((snapshot.size - offsetArg).coerceAtLeast(0))
                                 // A ShortArray is always 16-bit PCM by construction.
-                                target.processPcm16FromHook(snapshot, offsetArg, samples, state.channels)
+                                target.processPcm16FromHook(
+                                    snapshot, offsetArg, samples, state.channels, state.sampleRate
+                                )
                             }
                             is FloatArray -> {
-                                target.processPcmFloatFromHook(snapshot, offsetArg, result, state.channels)
+                                // AudioTrack.write(float[]) expresses offset and
+                                // transfer count in FLOAT SAMPLES, while the DSP
+                                // ingress API consumes FRAME offsets/counts.
+                                // Convert explicitly; passing these through made
+                                // partial writes and non-zero offsets read the
+                                // wrong half of interleaved stereo buffers.
+                                val channels = state.channels.coerceIn(1, 8)
+                                val startSample = offsetArg.coerceIn(0, snapshot.size)
+                                val transferred = result.coerceAtLeast(0)
+                                    .coerceAtMost(snapshot.size - startSample)
+                                val alignedStart = ((startSample + channels - 1) / channels) * channels
+                                val skipped = alignedStart - startSample
+                                val usableSamples = (transferred - skipped).coerceAtLeast(0)
+                                val frameCount = usableSamples / channels
+                                if (frameCount > 0) {
+                                    target.processPcmFloatFromHook(
+                                        snapshot, alignedStart / channels, frameCount,
+                                        channels, state.sampleRate
+                                    )
+                                }
                             }
                             is ByteArray -> {
                                 // The snapshot always starts at the buffer's
@@ -314,12 +338,12 @@ class HookCoordinator(
                                     target.processPcmBytesFromHook(
                                         snapshot, 0,
                                         snapshot.size.coerceAtMost(result),
-                                        state.channels, state.encoding
+                                        state.channels, state.encoding, state.sampleRate
                                     )
                                 } else {
                                     target.processPcmBytesFromHook(
                                         snapshot, offsetArg, result,
-                                        state.channels, state.encoding
+                                        state.channels, state.encoding, state.sampleRate
                                     )
                                 }
                             }
@@ -328,7 +352,27 @@ class HookCoordinator(
 
                     if (now - lastWriteLogAtMs >= MAX_WRITE_LOG_INTERVAL_MS) {
                         lastWriteLogAtMs = now
-                        val msg = "[$targetPackage] AudioTrack.write result=$result sr=${state.sampleRate} ch=${state.channels} enc=${encodingName(state.encoding)}"
+                        val inputType = param.args.firstOrNull()?.javaClass?.simpleName ?: "unknown"
+                        val resultUnit = when (param.args.firstOrNull()) {
+                            is FloatArray, is ShortArray -> "samples"
+                            is ByteArray, is ByteBuffer -> "bytes"
+                            else -> "units"
+                        }
+                        val bytesPerSample = when (state.encoding) {
+                            android.media.AudioFormat.ENCODING_PCM_8BIT -> 1
+                            android.media.AudioFormat.ENCODING_PCM_16BIT -> 2
+                            android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> 3
+                            android.media.AudioFormat.ENCODING_PCM_32BIT,
+                            android.media.AudioFormat.ENCODING_PCM_FLOAT -> 4
+                            else -> 0
+                        }
+                        val acceptedFrames = when (param.args.firstOrNull()) {
+                            is FloatArray, is ShortArray -> result / state.channels.coerceAtLeast(1)
+                            is ByteArray, is ByteBuffer -> if (bytesPerSample > 0) result / (bytesPerSample * state.channels.coerceAtLeast(1)) else 0
+                            else -> 0
+                        }
+                        val durationMs = if (state.sampleRate > 0) acceptedFrames * 1000L / state.sampleRate else 0L
+                        val msg = "[$targetPackage] AudioTrack.write result=$result $resultUnit frames=$acceptedFrames (~${durationMs}ms) input=$inputType sr=${state.sampleRate} ch=${state.channels} enc=${encodingName(state.encoding)}"
                         Log.i(TAG, msg)
                         LogBroadcaster.queue(msg)
                     }

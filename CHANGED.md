@@ -1,6 +1,50 @@
 # Changes
 
-Current source version: **6.1.2**
+Current source version: **6.1.4**
+
+## 6.1.4
+
+### Cross-Player Telemetry and Audio-Block Consistency
+
+- Keep the latest valid Rust band measurements across sub-window AudioTrack writes;
+  960-frame PCM16 writes no longer appear as a permanent zero-energy analyser.
+- Aggregate the maximum KICK/SNARE/VOCAL/BODY onset activation across every
+  completed analysis window in one PCM write. A later quiet window can no longer
+  overwrite a transient that occurred earlier in a large FloatArray write.
+- Clear per-write onset telemetry before analysis so old strikes are not repeated
+  in the dashboard when a new write contains no transient.
+- Add Rust regression tests for short-write level retention and multi-window onset
+  aggregation.
+- Bump Android source version to 6.1.4 (versionCode 60104).
+
+## 6.1.3
+
+### AudioTrack Ingress, Route Truth, and Telemetry Contract
+
+- Bind the source sample rate to every queued PCM block. AudioTrack constructor
+  callbacks now only register track metadata and cannot reconfigure the global
+  analyser before that track has written audio. The DSP worker applies the rate
+  for the actual block in FIFO order.
+- Convert FloatArray write offsets and transfer counts from interleaved samples
+  into complete PCM frames before downmixing; keep ShortArray sample units and
+  byte-oriented byte units separate.
+- Extend AudioTrack write diagnostics with overload type, result unit, accepted
+  frames, estimated audio duration, sample rate, channel count, and encoding.
+- Translate the Rust 15-field telemetry layout into the dashboard's legacy
+  32-field layout, including KICK/SNARE/VOCAL/BODY onset slots 20..23. Dashboard
+  onset readings no longer report permanent zero values due to offset mismatch.
+- Pass the Native scheduler's per-beat direct-drive route decision to Kotlin.
+  Kotlin no longer probes the transport again during that callback, avoiding a
+  route race between direct output and waveform fallback.
+- When a Java root-pipe write fails, immediately disable the Native Java-pipe
+  transport flag so later beats fall back to Android Vibrator instead of being
+  silently swallowed by a stale NativeDD selection.
+- Keep UDP availability checks tied to a verified receiver rather than a socket
+  that was merely created. Add explicit Android vibrator capability fields to
+  the startup log so amplitude-control limitations can be compared across ROMs.
+- Clarify the Rust FFI ownership contract: sample-rate changes are applied by
+  the single DSP producer between process calls.
+- Bump the Android source version to 6.1.3 (versionCode 60103).
 
 ## 6.1.2
 

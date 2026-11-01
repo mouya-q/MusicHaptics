@@ -221,6 +221,7 @@ class HapticEngine(
     @Volatile private var nativeSchedulerActive = false
     @Volatile private var nativeLastAudioTime = 0L
     @Volatile private var lastStyleSnapshot = ""
+    @Volatile private var lastOutputRouteSnapshot = ""
     @Volatile private var activeStyle: StylePreset = StylePreset.BALANCED
     // Runtime amplitude state, refreshed by synchronizeParameters() and read
     // from the beat-dispatch path on another thread.
@@ -297,8 +298,8 @@ class HapticEngine(
             
             
             
-            nativeBridge.beatTriggerCallback = { event, intensity ->
-                onNativeBeat(event, intensity)
+            nativeBridge.beatTriggerCallback = { event, intensity, directDriveSelected ->
+                onNativeBeat(event, intensity, directDriveSelected)
             }
             val beatMsg = "[Beat] beatTriggerCallback registered: hasVibrator=${vibrateProxy.hasVibrator} primitives: click=${vibrateProxy.primitiveClickSupported} tick=${vibrateProxy.primitiveTickSupported} heavyClick=${vibrateProxy.primitiveHeavyClickSupported}"
             Log.i(TAG, beatMsg)
@@ -334,7 +335,9 @@ class HapticEngine(
             runSemanticFrameLoop()
         }
         Log.i(TAG, "Native scheduler: low-latency event timing; Haptics: transient-first onset strikes")
-        val readyMsg = "[System Ready] v${BuildConfig.VERSION_NAME} C++ Direct Drive Renderer: ${if (nativeBridge.isLoaded) "NATIVE ACTIVE" else "FALLBACK"} | Device: ${deviceProfile.name} | Actuator: ${deviceProfile.actuator.resonanceFreq.toInt()}Hz Q=${deviceProfile.actuator.qFactor} rise=${deviceProfile.actuator.riseTimeMs.toInt()}ms fall=${deviceProfile.actuator.fallTimeMs.toInt()}ms | C++ 5-Channel: Percussion+Bass+Vocal+Harmonic+Texture | Onset Detection: KICK/SNARE/VOCAL/BODY | 200Hz LRA Physics Model: ON | Scheduler: ${if (nativeSchedulerActive) "NATIVE DIRECT" else "COROUTINE (16ms)"}"
+        val startupDirectReady = isNativeDrivingDirect()
+        val backendName = if (nativeBridge.analysisBackend() == 0) "Rust" else "C++"
+        val readyMsg = "[System Ready] v${BuildConfig.VERSION_NAME} | DSP: ${if (nativeBridge.isLoaded) "Native loaded ($backendName)" else "unavailable"} | Scheduler: ${if (nativeSchedulerActive) "Native 5ms" else "Coroutine 16ms"} | Hardware output: ${if (startupDirectReady) "verified direct-drive transport" else "Android Vibrator waveform (direct drive unavailable)"} | Vibrator: present=${vibrateProxy.hasVibrator} amplitudeControl=${vibrateProxy.hasAmplitudeControl} forceDefault=${vibrateProxy.forceDefaultAmplitude} primitives(click/tick/heavy)=${vibrateProxy.primitiveClickSupported}/${vibrateProxy.primitiveTickSupported}/${vibrateProxy.primitiveHeavyClickSupported} | Device: ${deviceProfile.name} | Actuator profile: ${deviceProfile.actuator.resonanceFreq.toInt()}Hz Q=${deviceProfile.actuator.qFactor} rise=${deviceProfile.actuator.riseTimeMs.toInt()}ms fall=${deviceProfile.actuator.fallTimeMs.toInt()}ms | Onsets: KICK/SNARE/VOCAL/BODY"
         Log.i(TAG, readyMsg)
         logCallback?.onLog(readyMsg)
         LogBroadcaster.sendLog(context, readyMsg)
@@ -499,8 +502,8 @@ class HapticEngine(
                 }
 
                 
-                nativeBridge.beatTriggerCallback = { event, intensity ->
-                    onNativeBeat(event, intensity)
+                nativeBridge.beatTriggerCallback = { event, intensity, directDriveSelected ->
+                    onNativeBeat(event, intensity, directDriveSelected)
                 }
 
             } catch (e: Exception) {
@@ -539,6 +542,23 @@ class HapticEngine(
         } catch (e: Exception) {
             Log.w(TAG, "[DirectDrive] pipe write failed: ${e.message}")
             rootPipeActive = false
+            // The scheduler reported this exact beat as a direct-drive event,
+            // so Kotlin intentionally skipped its full waveform. Preserve the
+            // current strike with a bounded one-shot before demoting the pipe.
+            runCatching {
+                vibrateProxy.performOneShot(
+                    durationMs = duration.coerceIn(12, 80).toLong(),
+                    amplitude = amplitude.coerceIn(1, 255)
+                )
+            }.onFailure { Log.w(TAG, "[DirectDrive] immediate waveform fallback failed: ${it.message}") }
+            val fallbackMessage = "[OUTPUT] Java pipe failed; current strike fell back to Android one-shot"
+            Log.i(TAG, fallbackMessage)
+            LogBroadcaster.sendLog(context, fallbackMessage)
+            logOutputRoute(false)
+            // Clear the native scheduler's Java-pipe flag immediately. Leaving
+            // it set makes the scheduler keep selecting NativeDD while no
+            // OutputStream consumer exists, so Kotlin suppresses its waveform.
+            runCatching { nativeBridge.disableRootPipe() }
         }
     }
     fun emitPhiraBeat(event: String, intensity: Int) = triggerBeatVibration(event, intensity)
@@ -553,7 +573,7 @@ class HapticEngine(
      * runSemanticFrameLoop *after* its `if (hapticPaused) continue` guard, which
      * is unreachable code once the latch is set.
      */
-    private fun onNativeBeat(event: String, intensity: Int) {
+    private fun onNativeBeat(event: String, intensity: Int, directDriveSelected: Boolean) {
         nativeLastAudioTime = SystemClock.elapsedRealtime()
         if (hapticPaused) {
             hapticPaused = false
@@ -563,11 +583,21 @@ class HapticEngine(
             Log.i(TAG, msg)
             LogBroadcaster.sendLog(context, msg)
         }
-        triggerBeatVibration(event, intensity)
+        logOutputRoute(directDriveSelected)
+        triggerBeatVibration(event, intensity, directDriveSelected)
+    }
+
+    private fun logOutputRoute(directDriveSelected: Boolean) {
+        val route = if (directDriveSelected) "NATIVE_DIRECT_DRIVE" else "ANDROID_VIBRATOR_WAVEFORM"
+        if (route == lastOutputRouteSnapshot) return
+        lastOutputRouteSnapshot = route
+        val message = "[OUTPUT] active route=$route (selected by native scheduler)"
+        Log.i(TAG, message)
+        LogBroadcaster.sendLog(context, message)
     }
 
     /**
-     * Whether the C++ scheduler is actually able to drive the motor by itself.
+     * Whether a hardware direct-drive transport is currently verified.
      *
      * A non-null [udpSocket] only proves the datagram socket was created; it
      * says nothing about whether a listener exists on the other end. The root
@@ -593,16 +623,18 @@ class HapticEngine(
 
 
     
-    private fun triggerBeatVibration(event: String, intensity: Int) {
+    private fun triggerBeatVibration(
+        event: String,
+        intensity: Int,
+        nativeDirectDriveSelected: Boolean = false,
+    ) {
         if (!vibrateProxy.hasVibrator || hapticPaused || !isEngineEnabled.get()) return
 
-        // If the C++ native scheduler is active and driving the hardware
-        // via direct-drive (root pipe / UDP / fd), the beat has already
-        // been fired as a raw sysfs write with the full intensity. In that
-        // case we only log the event here and skip the weak Kotlin
-        // waveform fallback (which degrades to DEFAULT_AMPLITUDE on
-        // StrikeOnly drivers and produces barely-perceptible buzzes).
-        val nativeDrivingDirect = isNativeDrivingDirect()
+        // The native scheduler passes the route decision made for this exact
+        // beat. Do not probe transport state again here: a pipe/UDP failure
+        // between the native decision and this callback could otherwise make
+        // both the native path and Kotlin fallback fire (or neither fire).
+        val nativeDrivingDirect = nativeSchedulerActive && nativeDirectDriveSelected
 
         val style = activeStyle
         val normalizedIntensity = (intensity / 255f).coerceIn(0f, 1f)
@@ -1044,36 +1076,50 @@ class HapticEngine(
         nativeLastAudioTime = atMs
     }
 
-    internal fun processPcm16FromHook(data: ShortArray, offset: Int, sampleCount: Int, channelCount: Int) {
+    internal fun processPcm16FromHook(
+        data: ShortArray, offset: Int, sampleCount: Int, channelCount: Int,
+        sourceSampleRateHz: Int = sampleRate
+    ) {
         if (!isEngineEnabled.get()) return
         ensureIngressFormat(channelCount)
         resumeFromHook()
         markHookAudioArrival()
-        audioIngress.processPcm16(data, offset, sampleCount, channelCount)
+        audioIngress.processPcm16(data, offset, sampleCount, channelCount, sourceSampleRateHz)
     }
 
-    internal fun processPcmFloatFromHook(data: FloatArray, offset: Int, frameCount: Int, channelCount: Int) {
+    internal fun processPcmFloatFromHook(
+        data: FloatArray, offsetFrames: Int, frameCount: Int, channelCount: Int,
+        sourceSampleRateHz: Int = sampleRate
+    ) {
         if (!isEngineEnabled.get()) return
         ensureIngressFormat(channelCount)
         resumeFromHook()
         markHookAudioArrival()
-        audioIngress.processFloatPcm(data, offset, frameCount, channelCount)
+        audioIngress.processFloatPcm(data, offsetFrames, frameCount, channelCount, sourceSampleRateHz)
     }
 
-    internal fun processPcmBytesFromHook(data: ByteArray, offset: Int, byteCount: Int, channelCount: Int, encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT) {
+    internal fun processPcmBytesFromHook(
+        data: ByteArray, offset: Int, byteCount: Int, channelCount: Int,
+        encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT,
+        sourceSampleRateHz: Int = sampleRate
+    ) {
         if (!isEngineEnabled.get()) return
         ensureIngressFormat(channelCount)
         resumeFromHook()
         markHookAudioArrival()
-        audioIngress.processPcmBytes(data, offset, byteCount, channelCount, encoding)
+        audioIngress.processPcmBytes(data, offset, byteCount, channelCount, encoding, sourceSampleRateHz)
     }
 
-    internal fun processPcmBufferFromHook(data: java.nio.ByteBuffer, startPosition: Int, byteCount: Int, channelCount: Int, encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT) {
+    internal fun processPcmBufferFromHook(
+        data: java.nio.ByteBuffer, startPosition: Int, byteCount: Int, channelCount: Int,
+        encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT,
+        sourceSampleRateHz: Int = sampleRate
+    ) {
         if (!isEngineEnabled.get()) return
         ensureIngressFormat(channelCount)
         resumeFromHook()
         markHookAudioArrival()
-        audioIngress.processPcmBuffer(data, startPosition, byteCount, channelCount, encoding)
+        audioIngress.processPcmBuffer(data, startPosition, byteCount, channelCount, encoding, sourceSampleRateHz)
     }
 
     private fun ensureIngressFormat(channelCount: Int) {

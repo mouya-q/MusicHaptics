@@ -160,6 +160,7 @@ pub struct Engine {
 
     fft: Fft,
     magnitudes: [f32; WINDOW / 2],
+    previous_magnitudes: [f32; WINDOW / 2],
 
     detector: OnsetDetector,
 
@@ -172,8 +173,65 @@ pub struct Engine {
     onsets_emitted: u64,
 }
 
+#[inline]
+fn design_band(
+    hp_a: &mut Biquad,
+    hp_b: &mut Biquad,
+    lp_a: &mut Biquad,
+    lp_b: &mut Biquad,
+    sample_rate: f32,
+    low_hz: f32,
+    high_hz: f32,
+    q: f32,
+) {
+    hp_a.design(Kind::HighPass, sample_rate, low_hz, q);
+    hp_b.design(Kind::HighPass, sample_rate, low_hz, q);
+    lp_a.design(Kind::LowPass, sample_rate, high_hz, q);
+    lp_b.design(Kind::LowPass, sample_rate, high_hz, q);
+}
+
+#[inline]
+fn filtered_band_rms(
+    window: &[f32; WINDOW],
+    scratch: &mut [f32; WINDOW],
+    hp_a: &mut Biquad,
+    hp_b: &mut Biquad,
+    lp_a: &mut Biquad,
+    lp_b: &mut Biquad,
+) -> f32 {
+    scratch.copy_from_slice(window);
+    hp_a.process_block(scratch);
+    hp_b.process_block(scratch);
+    lp_a.process_block(scratch);
+    lp_b.process_block(scratch);
+    rms(scratch)
+}
+
 impl Engine {
     pub fn new(cfg: EngineConfig) -> Self {
+        // FFI callers may provide malformed persisted settings. Rust's f32::clamp
+        // also preserves NaN, so normalise the complete config before designing
+        // any filters or constructing the adaptive detector.
+        let sample_rate = if cfg.sample_rate.is_finite() {
+            cfg.sample_rate.clamp(8000.0, 384000.0)
+        } else { 48000.0 };
+        let low = if cfg.band_low_hz.is_finite() {
+            cfg.band_low_hz.clamp(BAND_LOW_MIN, BAND_LOW_MAX)
+        } else { 30.0 };
+        let high_default = 2500.0f32;
+        let high = (if cfg.band_high_hz.is_finite() {
+            cfg.band_high_hz.clamp(BAND_HIGH_MIN, BAND_HIGH_MAX)
+        } else { high_default }).max(low + 100.0).min(BAND_HIGH_MAX);
+        let cfg = EngineConfig {
+            sample_rate,
+            sensitivity: if cfg.sensitivity.is_finite() { cfg.sensitivity.clamp(0.1, 4.0) } else { 1.0 },
+            user_amplitude: if cfg.user_amplitude.is_finite() { cfg.user_amplitude.clamp(0.0, 4.0) } else { 1.0 },
+            refractory_ms: if cfg.refractory_ms.is_finite() { cfg.refractory_ms.clamp(0.0, 500.0) } else { 60.0 },
+            band_low_hz: low,
+            band_high_hz: high,
+            bass_boost: if cfg.bass_boost.is_finite() { cfg.bass_boost.clamp(0.3, 3.0) } else { 1.0 },
+            texture_gain: if cfg.texture_gain.is_finite() { cfg.texture_gain.clamp(0.2, 3.0) } else { 1.0 },
+        };
         let mut e = Self {
             cfg,
             history: [0.0; WINDOW],
@@ -204,6 +262,7 @@ impl Engine {
             scratch_b: [0.0; WINDOW],
             fft: Fft::new(WINDOW),
             magnitudes: [0.0; WINDOW / 2],
+            previous_magnitudes: [0.0; WINDOW / 2],
             detector: OnsetDetector::new(DetectorConfig::default()),
             onsets: FrameRing::new(OnsetFrame::default()),
             semantics: FrameRing::new(AnalysisFrame::default()),
@@ -216,42 +275,49 @@ impl Engine {
         e
     }
 
-    /// Rebuild every band filter for the current sample rate.
+    /// Design all band filters for the active sample rate and style edges.
     ///
-    /// Called on construction and whenever the source rate changes. Delay state
-    /// is reset because the audio itself is discontinuous at a track boundary;
-    /// keeping history would ring for tens of milliseconds and fire a spurious
-    /// onset right at the transition.
+    /// Coefficients are updated in place. Style changes therefore retain the
+    /// filter delay state and do not restart every band at each UI preset switch.
+    /// A source-rate change explicitly resets the histories after redesigning.
     fn design_filters(&mut self) {
         let rate = self.cfg.sample_rate.max(8000.0);
         let q = 0.707;
+        let low_edge = self.cfg.band_low_hz.clamp(BAND_LOW_MIN, BAND_LOW_MAX);
+        let high_edge = self.cfg.band_high_hz.clamp(BAND_HIGH_MIN, BAND_HIGH_MAX);
+        let sub_hi = SUB_HI.min(low_edge + 150.0).max(low_edge + 40.0);
+        let lowmid_hi = (high_edge * 0.4)
+            .clamp(sub_hi + 60.0, LOWMID_HI.max(sub_hi + 200.0));
+        let vocal_lo = lowmid_hi;
+        let vocal_hi = high_edge.max(vocal_lo + 200.0);
 
-        // A band is the cascade of a high-pass at its lower edge and a low-pass
-        // at its upper edge. Two identical sections each give a 4th-order skirt.
-        let band = |lo: f32, hi: f32| -> (Biquad, Biquad, Biquad, Biquad) {
-            (
-                Biquad::new(Kind::HighPass, rate, lo, q),
-                Biquad::new(Kind::HighPass, rate, lo, q),
-                Biquad::new(Kind::LowPass, rate, hi, q),
-                Biquad::new(Kind::LowPass, rate, hi, q),
-            )
-        };
+        design_band(&mut self.sub_lo_a, &mut self.sub_lo_b,
+            &mut self.sub_hi_a, &mut self.sub_hi_b, rate, SUB_LO, sub_hi, q);
+        design_band(&mut self.lowmid_lo_a, &mut self.lowmid_lo_b,
+            &mut self.lowmid_hi_a, &mut self.lowmid_hi_b, rate, low_edge, lowmid_hi, q);
+        design_band(&mut self.vocal_lo_a, &mut self.vocal_lo_b,
+            &mut self.vocal_hi_a, &mut self.vocal_hi_b, rate, vocal_lo, vocal_hi, q);
+        design_band(&mut self.presence_lo_a, &mut self.presence_lo_b,
+            &mut self.presence_hi_a, &mut self.presence_hi_b, rate, PRESENCE_LO, PRESENCE_HI, q);
+        design_band(&mut self.air_lo_a, &mut self.air_lo_b,
+            &mut self.air_hi_a, &mut self.air_hi_b, rate, AIR_LO, AIR_HI, q);
+    }
 
-        let (a, b, c, d) = band(SUB_LO, SUB_HI);
-        self.sub_lo_a = a; self.sub_lo_b = b; self.sub_hi_a = c; self.sub_hi_b = d;
-        let (a, b, c, d) = band(LOWMID_LO, LOWMID_HI);
-        self.lowmid_lo_a = a; self.lowmid_lo_b = b; self.lowmid_hi_a = c; self.lowmid_hi_b = d;
-        let (a, b, c, d) = band(VOCAL_LO, VOCAL_HI);
-        self.vocal_lo_a = a; self.vocal_lo_b = b; self.vocal_hi_a = c; self.vocal_hi_b = d;
-        let (a, b, c, d) = band(PRESENCE_LO, PRESENCE_HI);
-        self.presence_lo_a = a; self.presence_lo_b = b; self.presence_hi_a = c; self.presence_hi_b = d;
-        let (a, b, c, d) = band(AIR_LO, AIR_HI);
-        self.air_lo_a = a; self.air_lo_b = b; self.air_hi_a = c; self.air_hi_b = d;
+    fn reset_filter_states(&mut self) {
+        for filter in [
+            &mut self.sub_lo_a, &mut self.sub_lo_b, &mut self.sub_hi_a, &mut self.sub_hi_b,
+            &mut self.lowmid_lo_a, &mut self.lowmid_lo_b, &mut self.lowmid_hi_a, &mut self.lowmid_hi_b,
+            &mut self.vocal_lo_a, &mut self.vocal_lo_b, &mut self.vocal_hi_a, &mut self.vocal_hi_b,
+            &mut self.presence_lo_a, &mut self.presence_lo_b, &mut self.presence_hi_a, &mut self.presence_hi_b,
+            &mut self.air_lo_a, &mut self.air_lo_b, &mut self.air_hi_a, &mut self.air_hi_b,
+        ] {
+            filter.reset();
+        }
     }
 
     fn apply_detector_config(&mut self) {
-        // Refractory in frames: the window advances once per WINDOW samples, so
-        // convert the millisecond budget through the window period.
+        // Refractory in frames: each analysis frame consumes exactly WINDOW
+        // new samples (non-overlapping windows), so this is the actual hop time.
         let window_ms = (WINDOW as f32 / self.cfg.sample_rate.max(8000.0)) * 1000.0;
         let frames = (self.cfg.refractory_ms / window_ms.max(1.0)).round().max(1.0) as u32;
         self.detector = OnsetDetector::new(DetectorConfig {
@@ -269,31 +335,34 @@ impl Engine {
     /// Returns true when a rebuild happened, so the caller can log the
     /// transition instead of it passing silently.
     pub fn set_sample_rate(&mut self, rate: f32) -> bool {
-        let rate = rate.max(8000.0);
+        if !rate.is_finite() { return false; }
+        let rate = rate.clamp(8000.0, 384000.0);
         if (rate - self.cfg.sample_rate).abs() < 0.5 {
             return false;
         }
         self.cfg.sample_rate = rate;
         self.design_filters();
+        self.reset_filter_states();
         self.apply_detector_config();
         // The source changed: stale history belongs to the previous track.
         self.history = [0.0; WINDOW];
+        self.previous_magnitudes = [0.0; WINDOW / 2];
         self.write_pos = 0;
         self.filled = 0;
         true
     }
 
     pub fn set_sensitivity(&mut self, sensitivity: f32) {
-        self.cfg.sensitivity = sensitivity.clamp(0.1, 4.0);
+        self.cfg.sensitivity = if sensitivity.is_finite() { sensitivity.clamp(0.1, 4.0) } else { 1.0 };
         self.apply_detector_config();
     }
 
     pub fn set_user_amplitude(&mut self, amplitude: f32) {
-        self.cfg.user_amplitude = amplitude.clamp(0.0, 4.0);
+        self.cfg.user_amplitude = if amplitude.is_finite() { amplitude.clamp(0.0, 4.0) } else { 1.0 };
     }
 
     pub fn set_refractory_ms(&mut self, ms: f32) {
-        self.cfg.refractory_ms = ms.clamp(0.0, 500.0);
+        self.cfg.refractory_ms = if ms.is_finite() { ms.clamp(0.0, 500.0) } else { 60.0 };
         self.apply_detector_config();
     }
 
@@ -318,13 +387,13 @@ impl Engine {
 
     /// Weight the kick band before onset scoring (UI bass slider).
     pub fn set_bass_boost(&mut self, boost: f32) {
-        self.cfg.bass_boost = boost.clamp(0.3, 3.0);
+        self.cfg.bass_boost = if boost.is_finite() { boost.clamp(0.3, 3.0) } else { 1.0 };
         self.detector.set_bass_boost(self.cfg.bass_boost);
     }
 
     /// Weight sustained energy in the body channel (UI texture control).
     pub fn set_texture_gain(&mut self, gain: f32) {
-        self.cfg.texture_gain = gain.clamp(0.2, 3.0);
+        self.cfg.texture_gain = if gain.is_finite() { gain.clamp(0.2, 3.0) } else { 1.0 };
     }
 
     pub fn band_edges(&self) -> (f32, f32) {
@@ -345,9 +414,11 @@ impl Engine {
     /// that could not be compared against a fresh session.
     pub fn reset(&mut self) {
         self.history = [0.0; WINDOW];
+        self.previous_magnitudes = [0.0; WINDOW / 2];
         self.write_pos = 0;
         self.filled = 0;
         self.design_filters();
+        self.reset_filter_states();
         self.detector.reset();
         self.onsets.clear();
         self.semantics.clear();
@@ -374,7 +445,12 @@ impl Engine {
             let space = WINDOW - self.filled;
             let take = space.min(mono.len() - consumed);
             for _ in 0..take {
-                self.history[self.write_pos] = mono[consumed];
+                let sample = mono[consumed];
+                self.history[self.write_pos] = if sample.is_finite() {
+                    sample.clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                };
                 self.write_pos += 1;
                 if self.write_pos == WINDOW {
                     self.write_pos = 0;
@@ -385,9 +461,12 @@ impl Engine {
 
             if self.filled == WINDOW {
                 self.analyse_window(out_telemetry);
-                // Half-overlap: keeping the last half improves time resolution
-                // without reintroducing the latency of a full hop.
-                self.filled = WINDOW / 2;
+                // Stateful IIR filters must consume every source sample exactly
+                // once. A half-overlapped analysis window would replay 512 samples
+                // through each filter and corrupt its delay state. Keep a
+                // non-overlapping 1024-sample hop (~21.3 ms at 48 kHz); the JNI
+                // scheduler remains independently paced at 5 ms.
+                self.filled = 0;
             }
         }
         consumed
@@ -405,27 +484,28 @@ impl Engine {
         }
         self.windows = self.windows.wrapping_add(1);
 
-        // Band energies from filtered copies. Each band reuses two scratch
-        // buffers so no allocation happens here.
+        // Band energies from filtered copies. Coefficients and delay state are
+        // retained between windows; only the two fixed scratch buffers are reused.
         //
         // The low and high edges come from the UI style preset. Previously they
         // were compile-time constants, so selecting "bass" or "crisp" changed the
         // output envelope but the analyser kept looking at 55-650 Hz regardless.
-        let low_edge = self.cfg.band_low_hz;
-        let high_edge = self.cfg.band_high_hz;
-        let sub_hi = SUB_HI.min(low_edge + 150.0).max(low_edge + 40.0);
-        let lowmid_hi = (high_edge * 0.4).clamp(sub_hi + 60.0, LOWMID_HI.max(sub_hi + 200.0));
-        let vocal_lo = lowmid_hi;
-        let vocal_hi = high_edge.max(vocal_lo + 200.0);
-
         let sub = self.band_rms_cascade();
-        let low_mid = self.band_rms_chain(low_edge, lowmid_hi);
-        let vocal = self.band_rms_chain(vocal_lo, vocal_hi);
+        let low_mid = filtered_band_rms(&self.window, &mut self.scratch_b,
+            &mut self.lowmid_lo_a, &mut self.lowmid_lo_b,
+            &mut self.lowmid_hi_a, &mut self.lowmid_hi_b);
+        let vocal = filtered_band_rms(&self.window, &mut self.scratch_b,
+            &mut self.vocal_lo_a, &mut self.vocal_lo_b,
+            &mut self.vocal_hi_a, &mut self.vocal_hi_b);
         // Presence and air stay fixed: they describe the transient crack and the
         // tape hiss that make a strike feel crisp, and shifting them with the
         // style preset made "bass" sound muffled rather than deeper.
-        let presence = self.band_rms_chain(PRESENCE_LO, PRESENCE_HI);
-        let air = self.band_rms_chain(AIR_LO, AIR_HI);
+        let presence = filtered_band_rms(&self.window, &mut self.scratch_b,
+            &mut self.presence_lo_a, &mut self.presence_lo_b,
+            &mut self.presence_hi_a, &mut self.presence_hi_b);
+        let air = filtered_band_rms(&self.window, &mut self.scratch_b,
+            &mut self.air_lo_a, &mut self.air_lo_b,
+            &mut self.air_hi_a, &mut self.air_hi_b);
 
         let energies = BandEnergies { sub, low_mid, vocal, presence, air };
         let body = body_energy(&energies) * self.cfg.texture_gain;
@@ -442,7 +522,12 @@ impl Engine {
             loudness: loud,
         });
 
-        let onset = self.detector.process(energies);
+        // FFT magnitudes drive a positive spectral-flux cue in addition to
+        // band RMS deltas. The 0.25*N scale converts coherent sine peaks to
+        // approximately their input amplitude before the relative-flux ratio.
+        self.fft.magnitudes(&self.window, &mut self.magnitudes);
+        let spectral_flux = self.measure_spectral_flux();
+        let onset = self.detector.process_with_spectral_flux(energies, spectral_flux);
         if let Some(o) = onset {
             self.onsets_emitted = self.onsets_emitted.wrapping_add(1);
             let scaled = (o.activation * o.event.character_scale()).clamp(0.0, 1.0);
@@ -456,9 +541,8 @@ impl Engine {
             self.onsets.push(frame);
         }
 
-        // FFT is kept for a spectral centroid diagnostic only; band energies no
-        // longer depend on it, so a wrong window size cannot break detection.
-        self.fft.magnitudes(&self.window, &mut self.magnitudes);
+        // Previous magnitudes are updated by `measure_spectral_flux` above so
+        // every analysis window compares against its immediate predecessor.
 
         if out_telemetry.len() >= 15 {
             out_telemetry[0] = sub;
@@ -489,24 +573,57 @@ impl Engine {
         band_rms(&self.scratch_a)
     }
 
-    /// Generic band RMS for the remaining bands.
+    /// Positive spectral flux, normalised per band to 0..1.
     ///
-    /// Rebuilds the section from the band edges every call. This is a handful of
-    /// transcendental operations per window (~21 ms of audio), which is far
-    /// cheaper than the risk of stale coefficients after a rate change.
-    fn band_rms_chain(&mut self, lo: f32, hi: f32) -> f32 {
-        let rate = self.cfg.sample_rate;
-        let mut hp_a = Biquad::new(Kind::HighPass, rate, lo, 0.707);
-        let mut hp_b = Biquad::new(Kind::HighPass, rate, lo, 0.707);
-        let mut lp_a = Biquad::new(Kind::LowPass, rate, hi, 0.707);
-        let mut lp_b = Biquad::new(Kind::LowPass, rate, hi, 0.707);
+    /// Magnitudes are divided by the Hann-window coherent gain (~N/4), then
+    /// positive bin changes are divided by current band energy plus a noise
+    /// floor. This makes the cue relatively level-independent and keeps silent
+    /// bands from generating enormous ratios.
+    fn measure_spectral_flux(&mut self) -> BandEnergies {
+        let rate = self.cfg.sample_rate.max(8000.0);
+        let low_edge = self.cfg.band_low_hz;
+        let high_edge = self.cfg.band_high_hz;
+        let sub_hi = SUB_HI.min(low_edge + 150.0).max(low_edge + 40.0);
+        let lowmid_hi = (high_edge * 0.4)
+            .clamp(sub_hi + 60.0, LOWMID_HI.max(sub_hi + 200.0));
+        let vocal_lo = lowmid_hi;
+        let vocal_hi = high_edge.max(vocal_lo + 200.0);
+        let bounds = [
+            (SUB_LO, sub_hi),
+            (low_edge, lowmid_hi),
+            (vocal_lo, vocal_hi),
+            (PRESENCE_LO, PRESENCE_HI),
+            (AIR_LO, AIR_HI),
+        ];
+        let mut positive = [0.0f32; 5];
+        let mut current_sum = [0.0f32; 5];
+        let normalizer = WINDOW as f32 * 0.25;
 
-        self.scratch_b.copy_from_slice(&self.window);
-        hp_a.process_block(&mut self.scratch_b);
-        hp_b.process_block(&mut self.scratch_b);
-        lp_a.process_block(&mut self.scratch_b);
-        lp_b.process_block(&mut self.scratch_b);
-        rms(&self.scratch_b)
+        for i in 0..self.magnitudes.len() {
+            let hz = (i as f32 + 1.0) * rate / WINDOW as f32;
+            let current = (self.magnitudes[i] / normalizer).max(0.0);
+            let previous = (self.previous_magnitudes[i] / normalizer).max(0.0);
+            self.previous_magnitudes[i] = self.magnitudes[i];
+            for band in 0..bounds.len() {
+                let (lo, hi) = bounds[band];
+                if hz >= lo && hz < hi {
+                    current_sum[band] += current;
+                    positive[band] += (current - previous).max(0.0);
+                }
+            }
+        }
+
+        let mut flux = [0.0f32; 5];
+        for i in 0..flux.len() {
+            flux[i] = (positive[i] / (current_sum[i] + 0.025)).clamp(0.0, 1.0);
+        }
+        BandEnergies {
+            sub: flux[0],
+            low_mid: flux[1],
+            vocal: flux[2],
+            presence: flux[3],
+            air: flux[4],
+        }
     }
 
     /// Pop one onset frame, if available.
@@ -580,6 +697,20 @@ mod tests {
         e.process(&vec![0.0f32; 24000], &mut t_quiet);
         e.process(&sine(3000.0, 48000.0, 24000, 0.7), &mut t_loud);
         assert!(t_loud[6] > t_quiet[6], "body must respond to content");
+    }
+
+    #[test]
+    fn filters_consume_non_overlapping_windows() {
+        let mut e = engine();
+        let mut telemetry = [0.0f32; 15];
+        let block = vec![0.0f32; WINDOW / 2];
+        e.process(&block, &mut telemetry);
+        e.process(&block, &mut telemetry);
+        assert_eq!(e.windows(), 1, "first 1024 fresh samples produce one frame");
+        e.process(&block, &mut telemetry);
+        assert_eq!(e.windows(), 1, "the next half-window is not replayed");
+        e.process(&block, &mut telemetry);
+        assert_eq!(e.windows(), 2, "second frame requires another 1024 samples");
     }
 
     #[test]
@@ -658,6 +789,33 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_configuration_and_setters_fall_back_to_finite_values() {
+        let nan = f32::NAN;
+        let cfg = EngineConfig {
+            sample_rate: nan,
+            sensitivity: nan,
+            user_amplitude: nan,
+            refractory_ms: nan,
+            band_low_hz: nan,
+            band_high_hz: nan,
+            bass_boost: nan,
+            texture_gain: nan,
+        };
+        let mut e = Engine::new(cfg);
+        assert_eq!(e.sample_rate(), 48000.0);
+        assert_eq!(e.band_edges(), (30.0, 2500.0));
+        assert!(!e.set_sample_rate(nan));
+        e.set_sensitivity(nan);
+        e.set_user_amplitude(nan);
+        e.set_refractory_ms(nan);
+        e.set_bass_boost(nan);
+        e.set_texture_gain(nan);
+        let mut telemetry = [0.0f32; 15];
+        e.process(&vec![0.0; WINDOW], &mut telemetry);
+        assert!(telemetry.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
     fn user_amplitude_scales_published_energy() {
         let mut e = engine();
         let mut t_low = [0.0f32; 15];
@@ -674,4 +832,32 @@ mod tests {
         // scaled, so the raw band readings must match.
         assert!((a - b).abs() < 1e-3);
     }
+    #[test]
+    fn style_edges_reconfigure_persistent_low_mid_filter() {
+        let tone = sine(60.0, 48000.0, 48000, 0.6);
+        let mut default_engine = engine();
+        let mut tuned_engine = engine();
+        assert!(tuned_engine.set_band_edges(90.0, 1400.0));
+        let mut default_telemetry = [0.0f32; 15];
+        let mut tuned_telemetry = [0.0f32; 15];
+        default_engine.process(&tone, &mut default_telemetry);
+        tuned_engine.process(&tone, &mut tuned_telemetry);
+        assert!(
+            tuned_telemetry[1] < default_telemetry[1],
+            "raising the low-mid edge should attenuate 60 Hz: tuned={} default={}",
+            tuned_telemetry[1], default_telemetry[1]
+        );
+    }
+
+    #[test]
+    fn non_finite_input_is_sanitized_before_filtering() {
+        let mut e = engine();
+        let mut telemetry = [0.0f32; 15];
+        let mut input = sine(60.0, 48000.0, 4096, 0.4);
+        input[10] = f32::NAN;
+        input[20] = f32::INFINITY;
+        e.process(&input, &mut telemetry);
+        assert!(telemetry.iter().all(|v| v.is_finite()), "telemetry must stay finite");
+    }
+
 }

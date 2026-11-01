@@ -107,7 +107,9 @@ class NativeBridge {
         releaseMs: Float,
         sustainLevel: Float,
         lraF0: Float,
-        lraQ: Float
+        lraQ: Float,
+        cooldownMs: Float,
+        maxAmplitude: Float
     ) {
         val _ptr = snapshotPtr()
         if (_ptr != 0L) {
@@ -115,7 +117,7 @@ class NativeBridge {
                 _ptr, styleAmpScale, sharpness, attackScale, accentScale, bassBoost,
                 impactGain, continuousGain, textureGain, masterGain, onsetThreshold,
                 attackImpactMs, decayImpactMs, attackContinuousMs, decayContinuousMs,
-                releaseMs, sustainLevel, lraF0, lraQ
+                releaseMs, sustainLevel, lraF0, lraQ, cooldownMs, maxAmplitude
             )
         }
     }
@@ -416,7 +418,8 @@ fun isDirectDriveAvailable(): Boolean {
         ptr: Long, styleAmpScale: Float, sharpness: Float, attackScale: Float, accentScale: Float, bassBoost: Float,
         impactGain: Float, continuousGain: Float, textureGain: Float, masterGain: Float, onsetThreshold: Float,
         attackImpactMs: Float, decayImpactMs: Float, attackContinuousMs: Float, decayContinuousMs: Float,
-        releaseMs: Float, sustainLevel: Float, lraF0: Float, lraQ: Float
+        releaseMs: Float, sustainLevel: Float, lraF0: Float, lraQ: Float,
+        cooldownMs: Float, maxAmplitude: Float
     )
     private external fun nativeProcessAudioDirect(ptr: Long, directBuffer: ByteBuffer, size: Int, outTelemetry: FloatArray)
     private external fun nativeAudioSilenceMs(): Long

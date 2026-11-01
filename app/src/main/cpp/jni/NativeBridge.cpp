@@ -442,6 +442,27 @@ bool init_direct_drive_from_fd(int enable_fd, int amplitude_fd, const std::strin
 static std::atomic<int> g_dd_tick_count{0};
 static std::atomic<bool> g_dd_mode_entered{false};
 
+// Keep direct-drive level shaping aligned with the Kotlin waveform path.
+// Character controls are normalised before applying the user's level slider;
+// this preserves dynamic range instead of multiplying every gain until the
+// hardware ceiling is reached for almost every onset.
+static float bounded_character_gain(float product) {
+    if (!std::isfinite(product)) return 0.5f;
+    return std::clamp(product / 2.5f, 0.5f, 2.0f);
+}
+
+static float bounded_user_level(float userAmplitude) {
+    if (!std::isfinite(userAmplitude)) return 0.70710678f;
+    const float level = std::clamp(userAmplitude, 0.3f, 2.0f);
+    return std::sqrt(level / 2.0f);
+}
+
+static float onset_intensity_curve(float normalized) {
+    if (!std::isfinite(normalized)) return 0.0f;
+    const float expanded = std::clamp((normalized - 0.08f) / (0.70f - 0.08f), 0.0f, 1.0f);
+    return std::pow(expanded, 0.80f);
+}
+
 // Whether the UDP transport is initialised and its receiver has been verified.
 static bool udp_peer_alive() {
     return g_use_udp_haptic.load(std::memory_order_acquire) &&
@@ -451,9 +472,12 @@ static bool udp_peer_alive() {
 
 
 void trigger_direct_drive(int duration_ms, int amplitude) {
-    
-    
-    
+    // The sysfs / UDP paths are outside Android's VibrationEffect validator.
+    // Clamp here as the final boundary so no caller can request an unbounded
+    // pulse or pass a wrapped uint8 amplitude to a hardware transport.
+    duration_ms = std::clamp(duration_ms, 1, 80);
+    amplitude = std::clamp(amplitude, 0, 255);
+    if (amplitude == 0) return;
     
     if (g_use_java_pipe.load(std::memory_order_acquire)) {
         JNIEnv* env = nullptr;
@@ -640,7 +664,6 @@ static std::atomic<jobject> g_bridge_ref{nullptr};
 static float g_prev_kick_onset = 0.0f;
 static float g_prev_snare_onset = 0.0f;
 static int64_t g_last_beat_trigger_ns = 0;
-static constexpr int64_t BEAT_REFRACTORY_NS = 30000000L;  
 
 struct SchedulerArgs {
     haptic::HapticEngine* engine;
@@ -687,19 +710,30 @@ static void* scheduler_thread_func(void* arg) {
     LOGI("[DD] scheduler thread started, initial fd=%d", g_direct_drive_fd.load());
 
     
-    float currentAmp = 0.0f;       
-    float targetAmp = 0.0f;        
-    
-    
+    float currentAmp = 0.0f;
+    float targetAmp = 0.0f;
+    int schedulerFrameCounter = 0;
+
+    // StrikeOnly hardware receives a bounded three-stage pulse envelope rather
+    // than one fixed 5 ms click. The scheduler is already a 5 ms clock, so this
+    // state machine emits a deterministic attack / decay / release shape without
+    // allocating or sleeping inside the audio callback.
+    bool strikeEnvelopeActive = false;
+    float strikeEnvelopePeak = 0.0f;
+    float strikeEnvelopeElapsedMs = 0.0f;
+    float strikeEnvelopeAttackMs = 4.0f;
+    float strikeEnvelopeDecayMs = 8.0f;
+    float strikeEnvelopeReleaseMs = 8.0f;
+    float strikeEnvelopeSustain = 0.12f;
+
     float lra_position = 0.0f;
     float lra_velocity = 0.0f;
     float spring_k = 0.8f;
     float damping_c = 0.3f;
 
     while (g_scheduler_running.load(std::memory_order_acquire)) {
-        
-        
-        
+        ++schedulerFrameCounter;
+
         
         
         
@@ -741,7 +775,9 @@ static void* scheduler_thread_func(void* arg) {
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
             const int64_t nowNs = static_cast<int64_t>(ts.tv_sec) * 1000000000L + ts.tv_nsec;
-            if (nowNs - g_last_beat_trigger_ns >= BEAT_REFRACTORY_NS) {
+            const int64_t refractoryNs = static_cast<int64_t>(
+                std::clamp(engine->getOutputCooldownMs(), 20.0f, 180.0f) * 1000000.0f);
+            if (nowNs - g_last_beat_trigger_ns >= refractoryNs) {
                 const float kickVal = onsetFrames[0].kick;
                 const float snareVal = onsetFrames[0].snare;
                 const float vocalVal = onsetFrames[0].vocal;
@@ -811,11 +847,54 @@ static void* scheduler_thread_func(void* arg) {
                         // the blended onset+RMS calculation above.
                         // Use the user amplitude to scale the final gain so
                         // the UI level slider has a real effect on strike power.
-                        const float userAmp = engine->getUserAmplitude();
-                        const int strikeAmp = static_cast<int>(
-                            std::clamp(intensity * userAmp, 10.0f, 255.0f));
-                        // Duration: short strike (5ms default for AW8697 activate).
-                        trigger_direct_drive(5, strikeAmp);
+                        const float userAmp = bounded_user_level(engine->getUserAmplitude());
+                        const float styleAmp = engine->getOutputStyleAmpScale();
+                        const float masterGain = engine->getOutputMasterGain();
+                        const float accentScale = engine->getOutputAccentScale();
+                        const float impactGain = engine->getOutputImpactGain();
+                        const float bassGain = (eventType == 1) ? engine->getOutputBassBoost() : 1.0f;
+                        const float maxAmplitude = engine->getOutputMaxAmplitude();
+                        const float signal = onset_intensity_curve(intensity / 255.0f);
+                        const float characterGain = bounded_character_gain(
+                            styleAmp * accentScale * impactGain * bassGain * masterGain);
+                        const float strikeDrive = signal * characterGain * userAmp * maxAmplitude * 0.86f;
+                        strikeEnvelopePeak = std::clamp(strikeDrive, 1.0f, maxAmplitude);
+                        strikeEnvelopeElapsedMs = 0.0f;
+                        strikeEnvelopeAttackMs = std::clamp(
+                            engine->getOutputAttackImpactMs() * engine->getOutputAttackScale(),
+                            2.0f, 20.0f);
+                        strikeEnvelopeDecayMs = std::clamp(
+                            engine->getOutputDecayImpactMs(), 4.0f, 50.0f);
+                        strikeEnvelopeReleaseMs = std::clamp(
+                            engine->getOutputReleaseMs() * 0.35f, 3.0f, 30.0f);
+                        strikeEnvelopeSustain = std::clamp(
+                            engine->getOutputSustainLevel(), 0.04f, 0.60f);
+                        float envelopeTotal = strikeEnvelopeAttackMs +
+                                              strikeEnvelopeDecayMs +
+                                              strikeEnvelopeReleaseMs;
+                        if (envelopeTotal < 12.0f) {
+                            strikeEnvelopeReleaseMs += (12.0f - envelopeTotal);
+                            envelopeTotal = 12.0f;
+                        }
+                        // The next onset may restart the StrikeOnly envelope.
+                        // Finish this one first, leaving at least 8 ms of quiet
+                        // before the configured native refractory window ends.
+                        // The scheduler advances in 5 ms ticks. Quantise the
+                        // ceiling down to a whole tick; otherwise a nominal
+                        // 12 ms envelope would occupy 15 ms and eat into the
+                        // promised 8 ms quiet interval on a 20 ms device gate.
+                        const float availableQuietBudget = std::max(
+                            0.0f, engine->getOutputCooldownMs() - 8.0f);
+                        const float envelopeCeiling = std::max(
+                            5.0f,
+                            std::min(60.0f, std::floor(availableQuietBudget / 5.0f) * 5.0f));
+                        if (envelopeTotal > envelopeCeiling) {
+                            const float trim = envelopeCeiling / envelopeTotal;
+                            strikeEnvelopeAttackMs *= trim;
+                            strikeEnvelopeDecayMs *= trim;
+                            strikeEnvelopeReleaseMs *= trim;
+                        }
+                        strikeEnvelopeActive = true;
                     }
 
                     g_last_beat_trigger_ns = nowNs;
@@ -829,7 +908,8 @@ static void* scheduler_thread_func(void* arg) {
         // proportional to the audio's RMS energy. This gives the "textures"
         // sensation that Apple Music Haptics provides.
         if (use_direct_drive &&
-            g_direct_driver_kind.load(std::memory_order_acquire) == static_cast<int>(DirectDriverKind::StrikeOnly)) {
+            g_direct_driver_kind.load(std::memory_order_acquire) == static_cast<int>(DirectDriverKind::StrikeOnly) &&
+            !strikeEnvelopeActive && (schedulerFrameCounter % 4) == 0) {
             haptic::SemanticHapticFrame texFrames[1];
             const int texN = read_semantic_frame(engine, texFrames, 1);
             if (texN > 0) {
@@ -840,18 +920,23 @@ static void* scheduler_thread_func(void* arg) {
                     + texFrames[0].bodyAmp  * 0.30f;
                 const float styleAmpScale = engine->getOutputStyleAmpScale();
                 const float masterGain = engine->getOutputMasterGain();
-                const float userAmp = engine->getUserAmplitude();
-                const float texAmp = std::clamp(texEnergy * styleAmpScale * masterGain * userAmp * 255.0f, 0.0f, 255.0f);
-                // Only pulse if energy is above a perceptual threshold
-                if (texAmp > 15.0f) {
-                    // Pulse every ~20ms (every 4th frame at 5ms) to avoid overloading
-                    // the sysfs interface, with amplitude tracking the music's energy.
-                    static int texPulseCounter = 0;
-                    texPulseCounter++;
-                    if (texPulseCounter >= 4) {
-                        texPulseCounter = 0;
-                        trigger_direct_drive(5, static_cast<int>(texAmp));
-                    }
+                const float textureGain = engine->getOutputTextureGain();
+                const float userAmp = bounded_user_level(engine->getUserAmplitude());
+                const float maxAmplitude = engine->getOutputMaxAmplitude();
+                const float textureLevel = std::pow(std::clamp(texEnergy / (255.0f * 1.10f), 0.0f, 1.0f), 0.80f);
+                const float textureCharacter = bounded_character_gain(styleAmpScale * masterGain * textureGain);
+                const float texAmp = std::clamp(
+                    textureLevel * textureCharacter * userAmp * maxAmplitude * 0.30f,
+                    0.0f, maxAmplitude);
+                // Texture is a 5 ms pulse every 20 ms (25% duty). Suppress it
+                // immediately after a strike so a beat is not doubled by the
+                // continuous layer on the same scheduler frame.
+                struct timespec texTs;
+                clock_gettime(CLOCK_MONOTONIC, &texTs);
+                const int64_t texNowNs = static_cast<int64_t>(texTs.tv_sec) * 1000000000L + texTs.tv_nsec;
+                const bool beatGapElapsed = texNowNs - g_last_beat_trigger_ns >= 20000000L;
+                if (texAmp > 15.0f && beatGapElapsed) {
+                    trigger_direct_drive(5, static_cast<int>(texAmp));
                 }
             }
         }
@@ -871,6 +956,35 @@ static void* scheduler_thread_func(void* arg) {
 
             
             
+            if (strikeOnlyDriver && strikeEnvelopeActive) {
+                const float totalMs = strikeEnvelopeAttackMs + strikeEnvelopeDecayMs + strikeEnvelopeReleaseMs;
+                const float elapsed = strikeEnvelopeElapsedMs;
+                float envelope = 0.0f;
+                if (elapsed < strikeEnvelopeAttackMs) {
+                    const float t = std::clamp(elapsed / std::max(strikeEnvelopeAttackMs, 1.0f), 0.0f, 1.0f);
+                    const float smooth = t * t * (3.0f - 2.0f * t);
+                    envelope = 0.08f + 0.92f * smooth;
+                } else if (elapsed < strikeEnvelopeAttackMs + strikeEnvelopeDecayMs) {
+                    const float t = std::clamp(
+                        (elapsed - strikeEnvelopeAttackMs) / std::max(strikeEnvelopeDecayMs, 1.0f),
+                        0.0f, 1.0f);
+                    envelope = 1.0f - (1.0f - strikeEnvelopeSustain) * t;
+                } else if (elapsed < totalMs) {
+                    const float t = std::clamp(
+                        (elapsed - strikeEnvelopeAttackMs - strikeEnvelopeDecayMs) /
+                            std::max(strikeEnvelopeReleaseMs, 1.0f),
+                        0.0f, 1.0f);
+                    const float release = 1.0f - t;
+                    envelope = strikeEnvelopeSustain * release * release;
+                }
+
+                const int envelopeAmp = static_cast<int>(std::clamp(
+                    strikeEnvelopePeak * envelope, 0.0f, engine->getOutputMaxAmplitude()));
+                if (envelopeAmp >= 4) trigger_direct_drive(5, envelopeAmp);
+                strikeEnvelopeElapsedMs += 5.0f;
+                if (strikeEnvelopeElapsedMs >= totalMs) strikeEnvelopeActive = false;
+            }
+
             if (!strikeOnlyDriver) {
                 haptic::SemanticHapticFrame semFrames[1];
                 const int semN = read_semantic_frame(engine, semFrames, 1);
@@ -900,7 +1014,17 @@ static void* scheduler_thread_func(void* arg) {
 
                 beatAccent *= accentScaleUser;
                 if (onsetN > 0 && onsetFrames[0].kick > 0.0f) beatAccent *= bassBoost;
-                targetAmp = std::clamp((continuous + beatAccent) * styleAmpScale * masterGain * userAmp, 0.0f, 255.0f);
+                const float maxAmplitude = engine->getOutputMaxAmplitude();
+                const float continuousLevel = std::clamp(continuous / (255.0f * 1.23f), 0.0f, 1.0f);
+                const float onsetLevel = std::clamp(beatAccent / 135.0f, 0.0f, 1.0f);
+                const float combinedLevel = std::clamp(continuousLevel * 0.45f + onsetLevel * 0.55f, 0.0f, 1.0f);
+                const float signal = std::pow(combinedLevel, 0.80f);
+                const float characterGain = bounded_character_gain(
+                    styleAmpScale * masterGain * engine->getOutputImpactGain());
+                const float levelGain = bounded_user_level(userAmp);
+                targetAmp = std::clamp(
+                    signal * characterGain * levelGain * maxAmplitude * 0.86f,
+                    0.0f, maxAmplitude);
 
                 const float alpha = (targetAmp > currentAmp) ? attackAlpha : releaseAlpha;
                 currentAmp += (targetAmp - currentAmp) * alpha;
@@ -910,8 +1034,9 @@ static void* scheduler_thread_func(void* arg) {
                     if (currentAmp < 1.0f) currentAmp = 0.0f;
                 }
 
-                if (currentAmp > 1.0f) {
-                    const int amplitude = static_cast<int>(currentAmp);
+                if (currentAmp > 2.0f && (schedulerFrameCounter % 4) == 0) {
+                    const int amplitude = static_cast<int>(std::clamp(
+                        currentAmp, 0.0f, engine->getOutputMaxAmplitude()));
                     trigger_direct_drive(5, amplitude);
 
                     const float f0 = engine->getOutputLraF0();
@@ -1090,13 +1215,13 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigureOutput(
     jfloat accentScale, jfloat bassBoost, jfloat impactGain, jfloat continuousGain, jfloat textureGain,
     jfloat masterGain, jfloat onsetThreshold, jfloat attackImpactMs, jfloat decayImpactMs,
     jfloat attackContinuousMs, jfloat decayContinuousMs, jfloat releaseMs, jfloat sustainLevel,
-    jfloat lraF0, jfloat lraQ) {
+    jfloat lraF0, jfloat lraQ, jfloat cooldownMs, jfloat maxAmplitude) {
     auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
     if (engine) {
         engine->configureOutput(styleAmpScale, sharpness, attackScale, accentScale, bassBoost,
                                 impactGain, continuousGain, textureGain, masterGain, onsetThreshold,
                                 attackImpactMs, decayImpactMs, attackContinuousMs, decayContinuousMs,
-                                releaseMs, sustainLevel, lraF0, lraQ);
+                                releaseMs, sustainLevel, lraF0, lraQ, cooldownMs, maxAmplitude);
         // Mirror the UI knobs onto the analyser.
         //
         // Before this, only styleAmpScale reached Rust and it was mapped onto the
@@ -1107,8 +1232,10 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigureOutput(
         // at, so "bass" and "crisp" produced almost identical haptics.
         auto* slot = static_cast<EngineSlot*>(engine);
         if (slot->rust_ready.load(std::memory_order_acquire) && slot->rust) {
-            // Level: the UI amplitude, used to scale published band energy.
-            mhx_engine_set_user_amplitude(slot->rust, styleAmpScale);
+            // Publish pre-output band energy. The shared scheduler applies user,
+            // style and master gains once; baking styleAmpScale here caused a
+            // second multiplication and made quiet/loud passages collapse.
+            mhx_engine_set_user_amplitude(slot->rust, 1.0f);
 
             // Sharpness maps onto onset sensitivity inversely: a sharper style
             // should trigger on smaller transients (higher sensitivity), while a
@@ -1117,16 +1244,16 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigureOutput(
             const float sensitivity = 0.60f + sharpness * 1.80f;  // 0.6 .. 2.4
             mhx_engine_set_sensitivity(slot->rust, sensitivity);
 
-            // Attack scale biases the gate the other way: a long attack means the
-            // listener wants fewer, more deliberate strikes.
-            mhx_engine_set_refractory_ms(
-                slot->rust, 30.0f + (attackScale > 0.0f ? 26.0f / attackScale : 26.0f));
+            // Use the same device/style interval as the native output gate.
+            // Separate hard-coded values here and in the scheduler caused the
+            // analyser and actuator to disagree about which hits were eligible.
+            mhx_engine_set_refractory_ms(slot->rust, cooldownMs);
 
             // Bass boost widens the kick band's influence.
             mhx_engine_set_bass_boost(slot->rust, bassBoost);
 
-            // Continuous gain drives how present the sustained body channel is.
-            mhx_engine_set_texture_gain(slot->rust, continuousGain);
+            // Keep the Rust body/texture channel on the dedicated texture knob.
+            mhx_engine_set_texture_gain(slot->rust, textureGain);
         }
     }
 }

@@ -28,6 +28,24 @@ interface LogCallback {
 
 internal data class BeatTiming(val mul: Float, val min: Long, val max: Long)
 
+/**
+ * Smooth the final user/preset gain before the device-specific hard ceiling.
+ * The former direct clamp made every value above 2.0 identical, so the top
+ * half of the level slider had little or no perceptible effect on loud music.
+ */
+internal fun softLimitOutputAmplitude(raw: Float): Float {
+    if (!raw.isFinite()) return 0.3f
+    val value = raw.coerceAtLeast(0f)
+    val knee = 1.6f
+    val ceiling = 2.0f
+    val limited = if (value <= knee) {
+        value
+    } else {
+        knee + (ceiling - knee) * (1f - exp(-(value - knee) / 0.8f))
+    }
+    return limited.coerceIn(0.3f, ceiling)
+}
+
 
 internal data class BeatShape(
     val force: BeatTiming,
@@ -599,7 +617,8 @@ class HapticEngine(
             forceDefaultAmplitude = vibrateProxy.forceDefaultAmplitude
         ) ?: return
 
-        val effectiveCooldown = maxOf(plan.cooldownMs, style.cooldownMs)
+        val deviceCooldown = DeviceTuningRegistry.current(deviceProfile).minIntervalMs
+        val effectiveCooldown = maxOf(plan.cooldownMs, style.cooldownMs, deviceCooldown)
         val previous = lastVibrationMs.get()
         if (now - previous < effectiveCooldown) return
         if (!lastVibrationMs.compareAndSet(previous, now)) return
@@ -608,8 +627,12 @@ class HapticEngine(
         val level = activeOutputLevel.coerceIn(0.3f, 2.0f)
         val styleTime = style.attackScale.coerceIn(0.45f, 1.8f)
         val planFloor = plan.totalDurationMs.coerceIn(8L, 40L)
+        // A new waveform replaces the previous one on Vibrator. Keep the
+        // current envelope shorter than the event gate so it finishes cleanly
+        // and leaves a deliberate silent interval before the next onset.
+        val maxEnvelopeMs = (effectiveCooldown - 8L).coerceAtLeast(12L).coerceAtMost(80L)
         val duration = (planFloor * (0.48f + 0.92f * normalizedIntensity) * styleTime)
-            .toLong().coerceIn(6L, 80L)
+            .toLong().coerceIn(12L, maxEnvelopeMs)
         val shaped = hapticSynthesizer.sculptImpact(
             event = plan.event,
             intensity = normalizedIntensity,
@@ -801,11 +824,15 @@ class HapticEngine(
             LogBroadcaster.sendLog(context, "[MASTER] Switch ON — scheduler restarted=${nativeSchedulerActive}")
         }
 
-        val baseAmplitude = runCatching { prefs.getFloat("haptic_amplitude", 2.3f) }.getOrDefault(2.3f)
+        val baseAmplitude = runCatching { prefs.getFloat("haptic_amplitude", 2.3f) }
+            .getOrDefault(2.3f).let { if (it.isFinite()) it.coerceIn(0.5f, 3.5f) else 2.3f }
         val uiPreset = runCatching { prefs.getInt("selected_preset", 2) }.getOrDefault(2)
-        val presetGain = floatArrayOf(0.45f, 0.75f, 1.10f, 1.60f).getOrElse(uiPreset) { 1.10f }
+            .coerceIn(0, 3)
+        val presetGain = floatArrayOf(0.45f, 0.75f, 1.10f, 1.60f)[uiPreset]
         val style = StylePreset.fromKey(runCatching { prefs.getString("style_preset", "balanced") }.getOrDefault("balanced"))
-        val outputAmp = (baseAmplitude * presetGain).coerceIn(0.3f, 2.0f)
+        // A soft knee preserves useful slider travel above the former 2.0x hard
+        // clamp. The final 0..255 hardware cap is still applied per device.
+        val outputAmp = softLimitOutputAmplitude(baseAmplitude * presetGain)
         val lowCutoffFreq = style.lowCutHz
         val highCutoffFreq = style.highCutHz
 
@@ -822,9 +849,12 @@ class HapticEngine(
         )
         nativeBridge.configureProfile(deviceProfile)
 
+        // Capability-based output is the default. DEFAULT_AMPLITUDE is a
+        // compatibility override and must never be selected solely from a
+        // guessed device codename or an unmeasured actuator profile.
         val forceDefaultPref = runCatching {
-            prefs.getBoolean("force_default_amplitude", vibrateProxy.forceDefaultAutoDetected)
-        }.getOrDefault(vibrateProxy.forceDefaultAutoDetected)
+            prefs.getBoolean("force_default_amplitude", false)
+        }.getOrDefault(false)
         vibrateProxy.setForceDefaultAmplitude(forceDefaultPref)
 
         val deviceTuning = DeviceTuningRegistry.current(deviceProfile)
@@ -869,7 +899,9 @@ class HapticEngine(
             releaseMs = runCatching { prefs.getFloat("synth_release", HapticSynthesizer.RELEASE_TAU) * 1000f }.getOrDefault(HapticSynthesizer.RELEASE_TAU * 1000f),
             sustainLevel = runCatching { prefs.getFloat("synth_sustain", HapticSynthesizer.SUSTAIN_LEVEL) }.getOrDefault(HapticSynthesizer.SUSTAIN_LEVEL),
             lraF0 = runCatching { prefs.getFloat("synth_lra_f0", actuator.resonanceFreq) }.getOrDefault(actuator.resonanceFreq),
-            lraQ = runCatching { prefs.getFloat("synth_lra_q", actuator.qFactor) }.getOrDefault(actuator.qFactor)
+            lraQ = runCatching { prefs.getFloat("synth_lra_q", actuator.qFactor) }.getOrDefault(actuator.qFactor),
+            cooldownMs = maxOf(style.cooldownMs, deviceTuning.minIntervalMs).toFloat(),
+            maxAmplitude = deviceTuning.cappedAmplitude(deviceProfile).toFloat()
         )
 
         telemetryData.lowPassCutoffHz = lowCutoffFreq

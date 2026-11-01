@@ -25,8 +25,10 @@ class VibrateProxyService : Service() {
 
         // P0 hardening: IPC input bounds to prevent DoS via huge parcels.
         private const val MAX_WAVEFORM_SEGMENTS = 32
+        private const val MAX_WAVEFORM_SEGMENT_MS = 250L
+        private const val MAX_WAVEFORM_TOTAL_MS = 1000L
         private const val MAX_COMPOSITION_PRIMITIVES = 8
-        private const val MAX_ONESHOT_MS = 5000L
+        private const val MAX_ONESHOT_MS = 500L
         private const val MIN_IPC_INTERVAL_MS = 5L
     }
 
@@ -121,16 +123,34 @@ class VibrateProxyService : Service() {
                         val amplitudes = data.createIntArray()
                         val vib = vibrator
                         if (vib != null && hasVib && timings != null && amplitudes != null && timings.isNotEmpty()) {
-                            // P0: bound parcel arrays; clamp each segment.
-                            val n = minOf(timings.size, amplitudes.size, MAX_WAVEFORM_SEGMENTS)
-                            if (n > 0) {
+                            if (timings.size == amplitudes.size && timings.size <= MAX_WAVEFORM_SEGMENTS) {
                                 try {
-                                    val t = LongArray(n) { timings[it].coerceIn(0L, 500L) }
-                                    val a = IntArray(n) { amplitudes[it].coerceIn(1, 255) }
-                                    vib.vibrate(VibrationEffect.createWaveform(t, a, -1))
+                                    var remaining = MAX_WAVEFORM_TOTAL_MS
+                                    var count = 0
+                                    val safeTimings = LongArray(timings.size)
+                                    val safeAmplitudes = IntArray(amplitudes.size)
+                                    for (i in timings.indices) {
+                                        if (remaining <= 0L) break
+                                        val duration = timings[i].coerceIn(1L, MAX_WAVEFORM_SEGMENT_MS).coerceAtMost(remaining)
+                                        safeTimings[count] = duration
+                                        remaining -= duration
+                                        safeAmplitudes[count] = when (val amp = amplitudes[i]) {
+                                            VibrationEffect.DEFAULT_AMPLITUDE -> VibrationEffect.DEFAULT_AMPLITUDE
+                                            0 -> 0
+                                            else -> amp.coerceIn(1, 255)
+                                        }
+                                        count++
+                                    }
+                                    if (count > 0) {
+                                        vib.vibrate(VibrationEffect.createWaveform(
+                                            safeTimings.copyOf(count), safeAmplitudes.copyOf(count), -1
+                                        ))
+                                    }
                                 } catch (e: Exception) {
                                     Log.w(TAG, "performWaveform failed: ${e.message}")
                                 }
+                            } else {
+                                Log.w(TAG, "Reject waveform from IPC: timings=${timings.size} amplitudes=${amplitudes.size}")
                             }
                         }
                         reply?.writeNoException()
@@ -138,7 +158,14 @@ class VibrateProxyService : Service() {
                     }
                     CODE_PERFORM_ONESHOT -> {
                         val durationMs = data.readLong().coerceIn(1L, MAX_ONESHOT_MS)
-                        val amplitude = data.readInt().coerceIn(1, 255)
+                        val rawAmplitude = data.readInt()
+                        if (rawAmplitude == 0) {
+                            reply?.writeNoException()
+                            return true
+                        }
+                        val amplitude = if (rawAmplitude == VibrationEffect.DEFAULT_AMPLITUDE) {
+                            VibrationEffect.DEFAULT_AMPLITUDE
+                        } else rawAmplitude.coerceIn(1, 255)
                         val vib = vibrator
                         if (vib != null && hasVib) {
                             try {
@@ -162,31 +189,58 @@ class VibrateProxyService : Service() {
                     }
                     CODE_PERFORM_COMPOSITION -> {
                         val count = data.readInt().coerceIn(0, MAX_COMPOSITION_PRIMITIVES)
+                        val parts = ArrayList<Triple<Int, Float, Int>>(count)
+                        // Read the complete bounded parcel before invoking the
+                        // framework, so a rejected primitive still leaves enough
+                        // information to reproduce its timing as a waveform.
+                        repeat(count) {
+                            val pid = data.readInt()
+                            val rawScale = data.readFloat()
+                            val scale = if (rawScale.isFinite()) rawScale.coerceIn(0f, 1f) else 0.5f
+                            val delay = data.readInt().coerceIn(0, 500)
+                            parts += Triple(pid, scale, delay)
+                        }
                         val vib = vibrator
                         if (vib != null && hasVib && count > 0 &&
                             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                             try {
                                 val composition = VibrationEffect.startComposition()
-                                for (i in 0 until count) {
-                                    val pid = data.readInt()
-                                    val scale = data.readFloat().coerceIn(0f, 1f)
-                                    val delay = data.readInt().coerceIn(0, 1000)
+                                for ((pid, scale, delay) in parts) {
                                     composition.addPrimitive(pid, scale, delay)
                                 }
                                 vib.vibrate(composition.compose())
                             } catch (e: Exception) {
-                                Log.w(TAG, "Composition failed, fallback: ${e.message}")
+                                Log.w(TAG, "Composition failed; preserving rests with a timed waveform: ${e.message}")
                                 try {
-                                    vib.vibrate(VibrationEffect.createOneShot(15L, 128))
-                                } catch (_: Exception) {}
-                            }
-                        } else {
-                            // Drain parcel to keep Binder alignment even when rejected.
-                            try {
-                                repeat(count) {
-                                    data.readInt(); data.readFloat(); data.readInt()
+                                    val timings = ArrayList<Long>(parts.size * 2)
+                                    val amplitudes = ArrayList<Int>(parts.size * 2)
+                                    var remaining = MAX_WAVEFORM_TOTAL_MS
+                                    for ((_, scale, delay) in parts) {
+                                        if (remaining <= 0L) break
+                                        val gap = delay.toLong().coerceAtMost(remaining)
+                                        if (gap > 0L) {
+                                            timings += gap
+                                            amplitudes += 0
+                                            remaining -= gap
+                                        }
+                                        if (remaining <= 0L) break
+                                        val active = 15L.coerceAtMost(remaining)
+                                        val amplitude = if (vib.hasAmplitudeControl()) {
+                                            (scale * 255f).toInt().coerceIn(1, 255)
+                                        } else VibrationEffect.DEFAULT_AMPLITUDE
+                                        timings += active
+                                        amplitudes += amplitude
+                                        remaining -= active
+                                    }
+                                    if (timings.isNotEmpty()) {
+                                        vib.vibrate(VibrationEffect.createWaveform(
+                                            timings.toLongArray(), amplitudes.toIntArray(), -1
+                                        ))
+                                    }
+                                } catch (fallback: Exception) {
+                                    Log.w(TAG, "Timed Composition fallback failed: ${fallback.message}")
                                 }
-                            } catch (_: Exception) {}
+                            }
                         }
                         reply?.writeNoException()
                         return true

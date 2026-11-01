@@ -1,4 +1,4 @@
-//! Spectral-flux onset detection with per-band adaptive thresholds.
+//! Band-energy and spectral-flux onset detection with adaptive thresholds.
 //!
 //! This replaces the fixed-threshold detector that produced the v5.5.3 trace,
 //! where every `[BEAT]` line showed the same `level=2.00 peak=255` and the
@@ -176,7 +176,7 @@ impl OnsetDetector {
 
     /// Weight the kick band before scoring (UI bass slider).
     pub fn set_bass_boost(&mut self, boost: f32) {
-        self.bass_boost = boost.clamp(0.3, 3.0);
+        self.bass_boost = if boost.is_finite() { boost.clamp(0.3, 3.0) } else { 1.0 };
     }
 
     pub fn bass_boost(&self) -> f32 {
@@ -201,11 +201,22 @@ impl OnsetDetector {
         self.stats.get(band).map(|s| (s.mean, s.mask))
     }
 
-    /// Feed one analysis window.
-    ///
-    /// `energies` are the band RMS values for this window. Returns the strongest
-    /// onset that passed its gate, or `None`.
+    /// Feed one analysis window using band-energy rise only. Kept as a compact
+    /// entry point for tests and callers that do not have an FFT spectrum.
     pub fn process(&mut self, energies: BandEnergies) -> Option<Onset> {
+        self.process_with_spectral_flux(energies, BandEnergies::default())
+    }
+
+    /// Feed band RMS plus positive spectral flux for the same window.
+    ///
+    /// The FFT contribution is a bounded transient cue, not a replacement for
+    /// energy. Taking the stronger of the two helps detect a sharp change in
+    /// spectral shape without making sustained loudness retrigger continuously.
+    pub fn process_with_spectral_flux(
+        &mut self,
+        energies: BandEnergies,
+        spectral_flux: BandEnergies,
+    ) -> Option<Onset> {
         self.frames = self.frames.wrapping_add(1);
 
         // Positive-only difference: an onset is a rise in energy. A decay
@@ -224,15 +235,17 @@ impl OnsetDetector {
         // combination of low-mid body and presence crack, which is how a snare
         // actually presents in a mix; taking either alone misses half of them.
         let raw = [
-            // Kick carries the UI bass weight: raising the slider should make the
-            // low band win more tie-breaks, not merely report a larger number.
-            flux.sub * self.bass_boost,
-            flux.low_mid * 0.7 + flux.presence * 0.3,
-            flux.vocal,
-            // Body/texture comes from the air band plus sustained low-mid, so it
-            // stays non-zero during quiet passages instead of collapsing to the
-            // constant zero seen in the v5.5.3 trace.
-            flux.air * 0.6 + energies.air * 0.4,
+            // Kick carries the UI bass weight. The spectral term catches a sharp
+            // low-frequency attack even when the RMS window changes only modestly.
+            flux.sub.max(spectral_flux.sub * 0.35) * self.bass_boost,
+            // A snare has both body and a broadband crack; combine their energy
+            // changes with the corresponding positive spectral-flux bands.
+            (flux.low_mid * 0.7 + flux.presence * 0.3)
+                .max((spectral_flux.low_mid * 0.6 + spectral_flux.presence * 0.4) * 0.35),
+            flux.vocal.max(spectral_flux.vocal * 0.35),
+            // Body/texture combines a fresh air-band transient with sustained air.
+            (flux.air * 0.6 + energies.air * 0.4)
+                .max((spectral_flux.air * 0.35 + energies.air * 0.10).min(1.0)),
         ];
 
         for r in self.refractory.iter_mut() {
@@ -473,4 +486,17 @@ mod tests {
         assert_eq!(d.frames(), 0);
         assert!(d.process(silent()).is_none());
     }
+    #[test]
+    fn spectral_flux_can_detect_a_transient_without_a_large_rms_step() {
+        let mut d = OnsetDetector::new(cfg());
+        let baseline = BandEnergies { sub: 0.05, ..Default::default() };
+        for _ in 0..50 {
+            d.process_with_spectral_flux(baseline, BandEnergies::default());
+        }
+        let flux = BandEnergies { sub: 0.9, ..Default::default() };
+        let onset = d.process_with_spectral_flux(baseline, flux)
+            .expect("positive spectral flux should expose the attack");
+        assert_eq!(onset.event, Event::Kick);
+    }
+
 }

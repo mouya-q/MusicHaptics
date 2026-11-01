@@ -17,8 +17,11 @@ class VibrateProxy(private val context: Context) {
 
     companion object {
         private const val TAG = "VibrateProxy"
+        private const val MAX_WAVEFORM_SEGMENTS = 32
+        private const val MAX_WAVEFORM_DURATION_MS = 1_000L
+        private const val MAX_WAVEFORM_SEGMENT_MS = 250L
+        private const val MAX_COMPOSITION_PARTS = 8
 
-        
         @Volatile var verboseLogging: Boolean = BuildConfig.DEBUG
     }
 
@@ -355,85 +358,178 @@ class VibrateProxy(private val context: Context) {
         }
     }
 
+    private data class SafeWaveform(val timings: LongArray, val amplitudes: IntArray)
+
+    private fun sanitizeWaveform(timings: LongArray, amplitudes: IntArray): SafeWaveform? {
+        if (timings.isEmpty() || amplitudes.isEmpty()) return null
+        if (timings.size != amplitudes.size) {
+            Log.w(TAG, "Reject waveform: timings=${timings.size} amplitudes=${amplitudes.size}")
+            return null
+        }
+        if (timings.size > MAX_WAVEFORM_SEGMENTS) {
+            Log.w(TAG, "Reject waveform: ${timings.size} segments exceeds $MAX_WAVEFORM_SEGMENTS")
+            return null
+        }
+
+        var remaining = MAX_WAVEFORM_DURATION_MS
+        var count = 0
+        val safeTimings = LongArray(minOf(timings.size, MAX_WAVEFORM_SEGMENTS))
+        val safeAmplitudes = IntArray(safeTimings.size)
+        for (i in safeTimings.indices) {
+            if (remaining <= 0L) break
+            val duration = timings[i].coerceIn(1L, MAX_WAVEFORM_SEGMENT_MS).coerceAtMost(remaining)
+            safeTimings[count] = duration
+            remaining -= duration
+            safeAmplitudes[count] = when (val amplitude = amplitudes[i]) {
+                VibrationEffect.DEFAULT_AMPLITUDE -> VibrationEffect.DEFAULT_AMPLITUDE
+                0 -> 0 // Keep explicit zero-amplitude intervals as intentional pauses.
+                else -> amplitude.coerceIn(1, 255)
+            }
+            count++
+        }
+        if (count == 0) return null
+        return SafeWaveform(safeTimings.copyOf(count), safeAmplitudes.copyOf(count))
+    }
+
+    private fun primitiveForAmplitude(amplitude: Int): Int? {
+        val order = when {
+            amplitude >= 184 -> listOf(
+                VibrationEffect.Composition.PRIMITIVE_THUD to primitiveHeavyClickSupported,
+                VibrationEffect.Composition.PRIMITIVE_CLICK to primitiveClickSupported,
+                VibrationEffect.Composition.PRIMITIVE_TICK to primitiveTickSupported,
+            )
+            amplitude >= 82 -> listOf(
+                VibrationEffect.Composition.PRIMITIVE_CLICK to primitiveClickSupported,
+                VibrationEffect.Composition.PRIMITIVE_TICK to primitiveTickSupported,
+                VibrationEffect.Composition.PRIMITIVE_THUD to primitiveHeavyClickSupported,
+            )
+            else -> listOf(
+                VibrationEffect.Composition.PRIMITIVE_TICK to primitiveTickSupported,
+                VibrationEffect.Composition.PRIMITIVE_CLICK to primitiveClickSupported,
+                VibrationEffect.Composition.PRIMITIVE_THUD to primitiveHeavyClickSupported,
+            )
+        }
+        return order.firstOrNull { it.second }?.first
+    }
+
+    private fun hardwareAmplitudes(amplitudes: IntArray): IntArray = IntArray(amplitudes.size) { i ->
+        val value = amplitudes[i]
+        when {
+            value == 0 -> 0
+            forceDefaultAmplitude || !hasAmplitudeControl || value == VibrationEffect.DEFAULT_AMPLITUDE ->
+                VibrationEffect.DEFAULT_AMPLITUDE
+            else -> value.coerceIn(1, 255)
+        }
+    }
+
     fun performWaveform(timings: LongArray, amplitudes: IntArray) {
         if (paused) {
-            android.util.Log.w(TAG, "performWaveform SKIPPED: paused=true")
-            return
-        }
-        if (timings.isEmpty() || amplitudes.isEmpty()) {
-            android.util.Log.w(TAG, "performWaveform SKIPPED: empty arrays")
+            Log.w(TAG, "performWaveform SKIPPED: paused=true")
             return
         }
 
-        
-        if (!hasAmplitudeControl) {
-            val usable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                (primitiveHeavyClickSupported || primitiveClickSupported || primitiveTickSupported)
-            if (usable) {
-                val parts = mutableListOf<Triple<Int, Float, Int>>()
-                var delay = 0
-                val primitives = listOf(
-                    VibrationEffect.Composition.PRIMITIVE_THUD to primitiveHeavyClickSupported,
-                    VibrationEffect.Composition.PRIMITIVE_CLICK to primitiveClickSupported,
-                    VibrationEffect.Composition.PRIMITIVE_TICK to primitiveTickSupported,
-                )
-                for (i in timings.indices) {
-                    val amp = (amplitudes.getOrElse(i) { amplitudes.lastOrNull() ?: 128 } / 255f).coerceIn(0.08f, 1f)
-                    val primitive = primitives.firstOrNull { it.second }?.first ?: break
-                    parts += Triple(primitive, amp, delay)
-                    delay += timings[i].coerceAtMost(80L).toInt()
-                }
-                if (parts.isNotEmpty()) performComposition(parts) else performOneShot(timings.sum().coerceAtMost(100L), VibrationEffect.DEFAULT_AMPLITUDE)
-            } else {
-                performOneShot(timings.sum().coerceAtMost(100L), VibrationEffect.DEFAULT_AMPLITUDE)
-            }
+        val safe = sanitizeWaveform(timings, amplitudes) ?: run {
+            Log.w(TAG, "performWaveform SKIPPED: invalid or empty envelope")
             return
+        }
+        val safeTimings = safe.timings
+        val safeAmplitudes = if (forceDefaultAmplitude) hardwareAmplitudes(safe.amplitudes) else safe.amplitudes
+
+        if (!hasAmplitudeControl && !forceDefaultAmplitude) {
+            val compositionSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                (primitiveHeavyClickSupported || primitiveClickSupported || primitiveTickSupported)
+            if (compositionSupported) {
+                val parts = mutableListOf<Triple<Int, Float, Int>>()
+                var pendingDelay = 0L
+                for (i in safeTimings.indices) {
+                    val rawAmplitude = safeAmplitudes[i]
+                    val amplitude = if (rawAmplitude == VibrationEffect.DEFAULT_AMPLITUDE) 200 else rawAmplitude
+                    if (amplitude > 0) {
+                        val primitive = primitiveForAmplitude(amplitude)
+                        if (primitive != null) {
+                            val scale = (amplitude / 255f).coerceIn(0.08f, 1f)
+                            parts += Triple(primitive, scale, pendingDelay.coerceAtMost(500L).toInt())
+                        }
+                        pendingDelay = safeTimings[i]
+                    } else {
+                        // Zero amplitudes are gaps: fold them into the delay
+                        // before the next supported primitive instead of buzzing.
+                        pendingDelay = (pendingDelay + safeTimings[i]).coerceAtMost(500L)
+                    }
+                }
+                if (parts.isNotEmpty() && parts.size <= MAX_COMPOSITION_PARTS) {
+                    performComposition(parts)
+                    return
+                }
+                // A long envelope may exceed the Composition primitive budget.
+                // Fall through to the bounded waveform path so no segments or
+                // intentional pauses are silently discarded.
+            }
+
+            // No amplitude control and no Composition support: still use the
+            // framework waveform. Non-zero amplitudes become DEFAULT_AMPLITUDE,
+            // but explicit zero segments remain silent. Collapsing the envelope
+            // to one-shot here destroyed every intentional rest interval.
+            for (i in safeAmplitudes.indices) {
+                if (safeAmplitudes[i] != 0) {
+                    safeAmplitudes[i] = VibrationEffect.DEFAULT_AMPLITUDE
+                }
+            }
         }
 
         if (useProxy) {
-            val b = remoteBinder
-            if (b == null) {
-                android.util.Log.w(TAG, "performWaveform SKIPPED: remoteBinder is null (IPC not connected)")
+            val binder = remoteBinder
+            if (binder == null) {
+                Log.w(TAG, "performWaveform SKIPPED: remoteBinder is null (IPC not connected)")
                 return
             }
             try {
                 val data = Parcel.obtain()
                 val reply = Parcel.obtain()
                 try {
-                    data.writeLongArray(timings)
-                    data.writeIntArray(amplitudes)
-                    b.transact(VibrateProxyService.CODE_PERFORM_WAVEFORM, data, reply, 0)
+                    data.writeLongArray(safeTimings)
+                    data.writeIntArray(safeAmplitudes)
+                    binder.transact(VibrateProxyService.CODE_PERFORM_WAVEFORM, data, reply, 0)
                     reply.readException()
                 } finally {
                     data.recycle()
                     reply.recycle()
                 }
-            } catch (e: Exception) { Log.w(TAG, "IPC performWaveform: ${e.message}") }
+            } catch (e: Exception) {
+                Log.w(TAG, "IPC performWaveform: ${e.message}")
+            }
         } else {
-            val vib = directVibrator
-            if (vib != null && hasDirectVibrator) {
+            val vibrator = directVibrator
+            if (vibrator != null && hasDirectVibrator) {
                 try {
-                    if (verboseLogging) Log.i(TAG, "performWaveform: vibrate(waveform, ${timings.size} segments) useProxy=$useProxy ampCtrl=$hasAmplitudeControl")
-                    vib.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
-                } catch (e: Exception) { Log.e(TAG, "Direct performWaveform FAILED: ${e.message}", e) }
+                    if (verboseLogging) Log.i(
+                        TAG,
+                        "performWaveform: ${safeTimings.size} segments total=${safeTimings.sum()}ms useProxy=$useProxy ampCtrl=$hasAmplitudeControl default=$forceDefaultAmplitude"
+                    )
+                    vibrator.vibrate(VibrationEffect.createWaveform(safeTimings, safeAmplitudes, -1))
+                } catch (e: Exception) {
+                    Log.e(TAG, "Direct performWaveform FAILED: ${e.message}", e)
+                }
             } else {
-                Log.e(TAG, "performWaveform SKIPPED: vib=$vib hasDirect=$hasDirectVibrator")
+                Log.e(TAG, "performWaveform SKIPPED: vibrator=$vibrator hasDirect=$hasDirectVibrator")
             }
         }
     }
 
     fun performOneShot(durationMs: Long, amplitude: Int) {
+        if (amplitude == 0) return
         if (paused) {
             android.util.Log.w(TAG, "performOneShot SKIPPED: paused=true")
             return
         }
-        
-        
-        
-        
+
+        val safeDuration = durationMs.coerceIn(1L, 500L)
+        val safeAmplitude = if (forceDefaultAmplitude || amplitude == VibrationEffect.DEFAULT_AMPLITUDE) {
+            VibrationEffect.DEFAULT_AMPLITUDE
+        } else amplitude.coerceIn(1, 255)
         if (forceDefaultAmplitude && directVibrator != null && hasDirectVibrator) {
             try {
-                val dur = durationMs.coerceAtLeast(1L)
+                val dur = safeDuration
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     directVibrator!!.vibrate(VibrationEffect.createOneShot(dur, VibrationEffect.DEFAULT_AMPLITUDE))
                 } else {
@@ -451,8 +547,8 @@ class VibrateProxy(private val context: Context) {
                 val data = Parcel.obtain()
                 val reply = Parcel.obtain()
                 try {
-                    data.writeLong(durationMs)
-                    data.writeInt(amplitude)
+                    data.writeLong(safeDuration)
+                    data.writeInt(safeAmplitude)
                     b.transact(VibrateProxyService.CODE_PERFORM_ONESHOT, data, reply, 0)
                     reply.readException()
                 } finally {
@@ -464,8 +560,8 @@ class VibrateProxy(private val context: Context) {
             val vib = directVibrator
             if (vib != null && hasDirectVibrator) {
                 try {
-                    if (verboseLogging) Log.i(TAG, "performOneShot: vibrate(duration=$durationMs, amp=$amplitude) useProxy=$useProxy")
-                    vib.vibrate(VibrationEffect.createOneShot(durationMs, amplitude))
+                    if (verboseLogging) Log.i(TAG, "performOneShot: vibrate(duration=$safeDuration, amp=$safeAmplitude) useProxy=$useProxy")
+                    vib.vibrate(VibrationEffect.createOneShot(safeDuration, safeAmplitude))
                 } catch (e: Exception) {
                     Log.e(TAG, "Direct performOneShot FAILED: ${e.message}", e)
                 }
@@ -482,54 +578,45 @@ class VibrateProxy(private val context: Context) {
         delayMs: Long = 0L
     ) {
         if (paused) {
-            android.util.Log.w(TAG, "performStereoEnvelope SKIPPED: paused=true")
+            Log.w(TAG, "performStereoEnvelope SKIPPED: paused=true")
             return
         }
         if (primarySegments.isEmpty()) return
-
-        
         if (!hasSecondaryVibrator) {
             performEnvelope(primarySegments)
             return
         }
 
-        val forceDef = forceDefaultAmplitude
-        val useAmpCtrl = hasAmplitudeControl && !forceDef
-
-        
-        val pTimings = LongArray(primarySegments.size) { primarySegments[it].first }
-        val pAmps = IntArray(primarySegments.size) {
-            if (useAmpCtrl) primarySegments[it].second else VibrationEffect.DEFAULT_AMPLITUDE
-        }
+        val primary = sanitizeWaveform(
+            LongArray(primarySegments.size) { primarySegments[it].first },
+            IntArray(primarySegments.size) { primarySegments[it].second },
+        ) ?: return
         try {
-            directVibrator?.vibrate(VibrationEffect.createWaveform(pTimings, pAmps, -1))
+            val primaryAmplitudes = hardwareAmplitudes(primary.amplitudes)
+            directVibrator?.vibrate(VibrationEffect.createWaveform(primary.timings, primaryAmplitudes, -1))
         } catch (e: Exception) {
             Log.e(TAG, "Stereo primary FAILED: ${e.message}")
         }
 
-        
         if (secondarySegments.isNotEmpty()) {
-            if (delayMs > 0) {
-                
-                val sTimings = longArrayOf(delayMs) + LongArray(secondarySegments.size) { secondarySegments[it].first }
-                val sAmps = intArrayOf(0) + IntArray(secondarySegments.size) {
-                    if (useAmpCtrl) secondarySegments[it].second else VibrationEffect.DEFAULT_AMPLITUDE
-                }
-                try {
-                    secondaryVibrator?.vibrate(VibrationEffect.createWaveform(sTimings, sAmps, -1))
-                } catch (e: Exception) {
-                    Log.e(TAG, "Stereo secondary FAILED: ${e.message}")
-                }
+            val rawTimings = if (delayMs > 0L) {
+                longArrayOf(delayMs.coerceAtMost(500L)) + LongArray(secondarySegments.size) { secondarySegments[it].first }
             } else {
-                val sTimings = LongArray(secondarySegments.size) { secondarySegments[it].first }
-                val sAmps = IntArray(secondarySegments.size) {
-                    if (useAmpCtrl) secondarySegments[it].second else VibrationEffect.DEFAULT_AMPLITUDE
-                }
-                try {
-                    secondaryVibrator?.vibrate(VibrationEffect.createWaveform(sTimings, sAmps, -1))
-                } catch (e: Exception) {
-                    Log.e(TAG, "Stereo secondary FAILED: ${e.message}")
-                }
+                LongArray(secondarySegments.size) { secondarySegments[it].first }
+            }
+            val rawAmplitudes = if (delayMs > 0L) {
+                intArrayOf(0) + IntArray(secondarySegments.size) { secondarySegments[it].second }
+            } else {
+                IntArray(secondarySegments.size) { secondarySegments[it].second }
+            }
+            val secondary = sanitizeWaveform(rawTimings, rawAmplitudes) ?: return
+            try {
+                val secondaryAmplitudes = hardwareAmplitudes(secondary.amplitudes)
+                secondaryVibrator?.vibrate(
+                    VibrationEffect.createWaveform(secondary.timings, secondaryAmplitudes, -1)
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Stereo secondary FAILED: ${e.message}")
             }
         }
     }
@@ -539,72 +626,14 @@ class VibrateProxy(private val context: Context) {
     
     fun performEnvelope(segments: List<Pair<Long, Int>>) {
         if (paused) {
-            android.util.Log.w(TAG, "performEnvelope SKIPPED: paused=true")
+            Log.w(TAG, "performEnvelope SKIPPED: paused=true")
             return
         }
         if (segments.isEmpty()) return
-
-        val forceDef = forceDefaultAmplitude
-        val useAmpCtrl = hasAmplitudeControl && !forceDef
-
-        if (forceDef && directVibrator != null && hasDirectVibrator) {
-            
-            
-            try {
-                val timings = LongArray(segments.size) { segments[it].first.coerceAtLeast(1L) }
-                val amplitudes = IntArray(segments.size) { VibrationEffect.DEFAULT_AMPLITUDE }
-                Log.i(TAG, "performEnvelope(forceDef): ${timings.size} segments total=${timings.sum()}ms DEFAULT_AMPLITUDE")
-                directVibrator!!.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
-                return
-            } catch (e: Exception) {
-                Log.e(TAG, "performEnvelope (forceDefault) FAILED: ${e.message}")
-            }
-        }
-
-        if (!useAmpCtrl) {
-            
-            val totalDur = segments.sumOf { it.first }.coerceAtMost(100L)
-            val maxAmp = segments.maxOfOrNull { it.second } ?: VibrationEffect.DEFAULT_AMPLITUDE
-            if (verboseLogging) Log.i(TAG, "performEnvelope(noAmpCtrl): fallback oneShot(${totalDur}ms, amp=$maxAmp)")
-            performOneShot(totalDur, maxAmp)
-            return
-        }
-
-        
-        if (useProxy) {
-            val b = remoteBinder ?: return
-            try {
-                val data = Parcel.obtain()
-                val reply = Parcel.obtain()
-                try {
-                    val timings = LongArray(segments.size) { segments[it].first.coerceAtLeast(1L) }
-                    val amplitudes = IntArray(segments.size) { segments[it].second.coerceIn(1, 255) }
-                    data.writeLongArray(timings)
-                    data.writeIntArray(amplitudes)
-                    b.transact(VibrateProxyService.CODE_PERFORM_WAVEFORM, data, reply, 0)
-                    reply.readException()
-                } finally {
-                    data.recycle()
-                    reply.recycle()
-                }
-            } catch (e: Exception) { Log.w(TAG, "IPC performEnvelope: ${e.message}") }
-        } else {
-            val vib = directVibrator
-            if (vib != null && hasDirectVibrator) {
-                try {
-                    val timings = LongArray(segments.size) { segments[it].first.coerceAtLeast(1L) }
-                    val amplitudes = IntArray(segments.size) { segments[it].second.coerceIn(1, 255) }
-                    if (verboseLogging) Log.i(TAG, "performEnvelope: ${timings.size} segments total=${timings.sum()}ms ampCtrl=$hasAmplitudeControl")
-                    vib.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
-                } catch (e: Exception) {
-                    Log.e(TAG, "performEnvelope FAILED: ${e.message}", e)
-                    
-                    val totalDur = segments.sumOf { it.first }.coerceAtMost(100L)
-                    val maxAmp = segments.maxOfOrNull { it.second } ?: 200
-                    performOneShot(totalDur, maxAmp)
-                }
-            }
-        }
+        performWaveform(
+            LongArray(segments.size) { segments[it].first },
+            IntArray(segments.size) { segments[it].second },
+        )
     }
 
     fun cancel() {
@@ -626,26 +655,77 @@ class VibrateProxy(private val context: Context) {
         }
     }
 
+    private fun buildPrimitiveFallback(primitives: List<Triple<Int, Float, Int>>): SafeWaveform? {
+        if (primitives.isEmpty()) return null
+        val timings = ArrayList<Long>(primitives.size * 2)
+        val amplitudes = ArrayList<Int>(primitives.size * 2)
+        var remaining = MAX_WAVEFORM_DURATION_MS
+        for ((_, rawScale, rawDelay) in primitives.take(MAX_COMPOSITION_PARTS)) {
+            if (remaining <= 0L) break
+            val delay = rawDelay.coerceIn(0, 500).toLong().coerceAtMost(remaining)
+            if (delay > 0L) {
+                timings += delay
+                amplitudes += 0
+                remaining -= delay
+            }
+            if (remaining <= 0L) break
+            val activeMs = 15L.coerceAtMost(remaining)
+            val scale = if (rawScale.isFinite()) rawScale.coerceIn(0f, 1f) else 0.5f
+            val amplitude = if (hasAmplitudeControl && !forceDefaultAmplitude) {
+                (scale * 255f).toInt().coerceIn(1, 255)
+            } else {
+                VibrationEffect.DEFAULT_AMPLITUDE
+            }
+            timings += activeMs
+            amplitudes += amplitude
+            remaining -= activeMs
+        }
+        if (timings.isEmpty()) return null
+        return SafeWaveform(timings.toLongArray(), amplitudes.toIntArray())
+    }
+
+    private fun vibratePrimitiveFallback(vibrator: Vibrator, primitives: List<Triple<Int, Float, Int>>) {
+        val safe = buildPrimitiveFallback(primitives) ?: return
+        // Call the framework directly here. Routing this through performWaveform
+        // would select Composition again on devices that advertise a primitive
+        // but reject it at runtime, creating a recursive failure loop.
+        vibrator.vibrate(VibrationEffect.createWaveform(safe.timings, safe.amplitudes, -1))
+    }
+
     fun performComposition(
         primitives: List<Triple<Int, Float, Int>>
     ) {
-        if (paused) return
-        if (primitives.isEmpty()) return
+        if (paused || primitives.isEmpty()) return
+        val safePrimitives = primitives.take(MAX_COMPOSITION_PARTS).map { (pid, scale, delay) ->
+            Triple(pid, if (scale.isFinite()) scale.coerceIn(0f, 1f) else 0.5f, delay.coerceIn(0, 500))
+        }
+        if (primitives.size > MAX_COMPOSITION_PARTS) {
+            Log.w(TAG, "Composition exceeds $MAX_COMPOSITION_PARTS primitives; preserving rhythm with a timed waveform")
+            val fallback = buildPrimitiveFallback(primitives)
+            if (fallback != null) performWaveform(fallback.timings, fallback.amplitudes)
+            return
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            primitives.forEach { (_, scale, _) ->
-                performOneShot(15L, (scale * 255).toInt().coerceIn(1, 255))
-            }
+            // Preserve primitive delays as actual silent waveform segments on
+            // Android 9/10. Calling several one-shots back-to-back replaces or
+            // overlaps prior effects and loses the rhythm's rests.
+            val fallback = buildPrimitiveFallback(safePrimitives)
+            if (fallback != null) performWaveform(fallback.timings, fallback.amplitudes)
             return
         }
 
         if (useProxy) {
-            val b = remoteBinder ?: return
+            val b = remoteBinder
+            if (b == null) {
+                Log.w(TAG, "Composition skipped: proxy binder unavailable")
+                return
+            }
             try {
                 val data = Parcel.obtain()
                 val reply = Parcel.obtain()
                 try {
-                    data.writeInt(primitives.size)
-                    primitives.forEach { (pid, scale, delay) ->
+                    data.writeInt(safePrimitives.size)
+                    safePrimitives.forEach { (pid, scale, delay) ->
                         data.writeInt(pid)
                         data.writeFloat(scale)
                         data.writeInt(delay)
@@ -656,22 +736,30 @@ class VibrateProxy(private val context: Context) {
                     data.recycle()
                     reply.recycle()
                 }
-            } catch (e: Exception) { Log.w(TAG, "IPC performComposition: ${e.message}") }
+            } catch (e: Exception) {
+                Log.w(TAG, "IPC performComposition: ${e.message}")
+                // The service normally performs its own timed fallback. If the
+                // Binder itself is gone, attempt the same rhythm through the
+                // local vibrator when one is available.
+                val vibrator = directVibrator
+                if (vibrator != null && hasDirectVibrator) {
+                    runCatching { vibratePrimitiveFallback(vibrator, safePrimitives) }
+                        .onFailure { Log.w(TAG, "Local composition fallback failed: ${it.message}") }
+                }
+            }
         } else {
             val vib = directVibrator
             if (vib != null && hasDirectVibrator) {
                 try {
                     val composition = VibrationEffect.startComposition()
-                    var totalDelay = 0
-                    for ((pid, scale, delay) in primitives) {
-                        composition.addPrimitive(pid, scale.coerceIn(0f, 1f), delay.coerceAtLeast(0))
-                        totalDelay += delay
+                    for ((pid, scale, delay) in safePrimitives) {
+                        composition.addPrimitive(pid, scale, delay)
                     }
                     vib.vibrate(composition.compose())
                 } catch (e: Exception) {
-                    Log.w(TAG, "Composition failed, fallback to one-shot: ${e.message}")
-                    val avgScale = primitives.map { it.second }.avg()
-                    performOneShot(20L, (avgScale * 255).toInt().coerceIn(1, 255))
+                    Log.w(TAG, "Composition failed; preserving rests with a timed waveform: ${e.message}")
+                    runCatching { vibratePrimitiveFallback(vib, safePrimitives) }
+                        .onFailure { Log.w(TAG, "Timed composition fallback failed: ${it.message}") }
                 }
             }
         }

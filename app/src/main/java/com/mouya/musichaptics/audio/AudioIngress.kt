@@ -123,7 +123,10 @@ class AudioIngress(
     ): Int {
         val start = offsetFrames.coerceAtLeast(0)
         val ch = channels.coerceAtLeast(1)
-        val maxFrames = ((data.size - start * ch).coerceAtLeast(0)) / ch
+        val sampleStart = start.toLong() * ch.toLong()
+        if (sampleStart >= data.size.toLong()) return 0
+        val maxFrames = ((data.size.toLong() - sampleStart) / ch.toLong())
+            .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         val frames = min(frameCount.coerceAtLeast(0), maxFrames)
         if (!nativeBridge.isLoaded || frames <= 0 || channels <= 0) return 0
 
@@ -137,11 +140,17 @@ class AudioIngress(
             val scratch = slot.scratch
             var src = (start + frameOffset) * ch
             if (ch == 1) {
-                for (i in 0 until batch) { scratch[i] = data[src++].coerceIn(-1f, 1f) }
+                for (i in 0 until batch) {
+                    val sample = data[src++]
+                    scratch[i] = if (sample.isFinite()) sample.coerceIn(-1f, 1f) else 0f
+                }
             } else {
                 for (i in 0 until batch) {
                     var sum = 0f
-                    repeat(ch) { sum += data[src++] }
+                    repeat(ch) {
+                        val sample = data[src++]
+                        if (sample.isFinite()) sum += sample.coerceIn(-1f, 1f)
+                    }
                     scratch[i] = (sum / ch).coerceIn(-1f, 1f)
                 }
             }
@@ -165,15 +174,11 @@ class AudioIngress(
         val ch = channels.coerceAtLeast(1)
         if (!nativeBridge.isLoaded || available <= 0 || channels <= 0) return 0
 
-        // Mirror of the ByteBuffer dispatch: honour the track's real encoding so
-        // float PCM is not decoded as int16 (which produces a noise spectrum and
-        // therefore never triggers onset detection).
-        val bytesPerSample = when (encoding) {
-            android.media.AudioFormat.ENCODING_PCM_FLOAT -> 4
-            android.media.AudioFormat.ENCODING_PCM_8BIT -> 1
-            else -> 2
+        val bytesPerSample = bytesPerSample(encoding) ?: run {
+            logUnsupportedEncoding(encoding)
+            return 0
         }
-        val frames = (available / bytesPerSample) / ch
+        val frames = available / bytesPerSample / ch
         if (frames <= 0) return 0
 
         var frameOffset = 0
@@ -184,46 +189,13 @@ class AudioIngress(
             val slot = slots[(sequence.toInt() and (QUEUE_CAPACITY - 1))]
             val scratch = slot.scratch
             var p = safeOffset + frameOffset * ch * bytesPerSample
-            when (bytesPerSample) {
-                4 -> {
-                    if (ch == 1) {
-                        for (i in 0 until batch) {
-                            scratch[i] = readLeFloat(data, p).coerceIn(-1f, 1f); p += 4
-                        }
-                    } else {
-                        for (i in 0 until batch) {
-                            var sum = 0f
-                            repeat(ch) { sum += readLeFloat(data, p); p += 4 }
-                            scratch[i] = (sum / ch).coerceIn(-1f, 1f)
-                        }
-                    }
+            for (i in 0 until batch) {
+                var sum = 0f
+                repeat(ch) {
+                    sum += decodeSample(data, p, encoding)
+                    p += bytesPerSample
                 }
-                1 -> {
-                    if (ch == 1) {
-                        for (i in 0 until batch) {
-                            scratch[i] = ((data[p++].toInt() and 0xFF) - 128) / 128f
-                        }
-                    } else {
-                        for (i in 0 until batch) {
-                            var sum = 0
-                            repeat(ch) { sum += (data[p++].toInt() and 0xFF) - 128 }
-                            scratch[i] = sum / (ch * 128f)
-                        }
-                    }
-                }
-                else -> {
-                    if (ch == 1) {
-                        for (i in 0 until batch) {
-                            scratch[i] = readLeShort(data, p) / 32768f; p += 2
-                        }
-                    } else {
-                        for (i in 0 until batch) {
-                            var sum = 0
-                            repeat(ch) { sum += readLeShort(data, p).toInt(); p += 2 }
-                            scratch[i] = sum / (ch * 32768f)
-                        }
-                    }
-                }
+                scratch[i] = (sum / ch).coerceIn(-1f, 1f)
             }
             slot.mono.clear()
             slot.mono.put(scratch, 0, batch)
@@ -242,28 +214,16 @@ class AudioIngress(
     ): Int {
         val ch = channels.coerceAtLeast(1)
         val start = startPosition.coerceIn(0, buffer.limit())
-        val end = min(buffer.limit(), start + byteCount.coerceAtLeast(0))
-        val totalBytes = end - start
-        if (!nativeBridge.isLoaded || totalBytes <= 0 || channels <= 0) return 0
+        val safeCount = byteCount.coerceAtLeast(0).coerceAtMost(buffer.limit() - start)
+        if (!nativeBridge.isLoaded || safeCount <= 0 || channels <= 0) return 0
 
-        // Dispatch on the track's real encoding. Assuming 16-bit whenever a
-        // player used float PCM turned samples into noise, so onset detection
-        // never fired while the pipeline looked perfectly healthy.
-        return when (encoding) {
-            android.media.AudioFormat.ENCODING_PCM_FLOAT ->
-                processFloatBytes(buffer, start, totalBytes, ch)
-            8 -> // ENCODING_PCM_8BIT is 3; the literal keeps the branch readable
-                process8BitBytes(buffer, start, totalBytes, ch)
-            else ->
-                process16BitBytes(buffer, start, totalBytes, ch)
+        val bytesPerSample = bytesPerSample(encoding) ?: run {
+            logUnsupportedEncoding(encoding)
+            return 0
         }
-    }
-
-    private fun process16BitBytes(
-        buffer: ByteBuffer, start: Int, totalBytes: Int, ch: Int
-    ): Int {
-        val frames = (totalBytes / 2) / ch
+        val frames = safeCount / bytesPerSample / ch
         if (frames <= 0) return 0
+
         var frameOffset = 0
         while (frameOffset < frames) {
             val batch = min(MAX_BATCH_FRAMES, frames - frameOffset)
@@ -271,21 +231,14 @@ class AudioIngress(
             if (sequence < 0L) break
             val slot = slots[(sequence.toInt() and (QUEUE_CAPACITY - 1))]
             val scratch = slot.scratch
-            var pos = start + frameOffset * ch * 2
-            if (ch == 1) {
-                for (i in 0 until batch) {
-                    scratch[i] = readLeShort(buffer, pos) / 32768f
-                    pos += 2
+            var p = start + frameOffset * ch * bytesPerSample
+            for (i in 0 until batch) {
+                var sum = 0f
+                repeat(ch) {
+                    sum += decodeSample(buffer, p, encoding)
+                    p += bytesPerSample
                 }
-            } else {
-                for (i in 0 until batch) {
-                    var sum = 0
-                    repeat(ch) {
-                        sum += readLeShort(buffer, pos).toInt()
-                        pos += 2
-                    }
-                    scratch[i] = sum / (ch * 32768f)
-                }
+                scratch[i] = (sum / ch).coerceIn(-1f, 1f)
             }
             slot.mono.clear()
             slot.mono.put(scratch, 0, batch)
@@ -295,76 +248,60 @@ class AudioIngress(
         return frameOffset
     }
 
-    private fun processFloatBytes(
-        buffer: ByteBuffer, start: Int, totalBytes: Int, ch: Int
-    ): Int {
-        // ENCODING_PCM_FLOAT: 32-bit IEEE-754 little-endian, nominal range -1..1
-        val frames = (totalBytes / 4) / ch
-        if (frames <= 0) return 0
-        var frameOffset = 0
-        while (frameOffset < frames) {
-            val batch = min(MAX_BATCH_FRAMES, frames - frameOffset)
-            val sequence = reserveSequence(batch)
-            if (sequence < 0L) break
-            val slot = slots[(sequence.toInt() and (QUEUE_CAPACITY - 1))]
-            val scratch = slot.scratch
-            var pos = start + frameOffset * ch * 4
-            if (ch == 1) {
-                for (i in 0 until batch) {
-                    scratch[i] = readLeFloat(buffer, pos).coerceIn(-1f, 1f)
-                    pos += 4
-                }
-            } else {
-                for (i in 0 until batch) {
-                    var sum = 0f
-                    repeat(ch) {
-                        sum += readLeFloat(buffer, pos)
-                        pos += 4
-                    }
-                    scratch[i] = (sum / ch).coerceIn(-1f, 1f)
-                }
-            }
-            slot.mono.clear()
-            slot.mono.put(scratch, 0, batch)
-            publish(sequence, slot, batch)
-            frameOffset += batch
-        }
-        return frameOffset
+    private fun bytesPerSample(encoding: Int): Int? = when (encoding) {
+        android.media.AudioFormat.ENCODING_PCM_8BIT -> 1
+        android.media.AudioFormat.ENCODING_PCM_16BIT -> 2
+        android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> 3
+        android.media.AudioFormat.ENCODING_PCM_32BIT,
+        android.media.AudioFormat.ENCODING_PCM_FLOAT -> 4
+        else -> null
     }
 
-    private fun process8BitBytes(
-        buffer: ByteBuffer, start: Int, totalBytes: Int, ch: Int
-    ): Int {
-        // ENCODING_PCM_8BIT: unsigned 0..255 centred on 128
-        val frames = totalBytes / ch
-        if (frames <= 0) return 0
-        var frameOffset = 0
-        while (frameOffset < frames) {
-            val batch = min(MAX_BATCH_FRAMES, frames - frameOffset)
-            val sequence = reserveSequence(batch)
-            if (sequence < 0L) break
-            val slot = slots[(sequence.toInt() and (QUEUE_CAPACITY - 1))]
-            val scratch = slot.scratch
-            var pos = start + frameOffset * ch
-            if (ch == 1) {
-                for (i in 0 until batch) {
-                    scratch[i] = ((buffer.get(pos++).toInt() and 0xFF) - 128) / 128f
-                }
-            } else {
-                for (i in 0 until batch) {
-                    var sum = 0
-                    repeat(ch) {
-                        sum += (buffer.get(pos++).toInt() and 0xFF) - 128
-                    }
-                    scratch[i] = sum / (ch * 128f)
-                }
-            }
-            slot.mono.clear()
-            slot.mono.put(scratch, 0, batch)
-            publish(sequence, slot, batch)
-            frameOffset += batch
+    @Volatile private var lastUnsupportedEncoding = Int.MIN_VALUE
+
+    private fun logUnsupportedEncoding(encoding: Int) {
+        if (lastUnsupportedEncoding != encoding) {
+            lastUnsupportedEncoding = encoding
+            Log.w(TAG, "Unsupported PCM encoding=$encoding; dropping input instead of decoding it as PCM16")
         }
-        return frameOffset
+    }
+
+    private fun decodeSample(data: ByteArray, p: Int, encoding: Int): Float = when (encoding) {
+        android.media.AudioFormat.ENCODING_PCM_8BIT ->
+            ((data[p].toInt() and 0xFF) - 128) / 128f
+        android.media.AudioFormat.ENCODING_PCM_16BIT ->
+            readLeShort(data, p) / 32768f
+        android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> {
+            val raw = (data[p].toInt() and 0xFF) or
+                ((data[p + 1].toInt() and 0xFF) shl 8) or
+                ((data[p + 2].toInt() and 0xFF) shl 16)
+            val signed = if ((raw and 0x800000) != 0) raw or -0x1000000 else raw
+            signed / 8388608f
+        }
+        android.media.AudioFormat.ENCODING_PCM_32BIT ->
+            readLeInt(data, p) / 2147483648.0f
+        android.media.AudioFormat.ENCODING_PCM_FLOAT ->
+            readLeFloat(data, p).let { if (it.isFinite()) it.coerceIn(-1f, 1f) else 0f }
+        else -> 0f
+    }
+
+    private fun decodeSample(buffer: ByteBuffer, p: Int, encoding: Int): Float = when (encoding) {
+        android.media.AudioFormat.ENCODING_PCM_8BIT ->
+            ((buffer.get(p).toInt() and 0xFF) - 128) / 128f
+        android.media.AudioFormat.ENCODING_PCM_16BIT ->
+            readLeShort(buffer, p) / 32768f
+        android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> {
+            val raw = (buffer.get(p).toInt() and 0xFF) or
+                ((buffer.get(p + 1).toInt() and 0xFF) shl 8) or
+                ((buffer.get(p + 2).toInt() and 0xFF) shl 16)
+            val signed = if ((raw and 0x800000) != 0) raw or -0x1000000 else raw
+            signed / 8388608f
+        }
+        android.media.AudioFormat.ENCODING_PCM_32BIT ->
+            readLeInt(buffer, p) / 2147483648.0f
+        android.media.AudioFormat.ENCODING_PCM_FLOAT ->
+            readLeFloat(buffer, p).let { if (it.isFinite()) it.coerceIn(-1f, 1f) else 0f }
+        else -> 0f
     }
 
     fun shutdown() {
@@ -434,6 +371,18 @@ class AudioIngress(
         val hi = buffer.get(index + 1).toInt()
         return ((hi shl 8) or lo).toShort()
     }
+
+    private fun readLeInt(data: ByteArray, index: Int): Int =
+        (data[index].toInt() and 0xFF) or
+            ((data[index + 1].toInt() and 0xFF) shl 8) or
+            ((data[index + 2].toInt() and 0xFF) shl 16) or
+            (data[index + 3].toInt() shl 24)
+
+    private fun readLeInt(buffer: ByteBuffer, index: Int): Int =
+        (buffer.get(index).toInt() and 0xFF) or
+            ((buffer.get(index + 1).toInt() and 0xFF) shl 8) or
+            ((buffer.get(index + 2).toInt() and 0xFF) shl 16) or
+            (buffer.get(index + 3).toInt() shl 24)
 
     /** Little-endian IEEE-754 single precision, assembled by hand so the
      *  caller's buffer byte order does not have to be trusted. */

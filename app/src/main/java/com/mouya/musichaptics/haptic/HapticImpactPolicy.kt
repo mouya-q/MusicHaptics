@@ -30,10 +30,8 @@ class HapticImpactPolicy {
             else -> 1.0f
         }
         val gain = tuning.impactGain * layerGain * (0.72f + 0.48f * normalized.pow(0.82f))
-        val timing = when {
-            forceDefaultAmplitude || !amplitudeControl -> shape.force
-            else -> shape.ampCtrl
-        }
+        val useDefault = forceDefaultAmplitude || !amplitudeControl || tuning.preferDefaultAmplitude
+        val timing = if (useDefault) shape.force else shape.ampCtrl
         val scale = when (key) {
             "KICK" -> tuning.kickMsScale
             "SNARE" -> tuning.snareMsScale
@@ -59,8 +57,6 @@ class HapticImpactPolicy {
 
         val amplitude = (normalized * shape.ampBase * shape.weight(profile) * gain)
             .toInt().coerceIn(1, tuning.cappedAmplitude(profile))
-        val useDefault = forceDefaultAmplitude || !amplitudeControl || tuning.preferDefaultAmplitude
-
         val segments = buildList {
             add(Segment(attack, if (useDefault) VibrationEffect.DEFAULT_AMPLITUDE else (amplitude * shape.attackAmpFrac).toInt().coerceAtLeast(1)))
             if (sustain > 0L) {

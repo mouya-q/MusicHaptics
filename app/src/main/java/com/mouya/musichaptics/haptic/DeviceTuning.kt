@@ -49,11 +49,10 @@ object DeviceTuningRegistry {
             bodyMsScale = 0.84f,
             minIntervalMs = 52L,
             minIntensity = 12,
-            preferDefaultAmplitude = true,
             amplitudeCeilingScale = 0.96f,
             textureGainScale = 1.08f,
             bodyGainScale = 0.78f,
-            reason = "0809/X-axis compatibility path; preserve short attacks and avoid long rumble"
+            reason = "0809/X-axis baseline; use runtime amplitude-control capability and preserve short attacks"
         )
         DeviceProfile.XIAOMI13_XAXIS -> DeviceTuning(
             profileId = "XIAOMI13_XAXIS",

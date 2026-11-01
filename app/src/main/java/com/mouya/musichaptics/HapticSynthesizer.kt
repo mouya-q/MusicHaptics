@@ -1,6 +1,7 @@
 package com.mouya.musichaptics
 
 import android.os.SystemClock
+import com.mouya.musichaptics.haptic.DeviceTuningRegistry
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.pow
@@ -95,25 +96,29 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
     private var coilTemp = 25f
     private var lastThermalMs = 0L
 
+    private fun finiteOr(value: Float, fallback: Float): Float =
+        if (value.isFinite()) value else fallback
+
     fun updateParameters(value: SynthConfig) {
+        val warn = finiteOr(value.thermalWarn, THERMAL_WARN).coerceIn(40f, 100f)
         config = value.copy(
             synthesisRateHz = value.synthesisRateHz.coerceIn(30, 120),
-            lraF0 = value.lraF0.coerceIn(150f, 250f),
-            lraQ = value.lraQ.coerceIn(5f, 30f),
-            attackTauImpact = value.attackTauImpact.coerceIn(0.0001f, 0.05f),
-            decayTauImpact = value.decayTauImpact.coerceIn(0.0005f, 0.2f),
-            attackTauContinuous = value.attackTauContinuous.coerceIn(0.001f, 0.1f),
-            decayTauContinuous = value.decayTauContinuous.coerceIn(0.005f, 0.3f),
-            releaseTau = value.releaseTau.coerceIn(0.005f, 0.3f),
-            sustainLevel = value.sustainLevel.coerceIn(0.02f, 0.8f),
-            thermalWarn = value.thermalWarn.coerceIn(40f, 100f),
-            thermalCrit = max(value.thermalCrit, value.thermalWarn + 2f).coerceIn(50f, 120f),
-            thermalRth = value.thermalRth.coerceIn(10f, 60f),
-            thermalCth = value.thermalCth.coerceIn(0.25f, 8f),
-            impactGain = value.impactGain.coerceIn(0.1f, 3f),
-            continuousGain = value.continuousGain.coerceIn(0.1f, 3f),
-            textureGain = value.textureGain.coerceIn(0.1f, 3f),
-            masterGain = value.masterGain.coerceIn(0.1f, 3f),
+            lraF0 = finiteOr(value.lraF0, LRA_F0).coerceIn(150f, 250f),
+            lraQ = finiteOr(value.lraQ, LRA_Q).coerceIn(5f, 30f),
+            attackTauImpact = finiteOr(value.attackTauImpact, ATTACK_TAU_IMPACT).coerceIn(0.0001f, 0.05f),
+            decayTauImpact = finiteOr(value.decayTauImpact, DECAY_TAU_IMPACT).coerceIn(0.0005f, 0.2f),
+            attackTauContinuous = finiteOr(value.attackTauContinuous, ATTACK_TAU_CONTINUOUS).coerceIn(0.001f, 0.1f),
+            decayTauContinuous = finiteOr(value.decayTauContinuous, DECAY_TAU_CONTINUOUS).coerceIn(0.005f, 0.3f),
+            releaseTau = finiteOr(value.releaseTau, RELEASE_TAU).coerceIn(0.005f, 0.3f),
+            sustainLevel = finiteOr(value.sustainLevel, SUSTAIN_LEVEL).coerceIn(0.02f, 0.8f),
+            thermalWarn = warn,
+            thermalCrit = max(finiteOr(value.thermalCrit, THERMAL_CRIT), warn + 2f).coerceIn(50f, 120f),
+            thermalRth = finiteOr(value.thermalRth, THERMAL_RTH).coerceIn(10f, 60f),
+            thermalCth = finiteOr(value.thermalCth, THERMAL_CTH).coerceIn(0.25f, 8f),
+            impactGain = finiteOr(value.impactGain, 1f).coerceIn(0.1f, 3f),
+            continuousGain = finiteOr(value.continuousGain, 1f).coerceIn(0.1f, 3f),
+            textureGain = finiteOr(value.textureGain, 1f).coerceIn(0.1f, 3f),
+            masterGain = finiteOr(value.masterGain, 1f).coerceIn(0.1f, 3f),
         )
     }
 
@@ -135,27 +140,35 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
         coilTemp = 25f + (coilTemp - 25f) * cooling
 
         val normalizedEvent = event.uppercase()
+        val safeIntensity = finiteOr(intensity, 0f).coerceIn(0f, 1f)
+        val safeLevelScale = finiteOr(levelScale, 1f).coerceIn(0.3f, 2.0f)
+        val safeSharpness = finiteOr(sharpness, 0.32f).coerceIn(0.05f, 1f)
+        val safeBassBoost = finiteOr(bassBoost, 1f).coerceIn(0.5f, 2.5f)
+        val safeAmpScale = finiteOr(ampScale, 1f).coerceIn(0.3f, 2.4f)
+        val safeAccentScale = finiteOr(accentScale, 1f).coerceIn(0.5f, 2f)
+        val safeThermalInput = finiteOr(thermalInput, 1f).coerceIn(0.45f, 1f)
+        val total = durationMs.coerceIn(12L, 220L)
         val continuous = normalizedEvent == "BODY" || normalizedEvent == "VOCAL"
         val eventGain = when (normalizedEvent) {
-            "KICK", "SUB" -> bassBoost * config.impactGain
+            "KICK", "SUB" -> safeBassBoost * config.impactGain
             "TICK" -> config.textureGain
             "BODY", "VOCAL" -> config.continuousGain
             else -> config.impactGain
         }
-        val sharp = sharpness.coerceIn(0.05f, 1f)
+        val sharp = safeSharpness
         val resonanceScale = sqrt((LRA_F0 / config.lraF0).coerceIn(0.6f, 1.7f))
 
         // Expand the narrow onset band onto the full amplitude range so that a
         // quiet hi-hat and a hard kick land at clearly different levels.
-        val onsetNorm = ((intensity - ONSET_FLOOR) / (ONSET_CEIL - ONSET_FLOOR))
+        val onsetNorm = ((safeIntensity - ONSET_FLOOR) / (ONSET_CEIL - ONSET_FLOOR))
             .coerceIn(0f, 1f)
         val shaped = onsetNorm.pow(ONSET_CURVE)
 
         // The multipliers below only shape character. Normalising them by the
         // drive reference keeps the product near unity, so the amplitude is
         // driven by intensity instead of being crushed into the 255 clamp.
-        val character = (eventGain * accentScale * ampScale
-            * config.masterGain * thermalInput).coerceAtLeast(0.01f)
+        val character = (eventGain * safeAccentScale * safeAmpScale
+            * config.masterGain * safeThermalInput).coerceAtLeast(0.01f)
         val drive = (character / DRIVE_REFERENCE)
             .coerceIn(1f / DRIVE_CEILING, DRIVE_CEILING)
 
@@ -166,15 +179,18 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
         // raw 87 and raw 246. A square-root curve on the level term spreads the
         // four UI steps (0.3 / 0.75 / 1.1 / 1.6 of the base amplitude) across a
         // usable span while keeping the endpoints monotonic.
-        val levelCurve = levelScale.coerceIn(0.3f, 2.0f).pow(0.5f) / 2.0f.pow(0.5f)
-        val peakMax = 255f * PEAK_HEADROOM
+        val levelCurve = safeLevelScale.pow(0.5f) / 2.0f.pow(0.5f)
+        val modelCeiling = DeviceTuningRegistry.current(profile).cappedAmplitude(profile).coerceIn(1, 255)
+        val peakMax = minOf(255f * PEAK_HEADROOM, modelCeiling.toFloat()).coerceAtLeast(5f)
         val peak = (shaped * drive * levelCurve * peakMax).coerceIn(5f, peakMax)
         val qTail = (config.lraQ / profile.actuator.qFactor.coerceAtLeast(5f)).coerceIn(0.65f, 1.65f)
         val attackSource = if (continuous) config.attackTauContinuous else config.attackTauImpact
         val decaySource = if (continuous) config.decayTauContinuous else config.decayTauImpact
-        val attackMs = (attackSource * 1000f * profile.actuator.riseScale / resonanceScale).coerceIn(1f, durationMs * 0.32f)
-        val decayMs = (decaySource * 1000f * profile.actuator.fallScale * qTail * resonanceScale / sharp.pow(0.35f)).coerceIn(4f, durationMs * 0.62f)
-        val releaseMs = (config.releaseTau * 1000f).coerceIn(4f, durationMs * 0.45f)
+        val attackMs = (attackSource * 1000f * profile.actuator.riseScale / resonanceScale)
+            .coerceIn(1f, total.toFloat() * 0.32f)
+        val decayMs = (decaySource * 1000f * profile.actuator.fallScale * qTail * resonanceScale / sharp.pow(0.35f))
+            .coerceIn(4f, total.toFloat() * 0.62f)
+        val releaseMs = (config.releaseTau * 1000f).coerceIn(4f, total.toFloat() * 0.45f)
         // Quantise to a grid derived from the actuator period. The actuator here
         // runs at 200 Hz, so a period of 5 ms divided by six gives a ~0.83 ms
         // grid clamped to 2 ms. The old fixed rate produced a 16.7 ms grid,
@@ -187,13 +203,21 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
             return (n * quantum).toLong()
         }
 
-        val attack = snap(attackMs)
-        val tail = snap(decayMs + releaseMs)
-        val total = durationMs.coerceIn(12L, 220L)
+        // The five segments are one envelope, not five independent timers.
+        // Keep a non-zero body and force their sum to match the requested total
+        // so high-Q / slow-release profiles cannot silently lengthen every hit.
+        var attack = snap(attackMs).coerceIn(2L, total - 3L)
+        var tail = snap(decayMs + releaseMs).coerceIn(2L, total - attack - 1L)
+        val segmentBudget = total - 1L // reserve at least 1 ms for the body
+        if (attack + tail > segmentBudget) {
+            val scale = segmentBudget.toFloat() / (attack + tail).toFloat()
+            attack = (attack * scale).toLong().coerceAtLeast(1L)
+            tail = (segmentBudget - attack).coerceAtLeast(1L)
+        }
         val body = (total - attack - tail).coerceAtLeast(1L)
         // Intensity-dependent sustain: strong hits have less sustain (punchier),
         // weak hits have more sustain (smoother). Apple-style energy-proportional shaping.
-        val intensityShape = intensity.coerceIn(0f, 1f)
+        val intensityShape = safeIntensity
         val sustain = if (continuous) config.sustainLevel
         else config.sustainLevel * (1f - sharp * 0.55f) * (0.6f + 0.4f * (1f - intensityShape))
         val releaseLevel = (0.08f + (1f - sharp) * 0.18f).coerceIn(0.06f, 0.3f)
@@ -208,12 +232,26 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
             coilTemp >= config.thermalCrit -> 0.45f
             else -> 1f - 0.55f * ((coilTemp - config.thermalWarn) / (config.thermalCrit - config.thermalWarn))
         }.coerceIn(0.45f, 1f)
-        val scaled = intArrayOf(
-            (peakInt * thermalGain).toInt().coerceIn(1, 255),
-            (bodyInt * thermalGain).toInt().coerceIn(1, 255),
-            (tailInt * thermalGain).toInt().coerceIn(1, 255),
+        // Android waveform segments hold one amplitude each. Three flat stages
+        // made the first segment jump straight to peak, so the configured attack
+        // time was not really an attack. Split attack and release into two steps
+        // to approximate a five-point envelope while keeping the exact time sum.
+        val attackLead = (attack / 2L).coerceAtLeast(1L)
+        val attackPeak = attack - attackLead
+        val releaseLead = (tail / 2L).coerceAtLeast(1L)
+        val releaseTail = tail - releaseLead
+        val rawAmplitudes = intArrayOf(
+            (peakInt * 0.56f).toInt().coerceIn(1, peakInt),
+            peakInt,
+            bodyInt,
+            ((bodyInt + tailInt) / 2).coerceIn(1, peakInt),
+            tailInt,
         )
-        return SculptedImpact(longArrayOf(attack, body, tail), scaled, scaled.maxOrNull() ?: 1, attack + body + tail)
+        val scaled = IntArray(rawAmplitudes.size) { index ->
+            (rawAmplitudes[index] * thermalGain).toInt().coerceIn(1, 255)
+        }
+        val timings = longArrayOf(attackLead, attackPeak, body, releaseLead, releaseTail)
+        return SculptedImpact(timings, scaled, scaled.maxOrNull() ?: 1, timings.sum())
     }
 
     fun forceDecay() {

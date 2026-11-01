@@ -65,6 +65,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import com.mouya.musichaptics.ui.ConsoleLogState
+import com.mouya.musichaptics.haptic.DeviceTuningRegistry
 import com.mouya.musichaptics.hook.ConfigRefreshReceiver
 import com.mouya.musichaptics.ui.rememberConsoleLogState
 import com.mouya.musichaptics.ui.IOSConsole
@@ -493,16 +494,19 @@ fun HapticDashboard() {
     var showAdvancedSettings by remember { mutableStateOf(false) }
     
     
-    val forceDefaultAmpAutoDefault = remember {
-        val d = android.os.Build.DEVICE.lowercase(java.util.Locale.ROOT)
-        android.os.Build.MANUFACTURER.lowercase(java.util.Locale.ROOT) == "xiaomi" &&
-            (d.contains("umi") || d.contains("cmi") || d.contains("thyme"))
-    }
+    // Do not infer DEFAULT_AMPLITUDE mode from a marketing model/device codename.
+    // The HAL capability is queried at runtime by VibrateProxy; this compatibility
+    // mode remains an explicit user override instead of silently disabling the
+    // amplitude envelope on devices that can control it.
     var isForceDefaultAmpActive by remember {
-        mutableStateOf(prefs.getBoolean("force_default_amplitude", forceDefaultAmpAutoDefault))
+        mutableStateOf(prefs.getBoolean("force_default_amplitude", false))
     }
-    var customAmplitude by remember { mutableStateOf(prefs.getFloat("haptic_amplitude", 2.3f)) }
-    var customBassBoost by remember { mutableStateOf(prefs.getFloat("haptic_bass_boost", 1.6f)) }
+    var customAmplitude by remember {
+        mutableStateOf(prefs.getFloat("haptic_amplitude", 2.3f).let { if (it.isFinite()) it.coerceIn(0.5f, 3.5f) else 2.3f })
+    }
+    var customBassBoost by remember {
+        mutableStateOf(prefs.getFloat("haptic_bass_boost", 1.6f).let { if (it.isFinite()) it.coerceIn(1.0f, 2.5f) else 1.6f })
+    }
     
     var stylePreset by remember {
         mutableStateOf(StylePreset.fromKey(prefs.getString("style_preset", "balanced")))
@@ -644,6 +648,7 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
                 rootVerified = hardwareRootVerified,
                 profileId = hardwareProfileId,
                 fingerprint = hardwareFingerprint,
+                forceDefaultAmplitude = isForceDefaultAmpActive,
                 refreshing = hardwareRefreshing,
                 expanded = hardwareCardExpanded,
                 onToggleExpanded = { hardwareCardExpanded = !hardwareCardExpanded },
@@ -1014,8 +1019,12 @@ private fun WhitelistPanel(
     val scopedPrefs = remember(packageName) { context.getSharedPreferences("scoped_haptics_$packageName", Context.MODE_PRIVATE) }
     val global = remember { context.getSharedPreferences("haptics_config", Context.MODE_PRIVATE) }
     var enabled by remember(packageName) { mutableStateOf(scopedPrefs.getBoolean("master_switch", global.getBoolean("master_switch", true))) }
-    var amp by remember(packageName) { mutableStateOf(scopedPrefs.getFloat("haptic_amplitude", global.getFloat("haptic_amplitude", 2.3f))) }
-    var boost by remember(packageName) { mutableStateOf(scopedPrefs.getFloat("haptic_bass_boost", global.getFloat("haptic_bass_boost", 1.6f))) }
+    var amp by remember(packageName) {
+        mutableStateOf(scopedPrefs.getFloat("haptic_amplitude", global.getFloat("haptic_amplitude", 2.3f)).let { if (it.isFinite()) it.coerceIn(0.5f, 3.5f) else 2.3f })
+    }
+    var boost by remember(packageName) {
+        mutableStateOf(scopedPrefs.getFloat("haptic_bass_boost", global.getFloat("haptic_bass_boost", 1.6f)).let { if (it.isFinite()) it.coerceIn(1.0f, 2.5f) else 1.6f })
+    }
     LaunchedEffect(enabled, amp, boost) {
         scopedPrefs.edit().putBoolean("master_switch", enabled).putFloat("haptic_amplitude", amp).putFloat("haptic_bass_boost", boost).apply()
         // P1: Deliver to current package only; no global broadcast.
@@ -1070,17 +1079,35 @@ fun IOSHardwareProfileCard(
     rootVerified: Boolean,
     profileId: String,
     fingerprint: String,
+    forceDefaultAmplitude: Boolean,
     refreshing: Boolean,
     onRefresh: () -> Unit,
     expanded: Boolean,
     onToggleExpanded: () -> Unit,
 ) {
     val profile = detectDeviceProfile(persistedProfileId = profileId)
-    
+    val tuning = remember(profile) { DeviceTuningRegistry.current(profile) }
     val hwContext = LocalContext.current
+    val amplitudeControlAvailable = remember(hwContext) {
+        runCatching {
+            val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                (hwContext.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager)?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                hwContext.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+            }
+            vibrator?.hasAmplitudeControl() == true
+        }.getOrDefault(false)
+    }
     val hardwareHaptic = remember(hwContext) { HapticFeedbackEngine.create(hwContext) }
-    val statusColor = if (rootVerified) IOSColors.green else IOSColors.red
-    val statusText = if (rootVerified) "Root 已验证 · 已使用板级指纹" else "Root 未授权 · 未验证"
+    // Root is an optional enhancement, not a requirement for Android's
+    // framework vibrator path. Keep the non-root state neutral rather than red.
+    val statusColor = if (rootVerified) IOSColors.green else IOSColors.blue
+    val statusText = when {
+        rootVerified && fingerprint.isNotBlank() -> "Root 已验证 · 板级信息已读取"
+        rootVerified -> "Root 已验证 · 使用机型默认调校"
+        else -> "Root 未验证 · 系统振动通道仍可用"
+    }
     val compactFingerprint = fingerprint.lineSequence()
         .filter { it.isNotBlank() }
         .take(2)
@@ -1172,8 +1199,29 @@ fun IOSHardwareProfileCard(
                 HorizontalDivider(color = dividerColor)
                 Text(profile.name, color = textPrimary(), fontSize = 15.sp, fontWeight = FontWeight.Medium)
                 Text(
-                    "f₀ ${profile.actuator.resonanceFreq.toInt()} Hz  ·  Q ${"%.1f".format(Locale.ROOT, profile.actuator.qFactor)}  ·  上升 ${"%.1f".format(Locale.ROOT, profile.actuator.riseTimeMs)} ms",
+                    "调校基线  ·  f₀ ${profile.actuator.resonanceFreq.toInt()} Hz  ·  Q ${"%.1f".format(Locale.ROOT, profile.actuator.qFactor)}  ·  上升 ${"%.1f".format(Locale.ROOT, profile.actuator.riseTimeMs)} ms",
                     color = textSecondary(), fontSize = 12.sp
+                )
+                Text(
+                    "输出节奏  ·  最小间隔 ${tuning.minIntervalMs} ms  ·  机型策略上限 ${tuning.cappedAmplitude(profile)}/255",
+                    color = textSecondary(), fontSize = 12.sp
+                )
+                Text(
+                    when {
+                        forceDefaultAmplitude -> "力度模式：已启用强制满驱动；幅度差异主要通过时长与节奏塑造"
+                        tuning.preferDefaultAmplitude -> "力度模式：该机型策略优先系统默认幅度；实际强度由 ROM / 振动 HAL 决定"
+                        amplitudeControlAvailable -> "力度模式：系统支持逐段幅度控制，可执行五段包络与设备限幅"
+                        else -> "力度模式：系统未提供线性幅控；保留静音间隔，并按能力回退到原语或默认幅度波形"
+                    },
+                    color = textTertiary(), fontSize = 11.sp
+                )
+                Text(
+                    "机型上限仅在可控幅度或已建立的直驱通道中可强制执行；系统默认幅度路径无法由 Android API 保证逐段限幅。",
+                    color = textTertiary(), fontSize = 11.sp
+                )
+                Text(
+                    "频响与热参数为机型调校初始估算，不代表实时测量；设备上限仍以系统实际能力为准。",
+                    color = textTertiary(), fontSize = 11.sp
                 )
                 Text(compactFingerprint, color = textTertiary(), fontSize = 11.sp, maxLines = 2)
                 Text(stringResource(R.string.recheck_hint), color = textTertiary(), fontSize = 11.sp)
@@ -1217,6 +1265,12 @@ fun IOSControlPanel(
             
             Text(stringResource(R.string.gain_level), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
             IOSSegmentedControl(items = Preset.entries.toList(), selected = selectedPreset, onSelect = onPresetChange, label = { it.label })
+            IOSSettingSliderRow("整体力度", customAmplitude, 0.5f..3.5f, "x", onAmplitudeChange)
+            IOSSettingSliderRow("低频权重", customBassBoost, 1.0f..2.5f, "x", onBassBoostChange)
+            Text(
+                "力度采用软限幅保留强弱层次；风格预设控制起音、释放与频段。硬件上限按机型单独约束。",
+                color = textTertiary(), fontSize = 11.sp
+            )
             
             
             
@@ -1268,8 +1322,7 @@ fun IOSControlPanel(
         ) {
             Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text(stringResource(R.string.advanced_settings), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                IOSSettingSliderRow("总强度", customAmplitude, 0.5f..3.5f, "x", onAmplitudeChange)
-                IOSSettingSliderRow("低音强调", customBassBoost, 1.0f..2.5f, "x", onBassBoostChange)
+                Text("高级调校仅建议在了解当前执行器特性的情况下修改。", color = textTertiary(), fontSize = 11.sp)
                 HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
                 
                 
@@ -1294,6 +1347,7 @@ fun IOSControlPanel(
                 IOSSettingSliderRow("维持电平", synthSustainLevel, 0.1f..0.8f, "", onSynthSustainLevelChange)
                 HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
                 Text(stringResource(R.string.thermal_params), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text("软件热负载模型参数，不是手机提供的真实马达温度传感器读数。", color = textTertiary(), fontSize = 11.sp)
                 IOSSettingSliderRow("热警告温度", synthThermalWarn, 50f..85f, "°C", onSynthThermalWarnChange)
                 IOSSettingSliderRow("热临界温度", synthThermalCrit, 80f..110f, "°C", onSynthThermalCritChange)
                 IOSSettingSliderRow("热阻 Rth", synthThermalRth, 10f..50f, "°C/W", onSynthThermalRthChange)

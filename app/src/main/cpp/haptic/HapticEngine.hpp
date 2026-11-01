@@ -198,7 +198,9 @@ private:
     std::atomic<float> outputReleaseMs_{70.0f};
     std::atomic<float> outputSustainLevel_{0.45f};
     std::atomic<float> outputLraF0_{165.0f};
-    std::atomic<float> outputLraQ_{0.72f};
+    std::atomic<float> outputLraQ_{15.0f};
+    std::atomic<float> outputCooldownMs_{58.0f};
+    std::atomic<float> outputMaxAmplitude_{255.0f};
 
     LinkwitzRiley4th subLowPass_;
     LinkwitzRiley4th midHighPass_, midLowPass_;
@@ -367,11 +369,18 @@ public:
     }
 
     void configure(float sampleRate, float lowCutoff, float highCutoff, float amplitude, int presetId) {
-        pendingSampleRate_.store(sampleRate, std::memory_order_relaxed);
-        pendingLowCutoff_.store(lowCutoff, std::memory_order_relaxed);
-        pendingHighCutoff_.store(highCutoff, std::memory_order_relaxed);
-        userAmplitude_.store(amplitude, std::memory_order_relaxed);
-        currentPresetId_.store(presetId, std::memory_order_relaxed);
+        const auto bounded = [](float value, float fallback, float low, float high) {
+            return std::clamp(std::isfinite(value) ? value : fallback, low, high);
+        };
+        const float safeRate = bounded(sampleRate, 48000.0f, 8000.0f, 384000.0f);
+        const float nyquistGuard = safeRate * 0.45f;
+        const float safeLow = bounded(lowCutoff, 60.0f, 10.0f, nyquistGuard);
+        const float safeHigh = bounded(highCutoff, 200.0f, 20.0f, nyquistGuard);
+        pendingSampleRate_.store(safeRate, std::memory_order_relaxed);
+        pendingLowCutoff_.store(safeLow, std::memory_order_relaxed);
+        pendingHighCutoff_.store(std::max(safeHigh, std::min(safeLow + 10.0f, nyquistGuard)), std::memory_order_relaxed);
+        userAmplitude_.store(bounded(amplitude, 1.0f, 0.0f, 4.0f), std::memory_order_relaxed);
+        currentPresetId_.store(std::clamp(presetId, 0, 16), std::memory_order_relaxed);
         pendingConfigRevision_.fetch_add(1, std::memory_order_release);
     }
 
@@ -379,25 +388,36 @@ public:
                          float impactGain, float continuousGain, float textureGain, float masterGain,
                          float onsetThreshold, float attackImpactMs, float decayImpactMs,
                          float attackContinuousMs, float decayContinuousMs, float releaseMs,
-                         float sustainLevel, float lraF0, float lraQ) {
-        outputStyleAmpScale_.store(std::clamp(styleAmpScale, 0.30f, 2.40f), std::memory_order_relaxed);
-        outputSharpness_.store(std::clamp(sharpness, 0.05f, 1.00f), std::memory_order_relaxed);
-        outputAttackScale_.store(std::clamp(attackScale, 0.45f, 1.80f), std::memory_order_relaxed);
-        outputAccentScale_.store(std::clamp(accentScale, 0.50f, 2.00f), std::memory_order_relaxed);
-        outputBassBoost_.store(std::clamp(bassBoost, 1.00f, 2.50f), std::memory_order_relaxed);
-        outputImpactGain_.store(std::clamp(impactGain, 0.20f, 3.00f), std::memory_order_relaxed);
-        outputContinuousGain_.store(std::clamp(continuousGain, 0.20f, 3.00f), std::memory_order_relaxed);
-        outputTextureGain_.store(std::clamp(textureGain, 0.20f, 3.00f), std::memory_order_relaxed);
-        outputMasterGain_.store(std::clamp(masterGain, 0.20f, 3.00f), std::memory_order_relaxed);
-        outputOnsetThreshold_.store(std::clamp(onsetThreshold, 0.03f, 0.90f), std::memory_order_relaxed);
-        outputAttackImpactMs_.store(std::clamp(attackImpactMs, 2.0f, 80.0f), std::memory_order_relaxed);
-        outputDecayImpactMs_.store(std::clamp(decayImpactMs, 4.0f, 140.0f), std::memory_order_relaxed);
-        outputAttackContinuousMs_.store(std::clamp(attackContinuousMs, 4.0f, 120.0f), std::memory_order_relaxed);
-        outputDecayContinuousMs_.store(std::clamp(decayContinuousMs, 8.0f, 240.0f), std::memory_order_relaxed);
-        outputReleaseMs_.store(std::clamp(releaseMs, 8.0f, 300.0f), std::memory_order_relaxed);
-        outputSustainLevel_.store(std::clamp(sustainLevel, 0.0f, 1.0f), std::memory_order_relaxed);
-        outputLraF0_.store(std::clamp(lraF0, 80.0f, 320.0f), std::memory_order_relaxed);
-        outputLraQ_.store(std::clamp(lraQ, 0.25f, 2.50f), std::memory_order_relaxed);
+                         float sustainLevel, float lraF0, float lraQ,
+                         float cooldownMs, float maxAmplitude) {
+        const auto bounded = [](float value, float fallback, float low, float high) {
+            return std::clamp(std::isfinite(value) ? value : fallback, low, high);
+        };
+        // std::clamp does not repair NaN: comparisons are false and NaN can be
+        // stored unchanged. Sanitise every JNI-facing float before it reaches
+        // the real-time scheduler, especially the final device amplitude cap.
+        outputStyleAmpScale_.store(bounded(styleAmpScale, 1.0f, 0.30f, 2.40f), std::memory_order_relaxed);
+        outputSharpness_.store(bounded(sharpness, 0.65f, 0.05f, 1.00f), std::memory_order_relaxed);
+        outputAttackScale_.store(bounded(attackScale, 1.0f, 0.45f, 1.80f), std::memory_order_relaxed);
+        outputAccentScale_.store(bounded(accentScale, 1.0f, 0.50f, 2.00f), std::memory_order_relaxed);
+        outputBassBoost_.store(bounded(bassBoost, 1.0f, 1.00f, 2.50f), std::memory_order_relaxed);
+        outputImpactGain_.store(bounded(impactGain, 1.0f, 0.20f, 3.00f), std::memory_order_relaxed);
+        outputContinuousGain_.store(bounded(continuousGain, 1.0f, 0.20f, 3.00f), std::memory_order_relaxed);
+        outputTextureGain_.store(bounded(textureGain, 1.0f, 0.20f, 3.00f), std::memory_order_relaxed);
+        outputMasterGain_.store(bounded(masterGain, 1.0f, 0.20f, 3.00f), std::memory_order_relaxed);
+        outputOnsetThreshold_.store(bounded(onsetThreshold, 0.08f, 0.03f, 0.90f), std::memory_order_relaxed);
+        outputAttackImpactMs_.store(bounded(attackImpactMs, 8.0f, 2.0f, 80.0f), std::memory_order_relaxed);
+        outputDecayImpactMs_.store(bounded(decayImpactMs, 24.0f, 4.0f, 140.0f), std::memory_order_relaxed);
+        outputAttackContinuousMs_.store(bounded(attackContinuousMs, 18.0f, 4.0f, 120.0f), std::memory_order_relaxed);
+        outputDecayContinuousMs_.store(bounded(decayContinuousMs, 55.0f, 8.0f, 240.0f), std::memory_order_relaxed);
+        outputReleaseMs_.store(bounded(releaseMs, 70.0f, 8.0f, 300.0f), std::memory_order_relaxed);
+        outputSustainLevel_.store(bounded(sustainLevel, 0.45f, 0.0f, 1.0f), std::memory_order_relaxed);
+        outputLraF0_.store(bounded(lraF0, 165.0f, 80.0f, 320.0f), std::memory_order_relaxed);
+        // ActuatorProfile.qFactor is the mechanical quality factor (typically 8..20),
+        // not a normalised filter-Q. Clamping it to 2.5 destroyed device tuning.
+        outputLraQ_.store(bounded(lraQ, 15.0f, 5.0f, 30.0f), std::memory_order_relaxed);
+        outputCooldownMs_.store(bounded(cooldownMs, 58.0f, 20.0f, 180.0f), std::memory_order_relaxed);
+        outputMaxAmplitude_.store(bounded(maxAmplitude, 255.0f, 1.0f, 255.0f), std::memory_order_relaxed);
     }
 
     float getOutputStyleAmpScale() const { return outputStyleAmpScale_.load(std::memory_order_relaxed); }
@@ -406,8 +426,14 @@ public:
     float getOutputAccentScale() const { return outputAccentScale_.load(std::memory_order_relaxed); }
     float getOutputBassBoost() const { return outputBassBoost_.load(std::memory_order_relaxed); }
     float getOutputMasterGain() const { return outputMasterGain_.load(std::memory_order_relaxed); }
+    float getOutputImpactGain() const { return outputImpactGain_.load(std::memory_order_relaxed); }
+    float getOutputContinuousGain() const { return outputContinuousGain_.load(std::memory_order_relaxed); }
+    float getOutputTextureGain() const { return outputTextureGain_.load(std::memory_order_relaxed); }
+    float getOutputCooldownMs() const { return outputCooldownMs_.load(std::memory_order_relaxed); }
+    float getOutputMaxAmplitude() const { return outputMaxAmplitude_.load(std::memory_order_relaxed); }
     float getOutputOnsetThreshold() const { return outputOnsetThreshold_.load(std::memory_order_relaxed); }
     float getOutputAttackImpactMs() const { return outputAttackImpactMs_.load(std::memory_order_relaxed); }
+    float getOutputDecayImpactMs() const { return outputDecayImpactMs_.load(std::memory_order_relaxed); }
     float getOutputReleaseMs() const { return outputReleaseMs_.load(std::memory_order_relaxed); }
     float getOutputSustainLevel() const { return outputSustainLevel_.load(std::memory_order_relaxed); }
     float getOutputLraF0() const { return outputLraF0_.load(std::memory_order_relaxed); }
@@ -416,13 +442,16 @@ public:
 
     void configureProfile(float dspFloor, float subMult, float kickMult, float snareMult,
                           float tickMult, float bodyMult, float refractoryScale) {
-        profileDspFloor_.store(std::clamp(dspFloor, 0.0010f, 0.0200f), std::memory_order_relaxed);
-        profileSubMult_.store(std::clamp(subMult, 0.50f, 3.00f), std::memory_order_relaxed);
-        profileKickMult_.store(std::clamp(kickMult, 0.20f, 2.00f), std::memory_order_relaxed);
-        profileSnareMult_.store(std::clamp(snareMult, 0.20f, 2.00f), std::memory_order_relaxed);
-        profileTickMult_.store(std::clamp(tickMult, 0.20f, 2.00f), std::memory_order_relaxed);
-        profileBodyMult_.store(std::clamp(bodyMult, 0.20f, 2.00f), std::memory_order_relaxed);
-        profileRefractoryScale_.store(std::clamp(refractoryScale, 0.50f, 2.00f), std::memory_order_relaxed);
+        const auto bounded = [](float value, float fallback, float low, float high) {
+            return std::clamp(std::isfinite(value) ? value : fallback, low, high);
+        };
+        profileDspFloor_.store(bounded(dspFloor, 0.004f, 0.0010f, 0.0200f), std::memory_order_relaxed);
+        profileSubMult_.store(bounded(subMult, 1.8f, 0.50f, 3.00f), std::memory_order_relaxed);
+        profileKickMult_.store(bounded(kickMult, 0.8f, 0.20f, 2.00f), std::memory_order_relaxed);
+        profileSnareMult_.store(bounded(snareMult, 0.7f, 0.20f, 2.00f), std::memory_order_relaxed);
+        profileTickMult_.store(bounded(tickMult, 0.4f, 0.20f, 2.00f), std::memory_order_relaxed);
+        profileBodyMult_.store(bounded(bodyMult, 1.2f, 0.20f, 2.00f), std::memory_order_relaxed);
+        profileRefractoryScale_.store(bounded(refractoryScale, 1.0f, 0.50f, 2.00f), std::memory_order_relaxed);
         HMS_LOGI("[DSP-PROFILE] floor=%.5f sub=%.3f kick=%.3f snare=%.3f tick=%.3f body=%.3f refractory=%.2f",
                   dspFloor, subMult, kickMult, snareMult, tickMult, bodyMult, refractoryScale);
     }
@@ -929,7 +958,7 @@ public:
         }
 
         
-        composeHapticLayer(subRms, midRms, textureRms, pitch, thermalGain, amp, dt);
+        composeHapticLayer(subRms, midRms, textureRms, pitch, thermalGain, dt);
 
         
         outTelemetry[0] = subRms * amp * thermalGain;
@@ -984,12 +1013,11 @@ public:
     
     
     void composeHapticLayer(float subRms, float midRms, float textureRms,
-                              float pitch, float thermalGain, float userAmp, float dt) {
+                              float pitch, float thermalGain, float dt) {
         
         const float impactGain = outputImpactGain_.load(std::memory_order_relaxed);
         const float continuousGain = outputContinuousGain_.load(std::memory_order_relaxed);
         const float textureGain = outputTextureGain_.load(std::memory_order_relaxed);
-        const float masterGain = outputMasterGain_.load(std::memory_order_relaxed);
         const float bassBoost = outputBassBoost_.load(std::memory_order_relaxed);
 
         float kickEnv = std::max(0.0f, subRms - prevSubRms_) * 6.0f * kickProbability_ * impactGain * bassBoost;
@@ -1041,7 +1069,10 @@ public:
         }
         
         
-        float scale = 255.0f * userAmp * thermalGain * masterGain;
+        // Publish a pre-output envelope. The native scheduler owns the final
+        // master/style/user gain stage; applying them here as well doubled gain
+        // on Direct Drive devices and flattened quiet/loud dynamics.
+        float scale = 255.0f * thermalGain;
         pushSemanticFrame(kickEnv * scale, snareEnv * scale, vocalEnv * scale, bodyEnv * scale);
         
         float composite = kickEnv + snareEnv + vocalEnv + bodyEnv;

@@ -1,6 +1,106 @@
 # Changes
 
-Current source version: **6.1.0**
+Current source version: **6.1.2**
+
+## 6.1.2
+
+### Native Parameter Hardening
+
+- Sanitize every floating-point value crossing the JNI output/configuration
+  boundary before clamping or publishing it to the real-time scheduler. This is
+  important because `std::clamp` does not turn NaN into a finite value.
+- Add finite fallbacks and range bounds for style gain, transient sensitivity,
+  attack/decay/release, LRA tuning, cooldown, amplitude ceiling, DSP band gains,
+  sample rate, and base amplitude.
+- Keep the final model amplitude ceiling and minimum inter-event interval intact
+  even when persisted preferences or an external caller supplies invalid values.
+- Apply the same finite-value fallback inside the Rust engine constructor and
+  runtime setters, so malformed configuration cannot poison filter coefficients,
+  adaptive thresholds, or published energy values.
+- Correct the Native LRA quality-factor range to match the Kotlin actuator model
+  (Q 5..30, default 15). The old 0.25..2.5 clamp silently reduced real device Q
+  values such as Xiaomi 10's configured Q≈16 to 2.5 in the Native response model.
+- Stop forcing Xiaomi 10 / 0809 profiles into `DEFAULT_AMPLITUDE` based only on a
+  device codename. The normal path now follows the actual runtime amplitude-control
+  capability; full-drive remains an explicit user override for compatibility tests.
+- Show the selected full-drive override in the hardware card so users can tell when
+  per-segment amplitude shaping is intentionally disabled.
+- Preserve Composition timing gaps if the framework rejects a primitive at runtime;
+  use a bounded timed waveform fallback instead of collapsing the pattern to one buzz.
+- Bump the Android source version to 6.1.2 (versionCode 60102).
+
+## 6.1.1
+
+### Signal Integrity, Envelope Timing, and Device-Aware Output
+
+This update concentrates on keeping timing and gain decisions consistent from PCM
+capture through DSP to the actuator. It does not claim to have measured motor
+frequency response or coil temperature; per-device actuator values remain tuning
+baselines until validated on the target hardware.
+
+#### 1. PCM ingress is format-correct and bounded (`AudioIngress.kt`)
+
+- Dispatch PCM 8/16/24-packed/32-bit integer and float formats through Android's
+  `AudioFormat` constants rather than confusing the 8-bit encoding with the value 8.
+- Decode packed 24-bit little-endian samples with sign extension; sanitise NaN and
+  infinity from float streams and clamp normalized samples before enqueueing.
+- Bound `ByteBuffer` reads to its limit and reject unknown encodings rather than
+  silently interpreting them as PCM16.
+
+#### 2. Stateful DSP no longer replays overlapping samples (`rust/src/engine.rs`)
+
+- Persistent biquad sections now consume a non-overlapping 1024-sample window,
+  so each input sample advances filter state exactly once.
+- Refractory-frame conversion now matches the real ~21.3 ms analysis hop at 48 kHz.
+- FFT magnitudes contribute per-band positive spectral flux alongside RMS rises;
+  this helps catch attacks whose spectral shape changes more than their RMS level.
+- Added regression coverage for window cadence, style filter edges, sample-rate
+  changes, non-finite input, and transient-only spectral flux.
+
+#### 3. Output envelope and pauses are enforced on every path
+
+- Android waveform output is now a five-step attack/peak/body/decay/release shape;
+  its segment durations sum exactly to the requested event duration.
+- `VibrateProxy` enforces bounded waveform size/duration, preserves explicit zero
+  amplitude pauses, and degrades no-amplitude-control devices to primitives or
+  default-amplitude waveform segments without collapsing the whole rhythm into
+  one long buzz.
+- Kotlin envelope synthesis now applies the selected device's amplitude ceiling,
+  sanitises non-finite tuning values, and uses the default-amplitude timing profile
+  whenever a device policy opts out of linear amplitude control.
+- Android 9/10 primitive fallback is represented as a timed waveform so the gaps
+  between pulses remain in the pattern.
+- Native StrikeOnly direct drive uses a bounded 5 ms scheduler envelope, applies
+  the same normalised intensity/soft-gain model as the Kotlin output path, and suppresses
+  texture pulses during and immediately after a strike. Its duration ceiling is rounded
+  down to whole 5 ms ticks so the quiet gap is real, not just nominal. Both Kotlin and
+  Native strike envelopes are capped below the effective refractory interval, leaving a deliberate
+  quiet gap instead of having the next event truncate the previous waveform. Continuous direct-drive
+  texture is emitted as short 5 ms pulses at a 20 ms cadence, not as an unbroken
+  high-rate stream.
+- User/preset gain uses a soft knee before the final hardware ceiling, preserving
+  more useful level-slider travel than a hard 2.0x clamp.
+
+#### 4. UI and per-device output policy
+
+- The hardware card now explains the selected tuning baseline, minimum interval,
+  amplitude ceiling, and whether the Android vibrator reports amplitude control.
+  It also states that a model ceiling cannot be guaranteed by Android's
+  DEFAULT_AMPLITUDE path; that path is controlled by the ROM/vibrator HAL.
+- Frequency/Q/rise and thermal values are explicitly labelled as initial estimates,
+  not live actuator measurements.
+- Main level controls are grouped together; corrupted/out-of-range stored slider
+  values are normalised before entering Compose state.
+
+#### 5. Platform and model limitations
+
+- Android framework waveform and Composition paths are used as capability allows;
+  advanced PWLE frequency/amplitude control is not assumed because it requires
+  platform and vibrator-HAL support beyond this project's compile SDK baseline.
+- The FFT/onset design is informed by the public aubio onset references, but no
+  aubio source or binary was vendored into this project.
+- Real actuator response, end-to-end latency, thermal behaviour, and direct-driver
+  timing still require measurement on each target handset.
 
 ## 6.1.0
 

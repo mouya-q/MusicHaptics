@@ -4,7 +4,7 @@
 
 `HookCoordinator` captures supported audio streams.
 
-`AudioIngress` bounds the queue, downmixes PCM, and drops stale work under load.
+`AudioIngress` validates PCM encoding, bounds ByteBuffer reads, downmixes to finite mono floats, and tracks queue pressure. The Rust analyser consumes non-overlapping windows so persistent filter state advances exactly once per input sample.
 
 `NativeBridge` runs FFT, band analysis, onset detection, and direct-drive timing.
 
@@ -12,7 +12,7 @@
 
 `HapticSynthesizer` shapes semantic events into short envelopes.
 
-`VibrateProxy` selects direct drive, vendor effect, waveform, or primitive fallback.
+`VibrateProxy` selects direct drive, vendor effect, waveform, or primitive fallback. All waveform paths apply segment-count/duration limits and retain explicit silent gaps when the hardware cannot control amplitude.
 
 ## Configuration
 

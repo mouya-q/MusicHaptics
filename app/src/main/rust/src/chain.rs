@@ -138,9 +138,21 @@ pub fn run_chain(
     let mut report = ChainReport::default();
     let mut telemetry = [0.0f32; 15];
     let mut frame = OnsetFrame::default();
+    // Peak band readings across the whole signal, so the final window being
+    // silent (an incomplete trailing chunk) cannot zero the report.
+    let mut peak_bands = [0.0f32; 5];
+    let mut peak_body = 0.0f32;
 
     for chunk in samples.chunks(block.max(64)) {
         engine.process(chunk, &mut telemetry);
+        for i in 0..5 {
+            if telemetry[i] > peak_bands[i] {
+                peak_bands[i] = telemetry[i];
+            }
+        }
+        if telemetry[6] > peak_body {
+            peak_body = telemetry[6];
+        }
         while engine.pop_onset(&mut frame) {
             report.onsets += 1;
             // The engine publishes one channel per frame; the active one is the
@@ -163,8 +175,8 @@ pub fn run_chain(
 
     report.windows = engine.windows();
     report.dropped = engine.dropped_onsets();
-    report.bands = [telemetry[0], telemetry[1], telemetry[2], telemetry[3], telemetry[4]];
-    report.body = telemetry[6];
+    report.bands = peak_bands;
+    report.body = peak_body;
     report
 }
 

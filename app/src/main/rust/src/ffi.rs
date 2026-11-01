@@ -141,6 +141,46 @@ pub unsafe extern "C" fn mhx_engine_set_refractory_ms(handle: EngineHandle, ms: 
     (*(handle as *mut Engine)).set_refractory_ms(ms);
 }
 
+/// Set the analysable band window from a UI style preset.
+///
+/// Returns 1 when the filters were rebuilt, so the caller can log the change and
+/// confirm the preset actually reached the analyser.
+///
+/// # Safety
+/// `handle` must come from [mhx_engine_create].
+#[no_mangle]
+pub unsafe extern "C" fn mhx_engine_set_band_edges(
+    handle: EngineHandle,
+    low_hz: f32,
+    high_hz: f32,
+) -> i32 {
+    if handle.is_null() {
+        return 0;
+    }
+    let engine = &mut *(handle as *mut Engine);
+    i32::from(engine.set_band_edges(low_hz, high_hz))
+}
+
+/// # Safety
+/// `handle` must come from [mhx_engine_create].
+#[no_mangle]
+pub unsafe extern "C" fn mhx_engine_set_bass_boost(handle: EngineHandle, boost: f32) {
+    if handle.is_null() {
+        return;
+    }
+    (*(handle as *mut Engine)).set_bass_boost(boost);
+}
+
+/// # Safety
+/// `handle` must come from [mhx_engine_create].
+#[no_mangle]
+pub unsafe extern "C" fn mhx_engine_set_texture_gain(handle: EngineHandle, gain: f32) {
+    if handle.is_null() {
+        return;
+    }
+    (*(handle as *mut Engine)).set_texture_gain(gain);
+}
+
 /// Clear buffers and statistics.
 ///
 /// # Safety

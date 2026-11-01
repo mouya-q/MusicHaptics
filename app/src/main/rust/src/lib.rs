@@ -13,6 +13,7 @@
 //! Everything above `ffi` is safe Rust and unit-testable on the host; only the
 //! FFI layer is `unsafe`.
 
+pub mod chain;
 pub mod engine;
 pub mod ffi;
 pub mod filter;

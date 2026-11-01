@@ -1074,6 +1074,12 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigure(
             if (mhx_engine_set_sample_rate(slot->rust, sampleRate) == 1) {
                 LOGI("[DSP] Rust core rebuilt band filters for %.0f Hz", sampleRate);
             }
+            // `lowCut`/`highCut` carry the active style preset's window. Feeding
+            // them here is what makes selecting "bass" or "crisp" change the
+            // analysis itself rather than only the Kotlin output envelope.
+            if (mhx_engine_set_band_edges(slot->rust, lowCut, highCut) == 1) {
+                LOGI("[DSP] Rust band window -> %.0f..%.0f Hz", lowCut, highCut);
+            }
         }
     }
 }
@@ -1091,14 +1097,36 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigureOutput(
                                 impactGain, continuousGain, textureGain, masterGain, onsetThreshold,
                                 attackImpactMs, decayImpactMs, attackContinuousMs, decayContinuousMs,
                                 releaseMs, sustainLevel, lraF0, lraQ);
-        // Mirror the two knobs the Rust analyser owns: the UI level scales
-        // published band energy, and the onset gate is derived from sensitivity.
+        // Mirror the UI knobs onto the analyser.
+        //
+        // Before this, only styleAmpScale reached Rust and it was mapped onto the
+        // wrong parameter: `sensitivity` was derived as `0.5 + sharpness`, which
+        // has no physical meaning, while bass boost, texture and the style preset's
+        // band edges were dropped entirely. The result was that changing a style
+        // preset only altered the Kotlin envelope, never what the analyser looked
+        // at, so "bass" and "crisp" produced almost identical haptics.
         auto* slot = static_cast<EngineSlot*>(engine);
         if (slot->rust_ready.load(std::memory_order_acquire) && slot->rust) {
+            // Level: the UI amplitude, used to scale published band energy.
             mhx_engine_set_user_amplitude(slot->rust, styleAmpScale);
-            // `sharpness` in the C++ path biases the transient gate; map it onto
-            // the Rust sensitivity so the UI style still has an audible effect.
-            mhx_engine_set_sensitivity(slot->rust, 0.5f + sharpness);
+
+            // Sharpness maps onto onset sensitivity inversely: a sharper style
+            // should trigger on smaller transients (higher sensitivity), while a
+            // soft style should require a firmer hit. The previous linear map put
+            // both ends inside the clamp, so no style ever differed.
+            const float sensitivity = 0.60f + sharpness * 1.80f;  // 0.6 .. 2.4
+            mhx_engine_set_sensitivity(slot->rust, sensitivity);
+
+            // Attack scale biases the gate the other way: a long attack means the
+            // listener wants fewer, more deliberate strikes.
+            mhx_engine_set_refractory_ms(
+                slot->rust, 30.0f + (attackScale > 0.0f ? 26.0f / attackScale : 26.0f));
+
+            // Bass boost widens the kick band's influence.
+            mhx_engine_set_bass_boost(slot->rust, bassBoost);
+
+            // Continuous gain drives how present the sustained body channel is.
+            mhx_engine_set_texture_gain(slot->rust, continuousGain);
         }
     }
 }

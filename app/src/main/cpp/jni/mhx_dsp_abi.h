@@ -55,6 +55,29 @@ void mhx_engine_set_sensitivity(MhxEngineHandle handle, float sensitivity);
 void mhx_engine_set_user_amplitude(MhxEngineHandle handle, float amplitude);
 void mhx_engine_set_refractory_ms(MhxEngineHandle handle, float ms);
 
+// Widen or narrow the band edges used for analysis.
+//
+// The UI style presets (balanced / bass / crisp / soft / immersive / pure) each
+// define a low/high cutoff pair. Ignoring them meant the preset selection only
+// changed the Kotlin output shaping while the Rust analyser kept a fixed
+// 55-650 Hz view of the music, so quiet cymbal work and deep sub-bass were
+// analysed identically regardless of the chosen character.
+//
+// `low_hz` and `high_hz` are clamped inside the engine to a sane range.
+void mhx_engine_set_band_edges(MhxEngineHandle handle, float low_hz, float high_hz);
+
+// Scale the kick band's contribution before onset scoring.
+//
+// Wired to the UI bass-boost slider. Above 1.0 the low band wins more often,
+// which is exactly what the user expects from a "more bass" control.
+void mhx_engine_set_bass_boost(MhxEngineHandle handle, float boost);
+
+// Scale how much continuous (non-onset) energy the body channel reports.
+//
+// Wired to the UI texture control: 1.0 is neutral, lower values flatten the
+// sustained rumble and higher values make it more present.
+void mhx_engine_set_texture_gain(MhxEngineHandle handle, float gain);
+
 // Clear buffered audio, detector statistics and pending frames.
 void mhx_engine_reset(MhxEngineHandle handle);
 

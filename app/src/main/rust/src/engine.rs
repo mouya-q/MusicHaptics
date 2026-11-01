@@ -34,6 +34,10 @@ const SEMANTIC_RING: usize = 512;
 
 /// Per-band cutoff constants. Kick sits low, vocal in the presence region, and
 /// air drives texture.
+///
+/// These are the *defaults*. The UI style presets override the outer edges via
+/// [Engine::set_band_edges], which is what makes the preset selection audible in
+/// the analysis rather than only in the output shaping.
 const SUB_LO: f32 = 30.0;
 const SUB_HI: f32 = 180.0;
 const LOWMID_LO: f32 = 180.0;
@@ -44,6 +48,16 @@ const PRESENCE_LO: f32 = 2500.0;
 const PRESENCE_HI: f32 = 8000.0;
 const AIR_LO: f32 = 8000.0;
 const AIR_HI: f32 = 16000.0;
+
+/// Bounds on the user-configurable band window.
+///
+/// The low limit keeps the sub band above the LRA's own resonance so it measures
+/// musical bass instead of the actuator's own ring-out; the high limit stays
+/// below Nyquist for 44.1 kHz sources.
+const BAND_LOW_MIN: f32 = 20.0;
+const BAND_LOW_MAX: f32 = 200.0;
+const BAND_HIGH_MIN: f32 = 300.0;
+const BAND_HIGH_MAX: f32 = 12000.0;
 
 /// One analysis result, mirroring what the old `SemanticHapticFrame` carried but
 /// with real band energies instead of a composite envelope.
@@ -77,11 +91,30 @@ pub struct EngineConfig {
     pub user_amplitude: f32,
     /// Minimum milliseconds between onsets of the same band.
     pub refractory_ms: f32,
+    /// Lower edge of the analysable window, from the UI style preset.
+    pub band_low_hz: f32,
+    /// Upper edge of the analysable window, from the UI style preset.
+    pub band_high_hz: f32,
+    /// Weight applied to the kick band before onset scoring (bass slider).
+    pub bass_boost: f32,
+    /// Weight applied to sustained (non-onset) energy in the body channel.
+    pub texture_gain: f32,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self { sample_rate: 48000.0, sensitivity: 1.0, user_amplitude: 1.0, refractory_ms: 60.0 }
+        Self {
+            sample_rate: 48000.0,
+            sensitivity: 1.0,
+            user_amplitude: 1.0,
+            refractory_ms: 60.0,
+            // Matches the previous hard-coded LOWMID/VOCAL window so the default
+            // sound is unchanged until the user picks a style.
+            band_low_hz: SUB_LO,
+            band_high_hz: VOCAL_HI,
+            bass_boost: 1.0,
+            texture_gain: 1.0,
+        }
     }
 }
 
@@ -226,6 +259,9 @@ impl Engine {
             refractory_frames: frames,
             ..DetectorConfig::default()
         });
+        // A new detector starts neutral; carry the user's bass weight across so
+        // changing sensitivity or sample rate does not silently drop it.
+        self.detector.set_bass_boost(self.cfg.bass_boost);
     }
 
     /// Update the sample rate, rebuilding filters if it actually changed.
@@ -259,6 +295,40 @@ impl Engine {
     pub fn set_refractory_ms(&mut self, ms: f32) {
         self.cfg.refractory_ms = ms.clamp(0.0, 500.0);
         self.apply_detector_config();
+    }
+
+    /// Set the analysable window from a UI style preset.
+    ///
+    /// The window is clamped so the sub band cannot fall below the actuator's own
+    /// resonance and the top cannot exceed what a 44.1 kHz source can represent.
+    /// Returns true when the edges actually changed, so the caller can log it.
+    pub fn set_band_edges(&mut self, low_hz: f32, high_hz: f32) -> bool {
+        let low = if low_hz.is_finite() { low_hz.clamp(BAND_LOW_MIN, BAND_LOW_MAX) } else { self.cfg.band_low_hz };
+        let high = if high_hz.is_finite() { high_hz.clamp(BAND_HIGH_MIN, BAND_HIGH_MAX) } else { self.cfg.band_high_hz };
+        // A window of zero width would silence every band; keep a usable span.
+        let high = high.max(low + 100.0);
+        if (low - self.cfg.band_low_hz).abs() < 0.5 && (high - self.cfg.band_high_hz).abs() < 0.5 {
+            return false;
+        }
+        self.cfg.band_low_hz = low;
+        self.cfg.band_high_hz = high;
+        self.design_filters();
+        true
+    }
+
+    /// Weight the kick band before onset scoring (UI bass slider).
+    pub fn set_bass_boost(&mut self, boost: f32) {
+        self.cfg.bass_boost = boost.clamp(0.3, 3.0);
+        self.detector.set_bass_boost(self.cfg.bass_boost);
+    }
+
+    /// Weight sustained energy in the body channel (UI texture control).
+    pub fn set_texture_gain(&mut self, gain: f32) {
+        self.cfg.texture_gain = gain.clamp(0.2, 3.0);
+    }
+
+    pub fn band_edges(&self) -> (f32, f32) {
+        (self.cfg.band_low_hz, self.cfg.band_high_hz)
     }
 
     pub fn sample_rate(&self) -> f32 { self.cfg.sample_rate }
@@ -337,14 +407,28 @@ impl Engine {
 
         // Band energies from filtered copies. Each band reuses two scratch
         // buffers so no allocation happens here.
+        //
+        // The low and high edges come from the UI style preset. Previously they
+        // were compile-time constants, so selecting "bass" or "crisp" changed the
+        // output envelope but the analyser kept looking at 55-650 Hz regardless.
+        let low_edge = self.cfg.band_low_hz;
+        let high_edge = self.cfg.band_high_hz;
+        let sub_hi = SUB_HI.min(low_edge + 150.0).max(low_edge + 40.0);
+        let lowmid_hi = (high_edge * 0.4).clamp(sub_hi + 60.0, LOWMID_HI.max(sub_hi + 200.0));
+        let vocal_lo = lowmid_hi;
+        let vocal_hi = high_edge.max(vocal_lo + 200.0);
+
         let sub = self.band_rms_cascade();
-        let low_mid = self.band_rms_chain(LOWMID_LO, LOWMID_HI);
-        let vocal = self.band_rms_chain(VOCAL_LO, VOCAL_HI);
+        let low_mid = self.band_rms_chain(low_edge, lowmid_hi);
+        let vocal = self.band_rms_chain(vocal_lo, vocal_hi);
+        // Presence and air stay fixed: they describe the transient crack and the
+        // tape hiss that make a strike feel crisp, and shifting them with the
+        // style preset made "bass" sound muffled rather than deeper.
         let presence = self.band_rms_chain(PRESENCE_LO, PRESENCE_HI);
         let air = self.band_rms_chain(AIR_LO, AIR_HI);
 
         let energies = BandEnergies { sub, low_mid, vocal, presence, air };
-        let body = body_energy(&energies);
+        let body = body_energy(&energies) * self.cfg.texture_gain;
         let loud = loudness(&energies);
         let amp = self.cfg.user_amplitude;
 

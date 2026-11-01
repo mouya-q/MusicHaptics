@@ -153,6 +153,13 @@ pub struct OnsetDetector {
     refractory: [u32; BANDS],
     /// Frames since construction, used only for diagnostics.
     frames: u64,
+    /// Multiplier on the kick band's raw flux, from the UI bass slider.
+    ///
+    /// Applied to the *raw* value rather than to the score so it changes which
+    /// band wins, not merely how strong the winner reports itself. A control
+    /// labelled "bass" should make the kick win tie-breaks more often, which is
+    /// what a listener actually expects from it.
+    bass_boost: f32,
 }
 
 impl OnsetDetector {
@@ -163,7 +170,17 @@ impl OnsetDetector {
             prev: BandEnergies::default(),
             refractory: [0; BANDS],
             frames: 0,
+            bass_boost: 1.0,
         }
+    }
+
+    /// Weight the kick band before scoring (UI bass slider).
+    pub fn set_bass_boost(&mut self, boost: f32) {
+        self.bass_boost = boost.clamp(0.3, 3.0);
+    }
+
+    pub fn bass_boost(&self) -> f32 {
+        self.bass_boost
     }
 
     pub fn reset(&mut self) {
@@ -207,7 +224,9 @@ impl OnsetDetector {
         // combination of low-mid body and presence crack, which is how a snare
         // actually presents in a mix; taking either alone misses half of them.
         let raw = [
-            flux.sub,
+            // Kick carries the UI bass weight: raising the slider should make the
+            // low band win more tie-breaks, not merely report a larger number.
+            flux.sub * self.bass_boost,
             flux.low_mid * 0.7 + flux.presence * 0.3,
             flux.vocal,
             // Body/texture comes from the air band plus sustained low-mid, so it

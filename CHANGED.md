@@ -1,6 +1,73 @@
 # Changes
 
-Current source version: **6.0.0**
+Current source version: **6.1.0**
+
+## 6.1.0
+
+### Haptic Tuning, UI Wiring, and End-to-End Verification
+
+v6.0.0 proved the Rust core works (`Rust core available=true backend=Rust`,
+`enc=float` correctly decoded, `texRms` finally varying). The exported trace then
+showed that **the UI settings had almost no effect on what the user feels**, and
+that the output stage was flattening every strike to the same strength.
+
+#### 1. The amplitude clamp ate the whole dynamic range (`HapticSynthesizer.kt`)
+
+`peak = shaped * drive * levelScale * 255` combined a drive of up to 2.0 with a
+level of up to 2.0, so the product reached 3.2x. Every onset above ~0.31 saturated.
+The trace proves it: `raw=87`, `raw=180`, `raw=207`, `raw=246` all produced
+`peak=255`, so quiet and loud hits felt identical and the level slider did nothing.
+
+- `DRIVE_REFERENCE` raised 1.0 → 2.5 so the combined gain stays at or below 2.0.
+- `PEAK_HEADROOM` (0.86) reserves 14% of the range instead of clamping at 255.
+- The level term now uses a square-root perceptual curve rather than linear, so
+  the four UI steps spread across a usable span.
+
+#### 2. UI settings never reached the analyser (`NativeBridge.cpp`)
+
+Only `styleAmpScale` crossed into Rust, and it was mapped onto the wrong
+parameter: `sensitivity = 0.5 + sharpness`, which has no physical meaning. Bass
+boost, texture and the style preset's band window were dropped entirely, so
+selecting "bass" or "crisp" changed the Kotlin envelope but the analyser kept
+looking at a fixed 55-650 Hz view.
+
+New ABI and wiring:
+
+| UI control | Rust setter | Effect |
+|---|---|---|
+| Level (low/medium/high/ultra) | `set_user_amplitude` | scales published band energy |
+| Style sharpness | `set_sensitivity` (0.6 .. 2.4) | how small a transient can trigger |
+| Style attack | `set_refractory_ms` | how often strikes may land |
+| Bass boost slider | `set_bass_boost` | kick band weight in onset scoring |
+| Continuous gain | `set_texture_gain` | sustained body channel presence |
+| Style band preset | `set_band_edges` | analysable 20..200 / 300..12000 Hz window |
+
+`set_band_edges` rebuilds the filters and is logged as
+`[DSP] Rust band window -> A..B Hz`, so a preset change is verifiable from the
+exported log instead of being invisible.
+
+#### 3. End-to-end chain verification (`src/chain.rs`)
+
+The missing piece through seven rounds of debugging: a way to answer "assume an
+input, run the whole chain, what comes out" without shipping an APK.
+
+`chain::run_chain` feeds synthetic audio through band filters → onset detector →
+onset frames and reports counts per channel, peak distribution, dynamic range and
+band telemetry. Eleven tests cover:
+
+- silence produces no output (no phantom haptics)
+- a 120 BPM kick pattern produces ≥4 kicks
+- the sub band dominates for bass content at both 44.1 and 48 kHz
+- the body channel is non-zero (regression guard for the v5.5.3 constant-zero bug)
+- raising bass boost never reduces the kick share
+- widening the band window captures more of a 3 kHz tone
+- two identical runs agree exactly (determinism)
+- 512-sample and 4096-sample blocks reach the same verdict (visualizer vs float path)
+
+#### 4. Preserved: the C++ analyser stays selectable
+
+`setAnalysisBackend` still allows an instant fallback, so a problem in the new
+tuning cannot again leave the device silent.
 
 ## 6.0.0
 

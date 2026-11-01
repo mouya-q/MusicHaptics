@@ -39,13 +39,29 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
         const val TIMING_QUANTUM_MAX_MS = 6f
         const val TIMING_QUANTUM_PERIOD_DIVISOR = 6f
 
-        // Reference and ceiling for the combined level drive term. Keeping the
-        // drive near unity lets a knob turn be felt without ever driving the
-        // whole waveform into the amplitude clamp. A reference of 1.0 means
-        // the medium level (1.0) maps to drive 1.0, and the ceiling of 2.0
-        // gives a full 4x range from low (0.3) to ultra (2.0).
-        const val DRIVE_REFERENCE = 1.0f
+        // Reference and ceiling for the combined level drive term.
+        //
+        // The old reference of 1.0 combined with a UI level ceiling of 2.0 meant
+        // the total gain reached 3.2x, so any onset above ~0.31 saturated the
+        // amplitude clamp. Every exported trace showed `peak=255` for raw values
+        // as low as 87 -- the UI level and style knobs were therefore invisible
+        // in the output, and quiet and loud hits felt identical.
+        //
+        // The reference is raised to the maximum character gain (~2.5) so the
+        // product of drive and level stays at or below 2.0 for every combination
+        // of settings. Saturation is then reserved for genuinely loud onsets
+        // instead of being the default outcome.
+        const val DRIVE_REFERENCE = 2.5f
         const val DRIVE_CEILING = 2.0f
+
+        /**
+         * Headroom kept free at the top of the amplitude range.
+         *
+         * [peak] is clamped to `255 * PEAK_HEADROOM`, which leaves room for the
+         * thermal gain and lets the level slider produce a real difference
+         * instead of collapsing everything onto 255.
+         */
+        const val PEAK_HEADROOM = 0.86f
     }
 
     data class SynthConfig(
@@ -138,14 +154,21 @@ class HapticSynthesizer(private val profile: DeviceProfile) {
         // The multipliers below only shape character. Normalising them by the
         // drive reference keeps the product near unity, so the amplitude is
         // driven by intensity instead of being crushed into the 255 clamp.
-        // levelScale is applied separately to the final peak so that the UI
-        // level (low/medium/high/ultra) has a direct, audible effect.
         val character = (eventGain * accentScale * ampScale
             * config.masterGain * thermalInput).coerceAtLeast(0.01f)
         val drive = (character / DRIVE_REFERENCE)
             .coerceIn(1f / DRIVE_CEILING, DRIVE_CEILING)
 
-        val peak = (shaped * drive * levelScale * 255f).coerceIn(5f, 255f)
+        // Level is applied on a perceptual curve rather than linearly.
+        //
+        // A linear `drive * level` product saturates for most of the slider's
+        // range, which is why the exported traces showed the same peak=255 for
+        // raw 87 and raw 246. A square-root curve on the level term spreads the
+        // four UI steps (0.3 / 0.75 / 1.1 / 1.6 of the base amplitude) across a
+        // usable span while keeping the endpoints monotonic.
+        val levelCurve = levelScale.coerceIn(0.3f, 2.0f).pow(0.5f) / 2.0f.pow(0.5f)
+        val peakMax = 255f * PEAK_HEADROOM
+        val peak = (shaped * drive * levelCurve * peakMax).coerceIn(5f, peakMax)
         val qTail = (config.lraQ / profile.actuator.qFactor.coerceAtLeast(5f)).coerceIn(0.65f, 1.65f)
         val attackSource = if (continuous) config.attackTauContinuous else config.attackTauImpact
         val decaySource = if (continuous) config.decayTauContinuous else config.decayTauImpact

@@ -111,7 +111,8 @@ for flag in ("max-page-size=16384", "common-page-size=16384"):
 RUST = APP / "rust"
 rust_src = RUST / "src"
 for rel in ("Cargo.toml", "src/lib.rs", "src/engine.rs", "src/onset.rs",
-            "src/filter.rs", "src/ring.rs", "src/ffi.rs", "build-android.sh"):
+            "src/filter.rs", "src/ring.rs", "src/ffi.rs", "src/chain.rs",
+            "build-android.sh"):
     if not (RUST / rel).exists():
         errors.append(f"missing rust source: {rel}")
 

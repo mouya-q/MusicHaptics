@@ -1,6 +1,40 @@
 # Changes
 
-Current source version: **5.5.1**
+Current source version: **5.5.2**
+
+## 5.5.2
+
+### Root Cause: AudioTrack.write Signature Rejection
+
+The v5.5.1 trace confirmed three fixes (phantom UDP, device detection, AudioTrack
+pause false positives) all landed — but still 0 `[BEAT]` events. The root cause
+was one line of code that silently rejected every modern audio write call.
+
+#### 1. `isSupportedWriteSignature` rejected `long` parameters (`HookCoordinator.kt`)
+
+Android 12+ adds `AudioTrack.write(ByteBuffer, int, int, long)` where the trailing
+`long` is a timestamp in nanoseconds. The filter only accepted `Int`-typed trailing
+parameters, so every modern write method was silently skipped and PCM never
+reached the DSP — 0 onset frames, 0 beats, 0 vibrations. The filter now accepts
+`Long` as a trailing type and relaxes the arity check for `ByteBuffer`/`FloatArray`.
+
+#### 2. MediaPlayer pause/stop/release was ungated (`HookCoordinator.kt`)
+
+The v5.5.1 fix added `audioWritesHaveStalled()` to AudioTrack lifecycle hooks but
+missed `hookMediaPlayers`, which still called `onPlaybackPaused()` unconditionally
+on every `pause`/`stop`/`release`. MediaPlayer.release fires on every track change,
+producing the four `[PLAYBACK PAUSED CAUGHT]` lines in the trace. All three
+MediaPlayer lifecycle events now require the same stall guard.
+
+#### 3. Hook diagnostics were invisible in dashboard (`LogBroadcaster.kt`, `HookCoordinator.kt`)
+
+Hook code runs inside the target process before any Context has been acquired, so
+`LogBroadcaster.sendLog(context, ...)` silently failed — the dashboard never saw
+the "AudioTrack.write: hooked N methods" line or any write-trigger log.
+`LogBroadcaster` now exposes a `queue(msg)` method that stores messages until a
+Context is bound, at which point `flush(context)` drains the queue. All hook
+installation and write-trigger logs use this path, so the next trace will show
+exactly which hooks were installed and whether they fired.
 
 ## 5.5.1
 

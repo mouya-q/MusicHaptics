@@ -92,8 +92,12 @@ class HookCoordinator(
         
         
         registerConfigRefreshWhenPossible()
-        Log.i(TAG, "[$targetPackage] hooks registered (context not yet bound)")
-        contextProvider()?.let { LogBroadcaster.sendLog(it, "Hook ready: $targetPackage") }
+        val regMsg = "[$targetPackage] hooks registered (context not yet bound)"
+        Log.i(TAG, regMsg)
+        LogBroadcaster.queue(regMsg)
+        contextProvider()?.let { ctx ->
+            LogBroadcaster.sendLog(ctx, "Hook ready: $targetPackage")
+        }
     }
 
     private fun initializeEngine(): HapticEngine? {
@@ -149,6 +153,7 @@ class HookCoordinator(
             if (!attached.compareAndSet(false, true)) return
             attachedContext = appContext
             Log.i(TAG, "[$targetPackage] context acquired via ${context!!.javaClass.simpleName}")
+            LogBroadcaster.flush(appContext)
             registerConfigRefreshWhenPossible()
             handler.post {
                 preloadNative(appContext)
@@ -217,6 +222,7 @@ class HookCoordinator(
         hookConstructors(audioTrackClass)
         hookWriteMethods(audioTrackClass)
         hookLifecycle(audioTrackClass)
+        LogBroadcaster.queue("[Hook] AudioTrack hooks installed for $targetPackage")
     }
 
     private fun hookConstructors(clazz: Class<*>) {
@@ -298,7 +304,7 @@ class HookCoordinator(
                         lastWriteLogAtMs = now
                         val msg = "[$targetPackage] AudioTrack.write result=$result sr=${state.sampleRate} ch=${state.channels}"
                         Log.i(TAG, msg)
-                        contextProvider()?.let { LogBroadcaster.sendLog(it, msg) }
+                        LogBroadcaster.queue(msg)
                     }
                 }
             })
@@ -308,6 +314,7 @@ class HookCoordinator(
         if (hookedCount == 0) {
             Log.w(TAG, "[$targetPackage] WARNING: no AudioTrack.write methods hooked!")
         }
+        LogBroadcaster.queue("[Hook] AudioTrack.write: hooked $hookedCount methods for $targetPackage")
     }
 
     private fun hookLifecycle(clazz: Class<*>) {
@@ -384,7 +391,14 @@ class HookCoordinator(
                     override fun afterHookedMethod(param: MethodHookParam) {
                         when (method.name) {
                             "start", "play" -> scheduleVisualizerFallback()
-                            "pause", "stop", "release" -> handler.post { engineOrNull()?.onPlaybackPaused() }
+                            "pause", "stop", "release" -> {
+                                // Same guard as AudioTrack lifecycle: only report
+                                // a pause when PCM writes have actually stopped.
+                                // MediaPlayer.release() fires on every track change.
+                                if (audioWritesHaveStalled()) {
+                                    handler.post { engineOrNull()?.onPlaybackPaused() }
+                                }
+                            }
                         }
                     }
                 })
@@ -457,13 +471,20 @@ class HookCoordinator(
         val params = method.parameterTypes
         if (params.isEmpty()) return false
         val intType = Int::class.javaPrimitiveType
+        val longType = Long::class.javaPrimitiveType
         val first = params[0]
-        val ints = params.drop(1).all { it == intType || it == Int::class.java }
-        if (!ints) return false
+        // Android 12+ adds write(ByteBuffer, int, int, long) where the last
+        // argument is a timestamp in nanoseconds. The previous filter only
+        // accepted Int-typed trailing parameters, so every modern write call
+        // was silently skipped and PCM never reached the DSP.
+        val rest = params.drop(1)
+        val intsOrLongs = rest.all { it == intType || it == Int::class.java ||
+            it == longType || it == Long::class.java }
+        if (!intsOrLongs) return false
         return when (first) {
             ByteArray::class.java, ShortArray::class.java -> params.size in 3..4
-            FloatArray::class.java -> params.size == 4
-            ByteBuffer::class.java -> params.size == 3
+            FloatArray::class.java -> params.size in 3..4
+            ByteBuffer::class.java -> params.size in 3..4
             else -> false
         }
     }

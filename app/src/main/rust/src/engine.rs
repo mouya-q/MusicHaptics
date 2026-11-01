@@ -269,6 +269,10 @@ impl Engine {
     pub fn pending_onsets(&self) -> usize { self.onsets.len() }
 
     /// Discard buffered audio and statistics without changing configuration.
+    ///
+    /// Resets the diagnostic counters too. Leaving `onsets_emitted` at its old
+    /// value after a clear made the exported telemetry report a cumulative total
+    /// that could not be compared against a fresh session.
     pub fn reset(&mut self) {
         self.history = [0.0; WINDOW];
         self.write_pos = 0;
@@ -277,6 +281,10 @@ impl Engine {
         self.detector.reset();
         self.onsets.clear();
         self.semantics.clear();
+        self.onsets_emitted = 0;
+        // `blocks` and `windows` are deliberately kept: they count work done by
+        // this engine instance, and zeroing them would make the "is the DSP
+        // running at all" diagnostic lie after every pause/resume.
     }
 
     /// Push mono PCM. `out_telemetry` receives a fixed-layout diagnostic vector.

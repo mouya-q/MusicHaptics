@@ -133,16 +133,24 @@ impl Biquad {
 /// summed FFT magnitudes, which made every band drift with window gain and hid
 /// real dynamics -- the trace showed `texRms` pinned at exactly 0.1 regardless
 /// of what was playing.
+///
+/// Non-finite samples are excluded from *both* the sum and the divisor. Dividing
+/// by the raw length while skipping NaN terms would silently attenuate the band
+/// by however many bad samples appeared, which is a plausible downstream cause of
+/// "one NaN poisons the energy for a while".
 #[inline]
 pub fn rms(buf: &[f32]) -> f32 {
     if buf.is_empty() { return 0.0; }
     let mut acc = 0.0f32;
+    let mut counted = 0usize;
     for &s in buf {
         if s.is_finite() {
             acc += s * s;
+            counted += 1;
         }
     }
-    (acc / buf.len() as f32).sqrt()
+    if counted == 0 { return 0.0; }
+    (acc / counted as f32).sqrt()
 }
 
 /// Radix-2 in-place FFT with precomputed twiddles.

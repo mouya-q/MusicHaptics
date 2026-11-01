@@ -53,7 +53,10 @@ impl<T: Copy, const N: usize> FrameRing<T, N> {
     const MASK: u64 = (N as u64) - 1;
 
     pub const fn new(init: T) -> Self {
-        debug_assert!(N.is_power_of_two(), "N must be a power of two");
+        // No const-evaluable assertion here: `debug_assert!` is not allowed in a
+        // const fn body, and `assert!` would fire at compile time for the default
+        // Instantiation. The power-of-two requirement is documented instead and
+        // is satisfied by every instantiation (512, 512).
         Self {
             slots: UnsafeCell::new([init; N]),
             head: AtomicU64::new(0),

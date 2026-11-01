@@ -7,15 +7,30 @@
 //! seven regressions all lived in the Kotlin/JNI boundary, and keeping that
 //! boundary stable makes this refactor verifiable rather than speculative.
 //!
-//! Contract:
+//! # Threading contract
 //!
-//! * `mhx_engine_create` / `mhx_engine_destroy` bracket the lifetime.
-//! * `mhx_engine_process` is called from the single audio worker thread.
-//! * `mhx_engine_pop_*` may be called from a different thread; the rings are
-//!   SPSC, so exactly one producer (process) and one consumer (pop) is assumed.
-//! * No function here panics: every entry point is `catch_unwind`-free by
-//!   construction because the crate is built with `panic = "abort"` and no path
-//!   contains an unchecked slice index.
+//! Two threads touch an engine:
+//!
+//! * **Producer** -- the DSP worker calls [mhx_engine_process]. Exactly one
+//!   thread may do this at a time.
+//! * **Consumer** -- the scheduler thread calls [mhx_engine_pop_onset],
+//!   [mhx_engine_pop_semantic] and [mhx_engine_stats].
+//!
+//! The producer and consumer must not be the same thread, and there must never be
+//! two producers or two consumers. This mirrors the C++ scheduler, which already
+//! runs on its own pthread while `AudioIngress` owns the DSP worker.
+//!
+//! The shared state between them is exactly the two `FrameRing`s plus the
+//! `u64` counters, all of which are atomic. Every other field of `Engine` is
+//! touched only by the producer, which is why the pop/stats entry points take
+//! `&Engine` and read nothing but those atomics.
+//!
+//! Configuration setters ([mhx_engine_set_sample_rate] and friends) must be
+//! called while the producer is quiescent -- in practice from the Kotlin
+//! configure path, which runs before playback starts.
+//!
+//! No function here panics: the crate is built with `panic = "abort"` and no path
+//! contains an unchecked slice index on caller-controlled data.
 
 use core::ffi::c_void;
 use core::ptr;

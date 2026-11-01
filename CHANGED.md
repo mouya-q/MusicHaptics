@@ -1,6 +1,63 @@
 # Changes
 
-Current source version: **5.5.2**
+Current source version: **5.5.3**
+
+## 5.5.3
+
+### Root Cause: Empty ByteBuffer Snapshot
+
+The v5.5.2 trace finally proved the hooks were installed and firing:
+
+```
+[Hook] AudioTrack.write: hooked 7 methods for com.kugou.android.lite
+[com.kugou.android.lite] AudioTrack.write result=376832 sr=48000 ch=2
+```
+
+PCM was flowing and `write` was observed — yet still 0 `[BEAT]`. The defect was in
+how the payload was captured.
+
+#### 1. ByteBuffer was copied *after* write() consumed it (`HookCoordinator.kt`)
+
+`AudioTrack.write` advances the caller's buffer position past the consumed region.
+The snapshot was taken in `afterHookedMethod`, where `duplicate().remaining()` is
+therefore 0 — every write produced an **empty** byte array. `write result=376832`
+was logged from the return value while zero samples were handed to the DSP, so
+onset detection saw pure silence and could never fire.
+
+The copy now happens in `beforeHookedMethod` (stored on
+`TrackState.pendingByteSnapshot`) and the after-hook uses that snapshot. This is
+the reason the pipeline looked healthy in logs but produced no vibration.
+
+#### 2. Ingress queue dropped ~96% of every write (`AudioIngress.kt`)
+
+`result=376832` bytes is 94208 stereo frames. The queue held
+`16 slots × 256 frames = 4096` frames, so a single write discarded 96% of its
+audio. Spectral-flux onset detection depends on consecutive frames, so this alone
+made triggers structurally impossible. Now `64 × 4096 = 262144` frames (~5.4s).
+
+#### 3. PCM encoding was assumed to be 16-bit (`TrackRegistry.kt`, `AudioIngress.kt`)
+
+`TrackState` had no encoding field, so a player using `ENCODING_PCM_FLOAT` had its
+float bits reinterpreted as int16 — a noise spectrum where no onset can trigger.
+`TrackState.encoding` now records `AudioTrack.getAudioFormat()`, and the ByteBuffer
+/ ByteArray decode paths dispatch on PCM8 / PCM16 / FLOAT.
+
+#### 4. `lastAudioWriteAtMs == 0` counted as "stalled" (`HookCoordinator.kt`)
+
+Before the first observed write, every `pause`/`stop`/`release` was treated as a
+real stop, producing the burst of pause reports right after an AudioTrack rebuild.
+Unknown is not stopped; the guard now returns false in that state.
+
+#### 5. Ingress pipeline made observable (`AudioIngress.kt`, `HapticEngine.kt`)
+
+Added `acceptedFrames()` / `processedFrames()` counters and moved the telemetry
+line to a 2-second time throttle (it was every 200 frames, which could emit
+nothing in a short session). One `[DSP-TELEM]` line now distinguishes all three
+failure modes:
+
+- `accepted=0 processed=0` — PCM never entered the queue (hook problem)
+- `accepted>0 processed=0` — DSP worker stalled
+- both advancing, onset all zero — detector thresholds
 
 ## 5.5.2
 

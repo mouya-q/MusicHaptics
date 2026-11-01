@@ -244,8 +244,28 @@ class HookCoordinator(
             if (!isSupportedWriteSignature(method)) continue
             XposedBridge.hookMethod(method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    val state = tracks.state(param.thisObject as? AudioTrack ?: return) ?: return
-                    state.initialByteBufferPosition = (param.args.firstOrNull() as? ByteBuffer)?.position() ?: -1
+                    val track = param.thisObject as? AudioTrack ?: return
+                    val state = tracks.state(track) ?: return
+                    val input = param.args.firstOrNull() as? ByteBuffer ?: run {
+                        state.initialByteBufferPosition = -1
+                        state.pendingByteSnapshot = null
+                        return
+                    }
+                    // Snapshot the ByteBuffer *before* write() consumes it.
+                    //
+                    // AudioTrack.write advances the buffer position past the
+                    // consumed region, so reading it afterwards yields
+                    // remaining()==0 and an empty snapshot. That silent empty
+                    // copy is why PCM never reached the DSP even though
+                    // "AudioTrack.write result=..." was logged: the hook fired,
+                    // but every sample was discarded before hand-off.
+                    state.initialByteBufferPosition = input.position()
+                    state.pendingByteSnapshot = try {
+                        val dup = input.duplicate()
+                        val bytes = ByteArray(dup.remaining())
+                        dup.get(bytes)
+                        bytes
+                    } catch (_: Exception) { null }
                 }
 
                 override fun afterHookedMethod(param: MethodHookParam) {
@@ -267,34 +287,40 @@ class HookCoordinator(
                         is ShortArray -> input.clone()
                         is FloatArray -> input.clone()
                         is ByteArray -> input.clone()
-                        is ByteBuffer -> try {
-                            // Copy readable bytes; direct ByteBuffers may not expose array().
-                            val dup = input.duplicate()
-                            val bytes = ByteArray(dup.remaining())
-                            dup.get(bytes)
-                            bytes
-                        } catch (_: Exception) { null }
+                        // ByteBuffer: use the copy taken in beforeHookedMethod.
+                        // Re-reading it here is useless because write() has
+                        // already advanced the position to its limit.
+                        is ByteBuffer -> state.pendingByteSnapshot
                         else -> null
                     } ?: return
                     val offsetArg = (param.args.getOrNull(1) as? Int) ?: 0
-                    val startPos = state.initialByteBufferPosition.takeIf { it >= 0 } ?: 0
                     handler.post {
                         val target = engineOrNull() ?: return@post
                         target.markHookAudioArrival(now)
                         when (snapshot) {
                             is ShortArray -> {
                                 val samples = result.coerceAtMost((snapshot.size - offsetArg).coerceAtLeast(0))
+                                // A ShortArray is always 16-bit PCM by construction.
                                 target.processPcm16FromHook(snapshot, offsetArg, samples, state.channels)
                             }
                             is FloatArray -> {
                                 target.processPcmFloatFromHook(snapshot, offsetArg, result, state.channels)
                             }
                             is ByteArray -> {
-                                // ByteBuffer path was flattened to ByteArray above.
+                                // The snapshot always starts at the buffer's
+                                // original position, so the offset into it is 0
+                                // for ByteBuffer writes and offsetArg otherwise.
                                 if (param.args.firstOrNull() is ByteBuffer) {
-                                    target.processPcmBytesFromHook(snapshot, 0, snapshot.size.coerceAtMost(result), state.channels)
+                                    target.processPcmBytesFromHook(
+                                        snapshot, 0,
+                                        snapshot.size.coerceAtMost(result),
+                                        state.channels, state.encoding
+                                    )
                                 } else {
-                                    target.processPcmBytesFromHook(snapshot, offsetArg, result, state.channels)
+                                    target.processPcmBytesFromHook(
+                                        snapshot, offsetArg, result,
+                                        state.channels, state.encoding
+                                    )
                                 }
                             }
                         }
@@ -302,7 +328,7 @@ class HookCoordinator(
 
                     if (now - lastWriteLogAtMs >= MAX_WRITE_LOG_INTERVAL_MS) {
                         lastWriteLogAtMs = now
-                        val msg = "[$targetPackage] AudioTrack.write result=$result sr=${state.sampleRate} ch=${state.channels}"
+                        val msg = "[$targetPackage] AudioTrack.write result=$result sr=${state.sampleRate} ch=${state.channels} enc=${encodingName(state.encoding)}"
                         Log.i(TAG, msg)
                         LogBroadcaster.queue(msg)
                     }
@@ -377,8 +403,23 @@ class HookCoordinator(
      */
     private fun audioWritesHaveStalled(): Boolean {
         val last = lastAudioWriteAtMs
-        if (last == 0L) return true
+        // 0 means "no write has been observed since the coordinator started".
+        // Treating that as "stalled" made the very first pause/stop/release of
+        // a session latch the engine off before any audio had been analysed --
+        // visible in the trace as a burst of pause reports right after the
+        // AudioTrack was rebuilt at a new sample rate. Unknown is not stopped.
+        if (last == 0L) return false
         return SystemClock.elapsedRealtime() - last > RELEASE_PAUSE_MS
+    }
+
+    /** Human-readable encoding label so the trace shows what was decoded. */
+    private fun encodingName(encoding: Int): String = when (encoding) {
+        android.media.AudioFormat.ENCODING_PCM_16BIT -> "pcm16"
+        android.media.AudioFormat.ENCODING_PCM_FLOAT -> "float"
+        android.media.AudioFormat.ENCODING_PCM_8BIT -> "pcm8"
+        android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> "pcm24"
+        android.media.AudioFormat.ENCODING_PCM_32BIT -> "pcm32"
+        else -> "enc$encoding"
     }
 
     private fun hookMediaPlayers(classLoader: ClassLoader) {

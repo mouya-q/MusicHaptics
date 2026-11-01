@@ -198,6 +198,7 @@ class HapticEngine(
 
     private val isEngineEnabled = AtomicBoolean(true)
     private var telemetryDbgCounter = 0
+    @Volatile private var lastTelemetryLogMs = 0L
 
     @Volatile private var nativeSchedulerActive = false
     @Volatile private var nativeLastAudioTime = 0L
@@ -681,6 +682,11 @@ class HapticEngine(
                     }
                 }
 
+                // Do not pull frames while the native scheduler is active: it consumes
+                // these rings itself, so any frame taken here is a beat the
+                // scheduler will never dispatch (a bounded pull still steals real
+                // events). Diagnosis instead relies on the accepted/processed
+                // counters, which show whether PCM reached the DSP at all.
                 val semanticFrameCount = if (nativeBridge.isLoaded && !nativeSchedulerActive) {
                     nativeBridge.getSemanticFrames(semanticFrameBuffer, 64)
                 } else 0
@@ -968,8 +974,22 @@ class HapticEngine(
         
         
         telemetryDbgCounter++
-        if (telemetryDbgCounter % 200 == 0) {
-            val msg = "[DSP-TELEM] subRms=%.5f midRms=%.5f texRms=%.5f bassBand=? lowMid=? vocal=? | onset: KICK=%.4f SNARE=%.4f VOCAL=%.4f BODY=%.4f | framesRead=$framesRead"
+        // Time-based rather than count-based: at 200 frames the interval grows
+        // with the audio load and a short listening session could export no
+        // telemetry line at all, which is exactly what happened on v5.5.2.
+        val nowMs = SystemClock.elapsedRealtime()
+        if (nowMs - lastTelemetryLogMs >= 2000L) {
+            lastTelemetryLogMs = nowMs
+            // accepted/processed exposes the whole ingress chain in one line:
+            // accepted > 0 but processed == 0 means the DSP worker is stalled;
+            // both 0 means PCM never entered the queue at all (hook problem);
+            // both advancing yet onset all zero means the detector thresholds
+            // are wrong. Without these counters every one of those failures
+            // looked identical in the exported log.
+            val accepted = audioIngress.acceptedFrames()
+            val processed = audioIngress.processedFrames()
+            val dropped = audioIngress.droppedFrames()
+            val msg = "[DSP-TELEM] subRms=%.5f midRms=%.5f texRms=%.5f | onset: KICK=%.4f SNARE=%.4f VOCAL=%.4f BODY=%.4f | frames=$framesRead accepted=$accepted processed=$processed dropped=$dropped"
                 .format(telemetry[0], telemetry[1], telemetry[2],
                         telemetryData.kickOnset, telemetryData.snareOnset,
                         telemetryData.vocalOnset, telemetryData.bodyOnset)
@@ -999,20 +1019,20 @@ class HapticEngine(
         audioIngress.processFloatPcm(data, offset, frameCount, channelCount)
     }
 
-    internal fun processPcmBytesFromHook(data: ByteArray, offset: Int, byteCount: Int, channelCount: Int) {
+    internal fun processPcmBytesFromHook(data: ByteArray, offset: Int, byteCount: Int, channelCount: Int, encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT) {
         if (!isEngineEnabled.get()) return
         ensureIngressFormat(channelCount)
         resumeFromHook()
         markHookAudioArrival()
-        audioIngress.processPcm16Bytes(data, offset, byteCount, channelCount)
+        audioIngress.processPcmBytes(data, offset, byteCount, channelCount, encoding)
     }
 
-    internal fun processPcmBufferFromHook(data: java.nio.ByteBuffer, startPosition: Int, byteCount: Int, channelCount: Int) {
+    internal fun processPcmBufferFromHook(data: java.nio.ByteBuffer, startPosition: Int, byteCount: Int, channelCount: Int, encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT) {
         if (!isEngineEnabled.get()) return
         ensureIngressFormat(channelCount)
         resumeFromHook()
         markHookAudioArrival()
-        audioIngress.processPcm16Buffer(data, startPosition, byteCount, channelCount)
+        audioIngress.processPcmBuffer(data, startPosition, byteCount, channelCount, encoding)
     }
 
     private fun ensureIngressFormat(channelCount: Int) {

@@ -18,6 +18,9 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = "symbols"
+# NOTE: `strip = "symbols"` must NOT be set here. It removes the symbol table from
+# the static archive, which makes the archive unlinkable against NativeBridge.cpp
+# and hides mhx_engine_process from nm. The final .so is stripped by the Android
+# packaging step anyway, so there is nothing to gain.
 overflow-checks = false
 debug-assertions = false

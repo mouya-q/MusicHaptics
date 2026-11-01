@@ -94,10 +94,34 @@ fi
 
 # A missing symbol here means CMake would link successfully but every call would
 # resolve to a null weak reference at runtime; fail loudly instead.
-if ! "$TOOLCHAIN/bin/llvm-nm" --defined-only "$ARTIFACT" | grep -q ' mhx_engine_process$'; then
-  echo "error: libmhx_dsp.a does not export mhx_engine_process" >&2
+#
+# Match on the bare symbol name anywhere in the output rather than on an exact
+# " T name" pattern: llvm-nm column layout differs between versions (some pad the
+# type column, some emit "0000 T name"), and an over-strict pattern fails the
+# build on a healthy archive.
+NM_OUT="$("$TOOLCHAIN/bin/llvm-nm" --defined-only "$ARTIFACT" 2>/dev/null || true)"
+if [ -z "$NM_OUT" ]; then
+  echo "error: llvm-nm produced no output for $ARTIFACT (archive may be stripped)" >&2
   exit 1
 fi
+
+MISSING=""
+for sym in mhx_engine_create mhx_engine_destroy mhx_engine_process \
+           mhx_engine_pop_onset mhx_engine_pop_semantic mhx_engine_stats \
+           mhx_abi_version mhx_self_test; do
+  if ! printf '%s\n' "$NM_OUT" | grep -qw "$sym"; then
+    MISSING="$MISSING $sym"
+  fi
+done
+
+if [ -n "$MISSING" ]; then
+  echo "error: libmhx_dsp.a is missing required symbols:$MISSING" >&2
+  echo "--- first 20 symbols in the archive ---" >&2
+  printf '%s\n' "$NM_OUT" | head -20 >&2
+  exit 1
+fi
+
+echo "verified $(printf '%s\n' "$NM_OUT" | grep -cw 'mhx_') mhx_* symbols in the archive"
 
 cp -f "$ARTIFACT" "$OUT_DIR/libmhx_dsp.a"
 echo "wrote $(wc -c < "$OUT_DIR/libmhx_dsp.a") bytes -> $OUT_DIR/libmhx_dsp.a"

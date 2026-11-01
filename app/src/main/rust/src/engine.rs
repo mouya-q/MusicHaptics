@@ -14,7 +14,7 @@
 //!   zero when the air band is idle.
 
 use crate::filter::{rms, Biquad, Fft, Kind};
-use crate::onset::{band_rms, body_energy, loudness, BandEnergies, DetectorConfig, Onset, OnsetDetector};
+use crate::onset::{band_rms, body_energy, loudness, BandEnergies, DetectorConfig, OnsetDetector};
 use crate::ring::FrameRing;
 
 /// Analysis window in samples. 1024 gives ~23 ms at 44.1 kHz and ~21 ms at

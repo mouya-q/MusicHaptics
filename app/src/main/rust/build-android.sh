@@ -17,7 +17,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUST_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# The script lives inside the crate root, so RUST_DIR is SCRIPT_DIR itself.
+# Deriving it as SCRIPT_DIR/.. pointed one level too high and made cargo look for
+# Cargo.toml under app/src/main, which fails with a confusing "could not find
+# Cargo.toml" message.
+RUST_DIR="$SCRIPT_DIR"
 
 TARGET="${MHX_RUST_TARGET:-aarch64-linux-android}"
 PROFILE="${MHX_RUST_PROFILE:-release}"

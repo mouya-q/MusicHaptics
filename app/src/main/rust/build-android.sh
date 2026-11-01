@@ -95,12 +95,18 @@ fi
 # A missing symbol here means CMake would link successfully but every call would
 # resolve to a null weak reference at runtime; fail loudly instead.
 #
-# Match on the bare symbol name anywhere in the output rather than on an exact
-# " T name" pattern: llvm-nm column layout differs between versions (some pad the
-# type column, some emit "0000 T name"), and an over-strict pattern fails the
-# build on a healthy archive.
-NM_OUT="$("$TOOLCHAIN/bin/llvm-nm" --defined-only "$ARTIFACT" 2>/dev/null || true)"
-if [ -z "$NM_OUT" ]; then
+# Two shell hazards are avoided deliberately:
+#  * No `printf | grep -q` under `set -o pipefail`: grep -q exits on first match,
+#    SIGPIPEs the writer, and pipefail then reports the whole pipeline as failed
+#    even though the symbol was found.
+#  * No exact " T name" column pattern: llvm-nm layouts differ across versions.
+NM_FILE="$(mktemp)"
+trap 'rm -f "$NM_FILE"' EXIT
+if ! "$TOOLCHAIN/bin/llvm-nm" --defined-only "$ARTIFACT" > "$NM_FILE" 2>/dev/null; then
+  echo "error: llvm-nm failed on $ARTIFACT" >&2
+  exit 1
+fi
+if [ ! -s "$NM_FILE" ]; then
   echo "error: llvm-nm produced no output for $ARTIFACT (archive may be stripped)" >&2
   exit 1
 fi
@@ -109,7 +115,7 @@ MISSING=""
 for sym in mhx_engine_create mhx_engine_destroy mhx_engine_process \
            mhx_engine_pop_onset mhx_engine_pop_semantic mhx_engine_stats \
            mhx_abi_version mhx_self_test; do
-  if ! printf '%s\n' "$NM_OUT" | grep -qw "$sym"; then
+  if ! grep -qw "$sym" "$NM_FILE"; then
     MISSING="$MISSING $sym"
   fi
 done
@@ -117,11 +123,11 @@ done
 if [ -n "$MISSING" ]; then
   echo "error: libmhx_dsp.a is missing required symbols:$MISSING" >&2
   echo "--- first 20 symbols in the archive ---" >&2
-  printf '%s\n' "$NM_OUT" | head -20 >&2
+  head -20 "$NM_FILE" >&2
   exit 1
 fi
 
-echo "verified $(printf '%s\n' "$NM_OUT" | grep -cw 'mhx_') mhx_* symbols in the archive"
+echo "verified $(grep -cw 'mhx_' "$NM_FILE" || true) mhx_* symbols in the archive"
 
 cp -f "$ARTIFACT" "$OUT_DIR/libmhx_dsp.a"
 echo "wrote $(wc -c < "$OUT_DIR/libmhx_dsp.a") bytes -> $OUT_DIR/libmhx_dsp.a"

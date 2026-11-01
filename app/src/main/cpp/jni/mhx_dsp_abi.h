@@ -64,7 +64,8 @@ void mhx_engine_set_refractory_ms(MhxEngineHandle handle, float ms);
 // analysed identically regardless of the chosen character.
 //
 // `low_hz` and `high_hz` are clamped inside the engine to a sane range.
-void mhx_engine_set_band_edges(MhxEngineHandle handle, float low_hz, float high_hz);
+// Returns 1 when the filters were rebuilt, so the caller can log the change.
+int32_t mhx_engine_set_band_edges(MhxEngineHandle handle, float low_hz, float high_hz);
 
 // Scale the kick band's contribution before onset scoring.
 //

@@ -13,6 +13,8 @@
 //! * **Body energy is a real measurement**, not a term that multiplies out to
 //!   zero when the air band is idle.
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use crate::filter::{rms, Biquad, Fft, Kind};
 use crate::onset::{band_rms, body_energy, loudness, BandEnergies, DetectorConfig, OnsetDetector};
 use crate::ring::FrameRing;
@@ -31,6 +33,21 @@ pub const BLOCK: usize = 256;
 /// wake, and the ring must survive several missed wakes without dropping a beat.
 const ONSET_RING: usize = 512;
 const SEMANTIC_RING: usize = 512;
+
+/// Attack-localisation resolution inside one analysis window.
+///
+/// Each band keeps `SEGMENTS` short-time energies (64 samples = 1.33 ms at
+/// 48 kHz). An onset is placed at the first segment that reaches 5% of the
+/// window's peak segment energy, which pins a kick to about +-1 ms instead of
+/// the +-10 ms that "somewhere inside the 21 ms window" allows (measured on
+/// synthetic 60/90 Hz kicks and noise snares, see docs/SYNC_AND_TIMING.md).
+const SEG_LEN: usize = 64;
+const SEGMENTS: usize = WINDOW / SEG_LEN;
+
+/// Systematic lateness of the 5% crossing caused by the band-pass group delay.
+/// Measured: low-frequency kick +2.2 ms, snare +0.5 ms, upper bands ~0 ms.
+const KICK_LOCATE_BIAS_MS: f32 = 2.2;
+const SNARE_LOCATE_BIAS_MS: f32 = 0.5;
 
 /// Per-band cutoff constants. Kick sits low, vocal in the presence region, and
 /// air drives texture.
@@ -79,6 +96,11 @@ pub struct OnsetFrame {
     pub snare: f32,
     pub vocal: f32,
     pub body: f32,
+    /// Monotonic-clock time (CLOCK_MONOTONIC, ns) at which the transient is
+    /// expected to be *audible*, derived from the PCM block's playback anchor and
+    /// the localised attack sample. `0` means no anchor was available and the
+    /// consumer should fire immediately (the pre-6.2 behaviour).
+    pub due_ns: i64,
 }
 
 /// Runtime-tunable parameters.
@@ -176,6 +198,24 @@ pub struct Engine {
     blocks: u64,
     windows: u64,
     onsets_emitted: u64,
+
+    /// Samples consumed since construction (never reset by rate changes), the
+    /// engine's own sample clock.
+    total_samples: u64,
+    /// Playback anchor for the block currently being fed: the CLOCK_MONOTONIC
+    /// time at which sample `anchor_sample` becomes audible. 0 = unknown.
+    anchor_ns: i64,
+    anchor_sample: u64,
+
+    /// Short-time energies of the most recent window for every band, used to
+    /// localise the attack inside the window.
+    seg_energy: [[f32; SEGMENTS]; 5],
+
+    /// Newest semantic frame (kick, snare, vocal, body, loudness as f32 bits).
+    /// The FIFO ring is for consumers that drain every frame; a consumer that
+    /// wants "how loud is the music right now" must not pop the ring, because
+    /// it hands back the *oldest* retained frame (up to ~11 s old).
+    latest_semantic: [AtomicU32; 5],
 }
 
 #[inline]
@@ -195,10 +235,45 @@ fn design_band(
     lp_b.design(Kind::LowPass, sample_rate, high_hz, q);
 }
 
+/// Short-time energy of each `SEG_LEN` slice of a filtered window.
+#[inline]
+fn segment_energies(buf: &[f32; WINDOW], out: &mut [f32; SEGMENTS]) {
+    for s in 0..SEGMENTS {
+        let mut acc = 0.0f32;
+        for &v in &buf[s * SEG_LEN..(s + 1) * SEG_LEN] {
+            acc += v * v;
+        }
+        out[s] = acc;
+    }
+}
+
+/// Sample offset (within the window) of the first segment whose energy reaches
+/// 5% of the window peak. `None` when the window carries no usable energy.
+#[inline]
+fn locate_attack(seg: &[f32; SEGMENTS]) -> Option<usize> {
+    let mut peak = 0.0f32;
+    for &e in seg.iter() {
+        if e > peak {
+            peak = e;
+        }
+    }
+    if !(peak > 1.0e-12) {
+        return None;
+    }
+    let gate = peak * 0.05;
+    for (i, &e) in seg.iter().enumerate() {
+        if e >= gate {
+            return Some(i * SEG_LEN);
+        }
+    }
+    None
+}
+
 #[inline]
 fn filtered_band_rms(
     window: &[f32; WINDOW],
     scratch: &mut [f32; WINDOW],
+    seg: &mut [f32; SEGMENTS],
     hp_a: &mut Biquad,
     hp_b: &mut Biquad,
     lp_a: &mut Biquad,
@@ -209,6 +284,7 @@ fn filtered_band_rms(
     hp_b.process_block(scratch);
     lp_a.process_block(scratch);
     lp_b.process_block(scratch);
+    segment_energies(scratch, seg);
     rms(scratch)
 }
 
@@ -275,6 +351,17 @@ impl Engine {
             blocks: 0,
             windows: 0,
             onsets_emitted: 0,
+            total_samples: 0,
+            anchor_ns: 0,
+            anchor_sample: 0,
+            seg_energy: [[0.0; SEGMENTS]; 5],
+            latest_semantic: [
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+                AtomicU32::new(0),
+            ],
         };
         e.design_filters();
         e.apply_detector_config();
@@ -350,7 +437,10 @@ impl Engine {
         self.design_filters();
         self.reset_filter_states();
         self.apply_detector_config();
-        // The source changed: stale history belongs to the previous track.
+        // The source changed: stale history belongs to the previous track. The
+        // partial window being discarded must also leave the engine's sample
+        // clock, or the next onset would be placed `filled` samples too late.
+        self.total_samples = self.total_samples.saturating_sub(self.filled as u64);
         self.history = [0.0; WINDOW];
         self.previous_magnitudes = [0.0; WINDOW / 2];
         self.write_pos = 0;
@@ -419,6 +509,7 @@ impl Engine {
     /// value after a clear made the exported telemetry report a cumulative total
     /// that could not be compared against a fresh session.
     pub fn reset(&mut self) {
+        self.total_samples = self.total_samples.saturating_sub(self.filled as u64);
         self.history = [0.0; WINDOW];
         self.previous_magnitudes = [0.0; WINDOW / 2];
         self.write_pos = 0;
@@ -430,6 +521,11 @@ impl Engine {
         self.semantics.clear();
         self.last_band_telemetry = [0.0; 7];
         self.onsets_emitted = 0;
+        self.anchor_ns = 0;
+        self.seg_energy = [[0.0; SEGMENTS]; 5];
+        for slot in self.latest_semantic.iter() {
+            slot.store(0, Ordering::Relaxed);
+        }
         // `blocks` and `windows` are deliberately kept: they count work done by
         // this engine instance, and zeroing them would make the "is the DSP
         // running at all" diagnostic lie after every pause/resume.
@@ -479,6 +575,7 @@ impl Engine {
                 consumed += 1;
             }
             self.filled += take;
+            self.total_samples = self.total_samples.wrapping_add(take as u64);
 
             if self.filled == WINDOW {
                 self.analyse_window(out_telemetry);
@@ -529,18 +626,22 @@ impl Engine {
         // output envelope but the analyser kept looking at 55-650 Hz regardless.
         let sub = self.band_rms_cascade();
         let low_mid = filtered_band_rms(&self.window, &mut self.scratch_b,
+            &mut self.seg_energy[1],
             &mut self.lowmid_lo_a, &mut self.lowmid_lo_b,
             &mut self.lowmid_hi_a, &mut self.lowmid_hi_b);
         let vocal = filtered_band_rms(&self.window, &mut self.scratch_b,
+            &mut self.seg_energy[2],
             &mut self.vocal_lo_a, &mut self.vocal_lo_b,
             &mut self.vocal_hi_a, &mut self.vocal_hi_b);
         // Presence and air stay fixed: they describe the transient crack and the
         // tape hiss that make a strike feel crisp, and shifting them with the
         // style preset made "bass" sound muffled rather than deeper.
         let presence = filtered_band_rms(&self.window, &mut self.scratch_b,
+            &mut self.seg_energy[3],
             &mut self.presence_lo_a, &mut self.presence_lo_b,
             &mut self.presence_hi_a, &mut self.presence_hi_b);
         let air = filtered_band_rms(&self.window, &mut self.scratch_b,
+            &mut self.seg_energy[4],
             &mut self.air_lo_a, &mut self.air_lo_b,
             &mut self.air_hi_a, &mut self.air_hi_b);
 
@@ -551,13 +652,19 @@ impl Engine {
 
         // Publish a semantic frame every window so the continuous/output path
         // has data even when no onset fires.
-        self.semantics.push(AnalysisFrame {
+        let semantic = AnalysisFrame {
             kick: (sub * amp).clamp(0.0, 1.0),
             snare: (low_mid * amp).clamp(0.0, 1.0),
             vocal: (vocal * amp).clamp(0.0, 1.0),
             body: (body * amp).clamp(0.0, 1.0),
             loudness: loud,
-        });
+        };
+        self.semantics.push(semantic);
+        self.latest_semantic[0].store(semantic.kick.to_bits(), Ordering::Relaxed);
+        self.latest_semantic[1].store(semantic.snare.to_bits(), Ordering::Relaxed);
+        self.latest_semantic[2].store(semantic.vocal.to_bits(), Ordering::Relaxed);
+        self.latest_semantic[3].store(semantic.body.to_bits(), Ordering::Relaxed);
+        self.latest_semantic[4].store(semantic.loudness.to_bits(), Ordering::Relaxed);
 
         // FFT magnitudes drive a positive spectral-flux cue in addition to
         // band RMS deltas. The 0.25*N scale converts coherent sine peaks to
@@ -575,6 +682,7 @@ impl Engine {
                 crate::onset::Event::Vocal => frame.vocal = scaled,
                 crate::onset::Event::Body => frame.body = scaled,
             }
+            frame.due_ns = self.audible_time_ns(o.event);
             self.onsets.push(frame);
         }
 
@@ -607,6 +715,7 @@ impl Engine {
         self.sub_lo_b.process_block(&mut self.scratch_a);
         self.sub_hi_a.process_block(&mut self.scratch_a);
         self.sub_hi_b.process_block(&mut self.scratch_a);
+        segment_energies(&self.scratch_a, &mut self.seg_energy[0]);
         band_rms(&self.scratch_a)
     }
 
@@ -660,6 +769,70 @@ impl Engine {
             vocal: flux[2],
             presence: flux[3],
             air: flux[4],
+        }
+    }
+
+    /// Declare when the *next* sample passed to [Engine::process] becomes
+    /// audible, as a CLOCK_MONOTONIC timestamp in nanoseconds (<= 0 = unknown).
+    ///
+    /// The host derives this from `AudioTrack.getTimestamp()` plus the number of
+    /// frames already queued, so it already includes the buffer depth and the
+    /// output pipeline latency. Must be called by the producer thread before the
+    /// matching `process` call.
+    pub fn set_block_time(&mut self, audible_ns: i64) {
+        if audible_ns > 0 {
+            self.anchor_ns = audible_ns;
+            self.anchor_sample = self.total_samples;
+        } else {
+            self.anchor_ns = 0;
+        }
+    }
+
+    /// When the transient of the window just analysed becomes audible.
+    ///
+    /// The window ends at `total_samples`; the attack is localised inside it from
+    /// the short-time band energies of the bands that characterise `event`.
+    fn audible_time_ns(&self, event: crate::onset::Event) -> i64 {
+        if self.anchor_ns <= 0 {
+            return 0;
+        }
+        let window_start = self.total_samples.saturating_sub(WINDOW as u64);
+
+        let located = match event {
+            crate::onset::Event::Kick => locate_attack(&self.seg_energy[0]),
+            crate::onset::Event::Snare => {
+                match (locate_attack(&self.seg_energy[1]), locate_attack(&self.seg_energy[3])) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                }
+            }
+            crate::onset::Event::Vocal => locate_attack(&self.seg_energy[2]),
+            crate::onset::Event::Body => locate_attack(&self.seg_energy[4]),
+        };
+        let rate = self.cfg.sample_rate.max(8000.0) as f64;
+        let bias_ms = f64::from(match event {
+            crate::onset::Event::Kick => KICK_LOCATE_BIAS_MS,
+            crate::onset::Event::Snare => SNARE_LOCATE_BIAS_MS,
+            _ => 0.0,
+        });
+        // Without a usable localisation fall back to the window centre, the
+        // minimum-variance guess for an attack somewhere inside it.
+        let offset = located.unwrap_or(WINDOW / 2) as f64 - bias_ms * 1.0e-3 * rate;
+        let onset_sample = window_start as f64 + offset.max(0.0);
+        let delta_samples = onset_sample - self.anchor_sample as f64;
+        self.anchor_ns.saturating_add((delta_samples * 1.0e9 / rate) as i64).max(1)
+    }
+
+    /// Newest semantic frame. Lock-free and non-destructive; safe to call from
+    /// the scheduler thread at any rate.
+    pub fn latest_semantic(&self) -> AnalysisFrame {
+        let load = |i: usize| f32::from_bits(self.latest_semantic[i].load(Ordering::Relaxed));
+        AnalysisFrame {
+            kick: load(0),
+            snare: load(1),
+            vocal: load(2),
+            body: load(3),
+            loudness: load(4),
         }
     }
 
@@ -938,4 +1111,94 @@ mod tests {
         assert!(telemetry.iter().all(|v| v.is_finite()), "telemetry must stay finite");
     }
 
+
+    /// Kick-like burst: 60 Hz sine with a 60 ms decay starting at `start`.
+    fn kick_at(total: usize, start: usize, rate: f32) -> Vec<f32> {
+        let mut buf = vec![0.0f32; total];
+        for i in start..total.min(start + 9600) {
+            let t = (i - start) as f32 / rate;
+            buf[i] = 0.9 * (-t / 0.060).exp() * (2.0 * core::f32::consts::PI * 60.0 * t).sin();
+        }
+        buf
+    }
+
+    #[test]
+    fn onsets_without_playback_anchor_report_unknown_time() {
+        let mut e = engine();
+        let mut telemetry = [0.0f32; 15];
+        let mut buf = vec![0.0f32; 48000];
+        buf.extend(kick_at(48000, 24000, 48000.0));
+        e.process(&buf, &mut telemetry);
+        let mut frame = OnsetFrame::default();
+        let mut seen = 0;
+        while e.pop_onset(&mut frame) {
+            assert_eq!(frame.due_ns, 0, "no anchor was supplied");
+            seen += 1;
+        }
+        assert!(seen > 0, "the burst must still be detected");
+    }
+
+    #[test]
+    fn anchored_onset_is_placed_near_the_true_attack_time() {
+        let rate = 48000.0f32;
+        let mut e = engine();
+        let mut telemetry = [0.0f32; 15];
+        // The kick starts 1.2 s into the stream, at an off-grid sample.
+        let kick_start = 57_713usize;
+        let total = 48000 * 3;
+        let mut buf = vec![0.0f32; total];
+        let burst = kick_at(total, kick_start, rate);
+        buf.copy_from_slice(&burst);
+
+        // Stream sample 0 becomes audible at this monotonic time.
+        let base_ns: i64 = 5_000_000_000;
+        let block = 4096usize;
+        let mut pos = 0usize;
+        let mut found: Option<i64> = None;
+        let mut frame = OnsetFrame::default();
+        while pos < total {
+            let end = (pos + block).min(total);
+            let audible = base_ns + (pos as f64 * 1.0e9 / rate as f64) as i64;
+            e.set_block_time(audible);
+            e.process(&buf[pos..end], &mut telemetry);
+            while e.pop_onset(&mut frame) {
+                if found.is_none() && frame.kick > 0.0 {
+                    found = Some(frame.due_ns);
+                }
+            }
+            pos = end;
+        }
+        let due = found.expect("the kick must be detected");
+        let expected = base_ns + (kick_start as f64 * 1.0e9 / rate as f64) as i64;
+        let error_ms = (due - expected) as f64 / 1.0e6;
+        assert!(
+            error_ms.abs() < 6.0,
+            "kick audible time off by {error_ms:.2} ms (due={due}, expected={expected})"
+        );
+    }
+
+    #[test]
+    fn latest_semantic_tracks_the_newest_window_not_the_oldest() {
+        let mut e = engine();
+        let mut telemetry = [0.0f32; 15];
+        // Loud first, then a long quiet tail that fills the FIFO ring. The FIFO
+        // hands back the oldest retained frame, the snapshot must report silence.
+        e.process(&sine(60.0, 48000.0, WINDOW * 4, 0.8), &mut telemetry);
+        e.process(&vec![0.0f32; WINDOW * 40], &mut telemetry);
+        let latest = e.latest_semantic();
+        assert!(latest.kick < 0.01, "latest kick={} should be ~0 after silence", latest.kick);
+        let mut oldest = AnalysisFrame::default();
+        assert!(e.pop_semantic(&mut oldest));
+        assert!(oldest.kick > latest.kick, "FIFO head is older and louder");
+    }
+
+    #[test]
+    fn rate_change_does_not_shift_the_sample_clock() {
+        let mut e = engine();
+        let mut telemetry = [0.0f32; 15];
+        e.process(&vec![0.0f32; 700], &mut telemetry);
+        let before = e.total_samples;
+        e.set_sample_rate(44100.0);
+        assert_eq!(e.total_samples, before - 700, "discarded partial window leaves the clock");
+    }
 }

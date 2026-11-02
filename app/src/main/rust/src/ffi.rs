@@ -219,6 +219,75 @@ pub unsafe extern "C" fn mhx_engine_pop_onset(handle: EngineHandle, out: *mut f3
     1
 }
 
+/// Declare when the next PCM block becomes audible (CLOCK_MONOTONIC ns, <= 0 for
+/// unknown). Producer-side: call it on the DSP thread right before
+/// [mhx_engine_process] for the block it describes.
+///
+/// # Safety
+/// `handle` must come from [mhx_engine_create].
+#[no_mangle]
+pub unsafe extern "C" fn mhx_engine_set_block_time(handle: EngineHandle, audible_ns: i64) {
+    if handle.is_null() {
+        return;
+    }
+    let engine = &mut *(handle as *mut Engine);
+    engine.set_block_time(audible_ns);
+}
+
+/// Pop one onset frame together with the time it becomes audible.
+///
+/// `out` receives 4 floats (kick, snare, vocal, body); `due_ns` receives the
+/// CLOCK_MONOTONIC audible time in nanoseconds, or 0 when the producer had no
+/// playback anchor. Returns 1 when a frame was written.
+///
+/// # Safety
+/// `handle` must come from [mhx_engine_create]; `out` must point to 4 writable
+/// `f32`s and `due_ns` to one writable `i64`.
+#[no_mangle]
+pub unsafe extern "C" fn mhx_engine_pop_onset_timed(
+    handle: EngineHandle,
+    out: *mut f32,
+    due_ns: *mut i64,
+) -> i32 {
+    if handle.is_null() || out.is_null() || due_ns.is_null() {
+        return 0;
+    }
+    let engine = &*(handle as *mut Engine);
+    let mut frame = OnsetFrame::default();
+    if !engine.pop_onset(&mut frame) {
+        return 0;
+    }
+    let dst = core::slice::from_raw_parts_mut(out, 4);
+    dst[0] = frame.kick;
+    dst[1] = frame.snare;
+    dst[2] = frame.vocal;
+    dst[3] = frame.body;
+    *due_ns = frame.due_ns;
+    1
+}
+
+/// Copy the newest semantic frame (5 floats: kick, snare, vocal, body,
+/// loudness) without consuming anything. Returns 1 on success.
+///
+/// # Safety
+/// `handle` must come from [mhx_engine_create]; `out` must point to 5 writable
+/// `f32`s.
+#[no_mangle]
+pub unsafe extern "C" fn mhx_engine_latest_semantic(handle: EngineHandle, out: *mut f32) -> i32 {
+    if handle.is_null() || out.is_null() {
+        return 0;
+    }
+    let engine = &*(handle as *mut Engine);
+    let frame = engine.latest_semantic();
+    let dst = core::slice::from_raw_parts_mut(out, 5);
+    dst[0] = frame.kick;
+    dst[1] = frame.snare;
+    dst[2] = frame.vocal;
+    dst[3] = frame.body;
+    dst[4] = frame.loudness;
+    1
+}
+
 /// Pop one semantic frame into `out` (5 floats: kick, snare, vocal, body,
 /// loudness).
 ///
@@ -269,7 +338,7 @@ pub unsafe extern "C" fn mhx_engine_stats(handle: EngineHandle, out: *mut u64) -
 /// corrupting memory through a stale struct layout.
 #[no_mangle]
 pub extern "C" fn mhx_abi_version() -> u32 {
-    1
+    2
 }
 
 /// Report whether the input pointer was null, used by a self-test in C++.
@@ -384,7 +453,7 @@ mod tests {
 
     #[test]
     fn abi_version_and_self_test() {
-        assert_eq!(mhx_abi_version(), 1);
+        assert_eq!(mhx_abi_version(), 2);
         assert_eq!(mhx_self_test(), 0);
     }
 }

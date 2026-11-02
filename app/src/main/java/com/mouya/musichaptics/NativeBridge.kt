@@ -142,7 +142,15 @@ class NativeBridge {
         }
     }
 
-    fun processAudioDirect(buffer: ByteBuffer, size: Int, outTelemetry: FloatArray, sampleRateHz: Int) {
+    /**
+     * @param audibleNs CLOCK_MONOTONIC time at which the first frame of [buffer]
+     *   becomes audible (0 = unknown). Onsets found in this block are stamped with
+     *   it so the scheduler can fire the haptic with the sound, not with the write.
+     */
+    fun processAudioDirect(
+        buffer: ByteBuffer, size: Int, outTelemetry: FloatArray, sampleRateHz: Int,
+        audibleNs: Long = 0L
+    ) {
         val _ptr = snapshotPtr()
         if (_ptr != 0L) {
             try {
@@ -151,12 +159,26 @@ class NativeBridge {
                     Log.e("NativeBridge", "Invalid buffer params: buffer=${buffer.isDirect} size=$size capacity=${buffer.capacity()}")
                     return
                 }
-                nativeProcessAudioDirect(_ptr, buffer, size, sampleRateHz.toFloat(), outTelemetry)
+                nativeProcessAudioDirect(_ptr, buffer, size, sampleRateHz.toFloat(), outTelemetry, audibleNs)
             } catch (e: Exception) {
                 Log.e("NativeBridge", "processAudioDirect crashed: ${e.message}", e)
 
             }
         }
+    }
+
+    /** Haptic lead (+) or lag (-) trim in milliseconds, applied by the native scheduler. */
+    fun setSyncOffsetMs(offsetMs: Int) {
+        if (!isLoaded) return
+        try { nativeSetSyncOffsetMs(offsetMs) } catch (e: Throwable) {
+            Log.w("NativeBridge", "setSyncOffsetMs failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /** [fired on time, dropped late, fired without playback anchor], or null. */
+    fun syncStats(): LongArray? {
+        if (!isLoaded) return null
+        return try { LongArray(3).also { nativeSyncStats(it) } } catch (_: Throwable) { null }
     }
 
     fun getSemanticFrames(outFrames: FloatArray, maxFrames: Int): Int {
@@ -421,7 +443,9 @@ fun isDirectDriveAvailable(): Boolean {
         releaseMs: Float, sustainLevel: Float, lraF0: Float, lraQ: Float,
         cooldownMs: Float, maxAmplitude: Float
     )
-    private external fun nativeProcessAudioDirect(ptr: Long, directBuffer: ByteBuffer, size: Int, sampleRateHz: Float, outTelemetry: FloatArray)
+    private external fun nativeProcessAudioDirect(ptr: Long, directBuffer: ByteBuffer, size: Int, sampleRateHz: Float, outTelemetry: FloatArray, audibleNs: Long)
+    private external fun nativeSetSyncOffsetMs(offsetMs: Int)
+    private external fun nativeSyncStats(out: LongArray)
     private external fun nativeAudioSilenceMs(): Long
     private external fun nativeGetSemanticFrames(ptr: Long, outFrames: FloatArray, maxFrames: Int): Int
     private external fun nativeClearHapticBuffer(ptr: Long)

@@ -164,6 +164,10 @@ pub struct Fft {
     tw_im: Vec<f32>,
     re: Vec<f32>,
     im: Vec<f32>,
+    /// Hann window, computed once. The previous implementation evaluated one
+    /// `cos` per sample on every call, i.e. 1024 transcendental calls per
+    /// analysis window on the real-time DSP thread.
+    window: Vec<f32>,
 }
 
 impl Fft {
@@ -177,7 +181,11 @@ impl Fft {
             tw_re.push(angle.cos() as f32);
             tw_im.push(angle.sin() as f32);
         }
-        Self { n, tw_re, tw_im, re: vec![0.0; n], im: vec![0.0; n] }
+        let denom = (n.max(2) - 1) as f64;
+        let window: Vec<f32> = (0..n)
+            .map(|i| (0.5 - 0.5 * (2.0 * core::f64::consts::PI * i as f64 / denom).cos()) as f32)
+            .collect();
+        Self { n, tw_re, tw_im, re: vec![0.0; n], im: vec![0.0; n], window }
     }
 
     #[inline]
@@ -196,8 +204,7 @@ impl Fft {
         // Hann window: without it, a strong kick leaks across the whole
         // spectrum and flattens the transient the detector is looking for.
         for i in 0..n {
-            let w = 0.5 - 0.5 * (2.0 * PI * i as f32 / (n as f32 - 1.0)).cos();
-            self.re[i] = input[i] * w;
+            self.re[i] = input[i] * self.window[i];
             self.im[i] = 0.0;
         }
 

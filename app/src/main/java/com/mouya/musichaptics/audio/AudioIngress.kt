@@ -43,6 +43,8 @@ class AudioIngress(
         val readySequence = AtomicLong(0L)
         var frames = 0
         @Volatile var sampleRateHz: Int = 48000
+        /** When frame 0 of this batch becomes audible (CLOCK_MONOTONIC ns), 0 = unknown. */
+        @Volatile var audibleNs: Long = 0L
     }
 
     private val slots = Array(QUEUE_CAPACITY) { Slot() }
@@ -78,7 +80,8 @@ class AudioIngress(
         offsetSamples: Int,
         sampleCount: Int,
         channels: Int,
-        sampleRateHz: Int = 48000
+        sampleRateHz: Int = 48000,
+        audibleNs: Long = 0L
     ): Int {
         val safeOffset = offsetSamples.coerceIn(0, data.size)
         val safeCount = min(sampleCount.coerceAtLeast(0), data.size - safeOffset)
@@ -109,7 +112,7 @@ class AudioIngress(
             }
             mono.clear()
             mono.put(scratch, 0, batch)
-            publish(sequence, slot, batch, sampleRateHz)
+            publish(sequence, slot, batch, sampleRateHz, batchAudibleNs(audibleNs, frameOffset, sampleRateHz))
             frameOffset += batch
         }
         return frameOffset
@@ -120,7 +123,8 @@ class AudioIngress(
         offsetFrames: Int,
         frameCount: Int,
         channels: Int,
-        sampleRateHz: Int = 48000
+        sampleRateHz: Int = 48000,
+        audibleNs: Long = 0L
     ): Int {
         val start = offsetFrames.coerceAtLeast(0)
         val ch = channels.coerceAtLeast(1)
@@ -157,7 +161,7 @@ class AudioIngress(
             }
             mono.clear()
             mono.put(scratch, 0, batch)
-            publish(sequence, slot, batch, sampleRateHz)
+            publish(sequence, slot, batch, sampleRateHz, batchAudibleNs(audibleNs, frameOffset, sampleRateHz))
             frameOffset += batch
         }
         return frameOffset
@@ -169,7 +173,8 @@ class AudioIngress(
         byteCount: Int,
         channels: Int,
         encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT,
-        sampleRateHz: Int = 48000
+        sampleRateHz: Int = 48000,
+        audibleNs: Long = 0L
     ): Int {
         val safeOffset = offsetBytes.coerceIn(0, data.size)
         val available = min(byteCount.coerceAtLeast(0), data.size - safeOffset)
@@ -201,7 +206,7 @@ class AudioIngress(
             }
             slot.mono.clear()
             slot.mono.put(scratch, 0, batch)
-            publish(sequence, slot, batch, sampleRateHz)
+            publish(sequence, slot, batch, sampleRateHz, batchAudibleNs(audibleNs, frameOffset, sampleRateHz))
             frameOffset += batch
         }
         return frameOffset
@@ -213,7 +218,8 @@ class AudioIngress(
         byteCount: Int,
         channels: Int,
         encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT,
-        sampleRateHz: Int = 48000
+        sampleRateHz: Int = 48000,
+        audibleNs: Long = 0L
     ): Int {
         val ch = channels.coerceAtLeast(1)
         val start = startPosition.coerceIn(0, buffer.limit())
@@ -245,7 +251,7 @@ class AudioIngress(
             }
             slot.mono.clear()
             slot.mono.put(scratch, 0, batch)
-            publish(sequence, slot, batch, sampleRateHz)
+            publish(sequence, slot, batch, sampleRateHz, batchAudibleNs(audibleNs, frameOffset, sampleRateHz))
             frameOffset += batch
         }
         return frameOffset
@@ -330,8 +336,17 @@ class AudioIngress(
         return -1L
     }
 
-    private fun publish(sequence: Long, slot: Slot, frames: Int, sampleRateHz: Int) {
+    /** A write is split into batches; each starts later in the stream by its frame offset. */
+    private fun batchAudibleNs(writeAudibleNs: Long, frameOffset: Int, sampleRateHz: Int): Long {
+        if (writeAudibleNs <= 0L || sampleRateHz <= 0) return 0L
+        return writeAudibleNs + frameOffset.toLong() * 1_000_000_000L / sampleRateHz
+    }
+
+    private fun publish(
+        sequence: Long, slot: Slot, frames: Int, sampleRateHz: Int, audibleNs: Long
+    ) {
         slot.frames = frames
+        slot.audibleNs = audibleNs
         slot.sampleRateHz = sampleRateHz.coerceIn(8000, 384000)
         slot.readySequence.lazySet(sequence + 1L)
         wakeSignal.release()
@@ -348,7 +363,7 @@ class AudioIngress(
 
                 try {
                     nativeBridge.processAudioDirect(
-                        slot.pcm, slot.frames, slot.telemetry, slot.sampleRateHz
+                        slot.pcm, slot.frames, slot.telemetry, slot.sampleRateHz, slot.audibleNs
                     )
                     onTelemetry(slot.telemetry, slot.frames)
                     processedFrameCount.addAndGet(slot.frames.toLong())

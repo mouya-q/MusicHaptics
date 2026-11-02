@@ -297,6 +297,26 @@ class HookCoordinator(
                         else -> null
                     } ?: return
                     val offsetArg = (param.args.getOrNull(1) as? Int) ?: 0
+                    // When will the first frame of THIS write be heard? Computed on the
+                    // host audio thread, right after write() returned, because that is
+                    // where the track's timestamp and queue depth are meaningful.
+                    val writtenFrames = when (param.args.firstOrNull()) {
+                        is FloatArray, is ShortArray -> result / state.channels.coerceAtLeast(1)
+                        is ByteArray, is ByteBuffer -> {
+                            val bytes = when (state.encoding) {
+                                android.media.AudioFormat.ENCODING_PCM_8BIT -> 1
+                                android.media.AudioFormat.ENCODING_PCM_16BIT -> 2
+                                android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> 3
+                                android.media.AudioFormat.ENCODING_PCM_32BIT,
+                                android.media.AudioFormat.ENCODING_PCM_FLOAT -> 4
+                                else -> 0
+                            }
+                            if (bytes > 0) result / (bytes * state.channels.coerceAtLeast(1)) else 0
+                        }
+                        else -> 0
+                    }
+                    val audibleNs = runCatching { tracks.audibleNsForWrite(track, state, writtenFrames) }
+                        .getOrDefault(0L)
                     handler.post {
                         val target = engineOrNull() ?: return@post
                         target.markHookAudioArrival(now)
@@ -305,7 +325,8 @@ class HookCoordinator(
                                 val samples = result.coerceAtMost((snapshot.size - offsetArg).coerceAtLeast(0))
                                 // A ShortArray is always 16-bit PCM by construction.
                                 target.processPcm16FromHook(
-                                    snapshot, offsetArg, samples, state.channels, state.sampleRate
+                                    snapshot, offsetArg, samples, state.channels, state.sampleRate,
+                                    audibleNs = audibleNs
                                 )
                             }
                             is FloatArray -> {
@@ -326,7 +347,8 @@ class HookCoordinator(
                                 if (frameCount > 0) {
                                     target.processPcmFloatFromHook(
                                         snapshot, alignedStart / channels, frameCount,
-                                        channels, state.sampleRate
+                                        channels, state.sampleRate,
+                                        audibleNs = audibleNs
                                     )
                                 }
                             }
@@ -338,12 +360,14 @@ class HookCoordinator(
                                     target.processPcmBytesFromHook(
                                         snapshot, 0,
                                         snapshot.size.coerceAtMost(result),
-                                        state.channels, state.encoding, state.sampleRate
+                                        state.channels, state.encoding, state.sampleRate,
+                                        audibleNs = audibleNs
                                     )
                                 } else {
                                     target.processPcmBytesFromHook(
                                         snapshot, offsetArg, result,
-                                        state.channels, state.encoding, state.sampleRate
+                                        state.channels, state.encoding, state.sampleRate,
+                                        audibleNs = audibleNs
                                     )
                                 }
                             }
@@ -422,7 +446,13 @@ class HookCoordinator(
                 handler.post { engineOrNull()?.onPlaybackPaused() }
             }
         }
-        hook("flush") { _, state -> state.lastPcmAtMs = 0L }
+        hook("flush") { _, state ->
+            state.lastPcmAtMs = 0L
+            // flush() rebases the track's frame counters and discards queued audio:
+            // restart our written-frame count and drop haptics scheduled for it.
+            state.writtenFrames = 0L
+            handler.post { engineOrNull()?.onTrackFlushed() }
+        }
         hook("release") { track, _ ->
             tracks.remove(track)
             handler.post {

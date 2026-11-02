@@ -1,6 +1,24 @@
 # Changes
 
-Current source version: **6.1.4**
+Current source version: **6.2.0**
+
+## 6.2.0
+
+### Playback-Clock Sync, Onset Timing, and Scheduler Fixes
+
+See `docs/SYNC_AND_TIMING.md`.
+
+- Haptics are scheduled against the AudioTrack playback clock (`getTimestamp`)
+  instead of firing when PCM is analysed; onsets carry an audible-time stamp.
+- Onset attack localised inside the analysis window (~1 ms instead of ~6 ms).
+- New "sync compensation" setting (global and per app, `sync_offset_ms`).
+- Fixed 45% of every beat's intensity coming from ~11 s old audio (FIFO head
+  read instead of newest frame).
+- `FrameRing` push/pop race fixed with compare-exchange.
+- JNI critical section no longer wraps DSP work; Hann table precomputed; scheduler
+  priority boost and stall resync; `flush()` clears pending haptics.
+- DSP ABI version 2 (`set_block_time`, `pop_onset_timed`, `latest_semantic`).
+- Untested on device: no Android/Rust toolchain was available for this change.
 
 ## 6.1.4
 

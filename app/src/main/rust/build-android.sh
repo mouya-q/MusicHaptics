@@ -114,6 +114,8 @@ fi
 MISSING=""
 for sym in mhx_engine_create mhx_engine_destroy mhx_engine_process \
            mhx_engine_pop_onset mhx_engine_pop_semantic mhx_engine_stats \
+           mhx_engine_set_block_time mhx_engine_pop_onset_timed \
+           mhx_engine_latest_semantic \
            mhx_abi_version mhx_self_test; do
   if ! grep -qw "$sym" "$NM_FILE"; then
     MISSING="$MISSING $sym"

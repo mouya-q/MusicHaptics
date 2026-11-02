@@ -28,7 +28,7 @@ static constexpr int MHX_TELEMETRY_LEN = 15;
 static_assert(MHX_TELEMETRY_LEN == 15, "telemetry layout changed; update engine.rs and Kotlin together");
 
 // ABI version. Bumped whenever a signature or the telemetry layout changes.
-static constexpr uint32_t MHX_DSP_ABI_VERSION = 1;
+static constexpr uint32_t MHX_DSP_ABI_VERSION = 2;
 
 // Create an engine at the given sample rate. Returns null only on allocation
 // failure. The sample rate is clamped internally, so a bogus value is harmless.
@@ -84,6 +84,22 @@ void mhx_engine_reset(MhxEngineHandle handle);
 
 // Pop one onset frame (4 floats: kick, snare, vocal, body). Returns 1 on success.
 int32_t mhx_engine_pop_onset(MhxEngineHandle handle, float* out);
+
+// ABI 2 -- playback-clock aware onsets.
+//
+// Declare when the NEXT sample passed to mhx_engine_process becomes audible, as a
+// CLOCK_MONOTONIC timestamp in nanoseconds (<= 0 means unknown). Call on the DSP
+// producer thread immediately before the matching mhx_engine_process.
+void mhx_engine_set_block_time(MhxEngineHandle handle, int64_t audible_ns);
+
+// Pop one onset frame plus the time it becomes audible (CLOCK_MONOTONIC ns, 0 when
+// the producer had no playback anchor). `out` receives 4 floats, `due_ns` one i64.
+int32_t mhx_engine_pop_onset_timed(MhxEngineHandle handle, float* out, int64_t* due_ns);
+
+// Newest semantic frame (5 floats), non-destructive. The FIFO behind
+// mhx_engine_pop_semantic returns the OLDEST retained frame (up to ~11 s old), so a
+// consumer that wants current loudness must use this instead.
+int32_t mhx_engine_latest_semantic(MhxEngineHandle handle, float* out);
 
 // Pop one semantic frame (5 floats: kick, snare, vocal, body, loudness).
 int32_t mhx_engine_pop_semantic(MhxEngineHandle handle, float* out);

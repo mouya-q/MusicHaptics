@@ -227,6 +227,7 @@ class HapticEngine(
     // from the beat-dispatch path on another thread.
     @Volatile private var activeOutputLevel: Float = 1.0f
     @Volatile private var activeBassBoost: Float = 1.0f
+    @Volatile private var activeSyncOffsetMs: Int = 0
     private val beatLogCounter = java.util.concurrent.atomic.AtomicLong(0L)
 
     private var udpSocket: DatagramSocket? = null
@@ -705,6 +706,13 @@ class HapticEngine(
             Log.i(TAG, msg)
             LogBroadcaster.sendLog(context, msg)
         }
+        if (beatCounter % 40 == 0L) {
+            nativeBridge.syncStats()?.let { st ->
+                val msg = "[SYNC] fired=${st[0]} lateDropped=${st[1]} untimed=${st[2]} trimMs=${activeSyncOffsetMs}"
+                Log.i(TAG, msg)
+                LogBroadcaster.sendLog(context, msg)
+            }
+        }
     }
 
 
@@ -871,6 +879,13 @@ class HapticEngine(
         activeStyle = style
         activeOutputLevel = outputAmp
         activeBassBoost = runCatching { prefs.getFloat("haptic_bass_boost", 1.6f) }.getOrDefault(1.6f).coerceIn(1f, 2.5f)
+        // Sync trim: how much earlier (+) or later (-) than the computed audible
+        // time the haptic fires. Stored as a float so the dashboard slider and
+        // the scoped per-app preferences use one representation.
+        val syncOffsetMs = runCatching { prefs.getFloat("sync_offset_ms", 0f) }
+            .getOrDefault(0f).let { if (it.isFinite()) it.coerceIn(-150f, 250f) else 0f }
+        activeSyncOffsetMs = syncOffsetMs.toInt()
+        nativeBridge.setSyncOffsetMs(activeSyncOffsetMs)
 
         nativeBridge.configure(
             sampleRate = sampleRate.toFloat(),
@@ -1078,48 +1093,61 @@ class HapticEngine(
 
     internal fun processPcm16FromHook(
         data: ShortArray, offset: Int, sampleCount: Int, channelCount: Int,
-        sourceSampleRateHz: Int = sampleRate
+        sourceSampleRateHz: Int = sampleRate,
+        audibleNs: Long = 0L
     ) {
         if (!isEngineEnabled.get()) return
         ensureIngressFormat(channelCount)
         resumeFromHook()
         markHookAudioArrival()
-        audioIngress.processPcm16(data, offset, sampleCount, channelCount, sourceSampleRateHz)
+        audioIngress.processPcm16(data, offset, sampleCount, channelCount, sourceSampleRateHz, audibleNs)
     }
 
     internal fun processPcmFloatFromHook(
         data: FloatArray, offsetFrames: Int, frameCount: Int, channelCount: Int,
-        sourceSampleRateHz: Int = sampleRate
+        sourceSampleRateHz: Int = sampleRate,
+        audibleNs: Long = 0L
     ) {
         if (!isEngineEnabled.get()) return
         ensureIngressFormat(channelCount)
         resumeFromHook()
         markHookAudioArrival()
-        audioIngress.processFloatPcm(data, offsetFrames, frameCount, channelCount, sourceSampleRateHz)
+        audioIngress.processFloatPcm(data, offsetFrames, frameCount, channelCount, sourceSampleRateHz, audibleNs)
     }
 
     internal fun processPcmBytesFromHook(
         data: ByteArray, offset: Int, byteCount: Int, channelCount: Int,
         encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT,
-        sourceSampleRateHz: Int = sampleRate
+        sourceSampleRateHz: Int = sampleRate,
+        audibleNs: Long = 0L
     ) {
         if (!isEngineEnabled.get()) return
         ensureIngressFormat(channelCount)
         resumeFromHook()
         markHookAudioArrival()
-        audioIngress.processPcmBytes(data, offset, byteCount, channelCount, encoding, sourceSampleRateHz)
+        audioIngress.processPcmBytes(data, offset, byteCount, channelCount, encoding, sourceSampleRateHz, audibleNs)
     }
 
     internal fun processPcmBufferFromHook(
         data: java.nio.ByteBuffer, startPosition: Int, byteCount: Int, channelCount: Int,
         encoding: Int = android.media.AudioFormat.ENCODING_PCM_16BIT,
-        sourceSampleRateHz: Int = sampleRate
+        sourceSampleRateHz: Int = sampleRate,
+        audibleNs: Long = 0L
     ) {
         if (!isEngineEnabled.get()) return
         ensureIngressFormat(channelCount)
         resumeFromHook()
         markHookAudioArrival()
-        audioIngress.processPcmBuffer(data, startPosition, byteCount, channelCount, encoding, sourceSampleRateHz)
+        audioIngress.processPcmBuffer(data, startPosition, byteCount, channelCount, encoding, sourceSampleRateHz, audibleNs)
+    }
+
+    /**
+     * The host flushed its AudioTrack (seek, track change). Audio queued before
+     * the flush will never be heard, so haptics scheduled for it must not fire.
+     */
+    internal fun onTrackFlushed() {
+        if (!isEngineEnabled.get()) return
+        nativeBridge.clearHapticBuffer()
     }
 
     private fun ensureIngressFormat(channelCount: Int) {

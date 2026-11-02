@@ -93,15 +93,25 @@ impl<T: Copy, const N: usize> FrameRing<T, N> {
     /// Push one frame. Never blocks, never allocates.
     pub fn push(&self, value: T) -> PushResult {
         let head = self.head.load(Ordering::Relaxed);
-        let tail = self.tail.load(Ordering::Acquire);
 
-        // Full when the consumer has not advanced far enough. Advancing `tail`
-        // here is safe: the consumer only ever reads slots below its own
-        // position, and skipping one means that frame is lost by definition.
-        if head.wrapping_sub(tail) >= N as u64 {
-            let new_tail = tail.wrapping_add(1);
-            self.tail.store(new_tail, Ordering::Release);
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+        // Full when the consumer has not advanced far enough. Evict the oldest
+        // frame with a compare-exchange: a plain store could overwrite a tail
+        // value the consumer published between our load and our store, handing
+        // the same frame out twice or skipping one.
+        loop {
+            let tail = self.tail.load(Ordering::Acquire);
+            if head.wrapping_sub(tail) < N as u64 {
+                break;
+            }
+            if self
+                .tail
+                .compare_exchange(tail, tail.wrapping_add(1), Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+            // The consumer popped first; re-evaluate with the fresh tail.
         }
 
         // SAFETY: this is the producer side, and there is only one producer.
@@ -115,16 +125,31 @@ impl<T: Copy, const N: usize> FrameRing<T, N> {
 
     /// Pop one frame, if any.
     pub fn pop(&self) -> Option<T> {
-        let tail = self.tail.load(Ordering::Relaxed);
-        let head = self.head.load(Ordering::Acquire);
-        if tail == head {
-            return None;
+        loop {
+            let tail = self.tail.load(Ordering::Acquire);
+            let head = self.head.load(Ordering::Acquire);
+            if tail == head {
+                return None;
+            }
+            // SAFETY: consumer side; the slot at `tail` was fully written before
+            // `head` was published with Release, observed here with Acquire. A
+            // producer that evicts this slot while we copy it can tear the
+            // value, so the copy only counts if the tail compare-exchange below
+            // proves the slot was still ours.
+            let value = unsafe {
+                core::ptr::read_volatile(
+                    (self.slots.get() as *const T).add((tail & Self::MASK) as usize),
+                )
+            };
+            if self
+                .tail
+                .compare_exchange(tail, tail.wrapping_add(1), Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(value);
+            }
+            // Evicted underneath us: discard the possibly torn copy and retry.
         }
-        // SAFETY: consumer side; the slot at `tail` was fully written before
-        // `head` was published with Release, observed here with Acquire.
-        let value = unsafe { (*self.slots.get())[(tail & Self::MASK) as usize] };
-        self.tail.store(tail.wrapping_add(1), Ordering::Release);
-        Some(value)
     }
 
     /// Pop up to `out.len()` frames, returning how many were written.

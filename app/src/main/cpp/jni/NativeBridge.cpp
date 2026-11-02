@@ -15,6 +15,7 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <cctype>
+#include <sys/resource.h>
 
 #define TAG "MHX-NDK"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
@@ -191,6 +192,52 @@ static int64_t monotonic_ms() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return static_cast<int64_t>(ts.tv_sec) * 1000L + ts.tv_nsec / 1000000L;
+}
+
+static int64_t monotonic_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000000000L + ts.tv_nsec;
+}
+
+// User-tunable sync trim in milliseconds. Positive values fire the haptic
+// earlier than the computed audible time (compensates a slow actuator path),
+// negative values later. The path latency estimate below is added on top.
+static std::atomic<int> g_sync_offset_ms{0};
+// Bumped by nativeClearHapticBuffer; the scheduler drops its pending timed
+// onsets when it observes a new generation (seek, pause, track change).
+static std::atomic<uint32_t> g_pending_clear_gen{0};
+// Diagnostics for the timed scheduler.
+static std::atomic<uint64_t> g_timed_fired{0};
+static std::atomic<uint64_t> g_timed_late_dropped{0};
+static std::atomic<uint64_t> g_timed_untimed{0};
+
+// Read the NEWEST semantic frame without consuming anything.
+//
+// The old scheduler called read_semantic_frame(), which pops the Rust FIFO. That
+// ring retains up to 512 frames (~11 s) and is only drained one frame per beat on
+// the waveform path, so the "45% continuous energy" term of every beat's intensity
+// came from music played many seconds earlier. Returns 0 when no PCM has reached
+// the DSP in the last 120 ms so callers still see "silence" as "no frame".
+static int read_latest_semantic(haptic::HapticEngine* engine,
+                                haptic::SemanticHapticFrame* out) {
+    if (!engine || !out) return 0;
+    auto* slot = static_cast<EngineSlot*>(engine);
+    const bool rustActive = slot->rust_ready.load(std::memory_order_acquire) &&
+                            slot->backend.load(std::memory_order_acquire) ==
+                                static_cast<int>(AnalysisBackend::Rust);
+    if (!rustActive) {
+        return engine->getSemanticFrames(out, 1);
+    }
+    const int64_t lastBlockMs = g_last_audio_block_ms.load(std::memory_order_acquire);
+    if (lastBlockMs <= 0 || monotonic_ms() - lastBlockMs > 120) return 0;
+    float frame[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    if (!mhx_engine_latest_semantic(slot->rust, frame)) return 0;
+    out[0].kickAmp = frame[0] * 255.0f;
+    out[0].snareAmp = frame[1] * 255.0f;
+    out[0].vocalAmp = frame[2] * 255.0f;
+    out[0].bodyAmp = frame[3] * 255.0f;
+    return 1;
 }
 
 static bool init_haptic_udp(int port) {
@@ -738,8 +785,35 @@ static void* scheduler_thread_func(void* arg) {
     float spring_k = 0.8f;
     float damping_c = 0.3f;
 
+    // Best effort: the scheduler paces a 5 ms actuator clock and must not be
+    // starved by UI work. Unprivileged apps may lower nice down to the RLIMIT.
+    if (setpriority(PRIO_PROCESS, 0, -12) != 0) {
+        LOGW("[DD] scheduler priority boost refused errno=%d", errno);
+    }
+
+    // Timed onset queue. Onsets arrive stamped with the monotonic time at which
+    // their audio becomes audible (AudioTrack playback anchor + localised attack).
+    // They are held here and released at (audible - path latency - user trim)
+    // instead of "as soon as the PCM was analysed", which on a buffered AudioTrack
+    // fires the haptic tens to thousands of milliseconds before the sound.
+    struct PendingOnset { float frame[4]; int64_t dueNs; };
+    constexpr int kPendingCap = 64;
+    constexpr int64_t kLateDropNs = 150000000LL;    // fired >150 ms late: stale, drop
+    constexpr int64_t kMaxHoldNs = 3000000000LL;    // anchor claims >3 s ahead: untrusted
+    PendingOnset pending[kPendingCap];
+    int pendingCount = 0;
+    uint32_t seenClearGen = g_pending_clear_gen.load(std::memory_order_acquire);
+
     while (g_scheduler_running.load(std::memory_order_acquire)) {
         ++schedulerFrameCounter;
+
+        {
+            const uint32_t gen = g_pending_clear_gen.load(std::memory_order_acquire);
+            if (gen != seenClearGen) {
+                seenClearGen = gen;
+                pendingCount = 0;
+            }
+        }
 
         
         
@@ -766,13 +840,60 @@ static void* scheduler_thread_func(void* arg) {
                                 slot->backend.load(std::memory_order_acquire) ==
                                     static_cast<int>(AnalysisBackend::Rust);
         if (rustActive) {
+            // Move everything the DSP has produced into the timed queue.
             float rustFrame[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-            if (mhx_engine_pop_onset(slot->rust, rustFrame)) {
-                onsetFrames[0].kick = rustFrame[0];
-                onsetFrames[0].snare = rustFrame[1];
-                onsetFrames[0].vocal = rustFrame[2];
-                onsetFrames[0].body = rustFrame[3];
-                onsetN = 1;
+            int64_t rustDueNs = 0;
+            while (pendingCount < kPendingCap &&
+                   mhx_engine_pop_onset_timed(slot->rust, rustFrame, &rustDueNs)) {
+                PendingOnset& dst = pending[pendingCount++];
+                std::copy(rustFrame, rustFrame + 4, dst.frame);
+                dst.dueNs = rustDueNs;
+            }
+
+            // Release at most one due onset per 5 ms tick, oldest first.
+            const int64_t releaseNowNs = monotonic_ns();
+            const int64_t pathLatencyNs = (use_direct_drive ? 10LL : 35LL) * 1000000LL;
+            const int64_t leadNs = pathLatencyNs +
+                static_cast<int64_t>(g_sync_offset_ms.load(std::memory_order_relaxed)) * 1000000LL;
+            int consumed = 0;
+            while (consumed < pendingCount && onsetN == 0) {
+                const PendingOnset& head = pending[consumed];
+                bool release = false;
+                if (head.dueNs <= 0) {
+                    // No playback anchor for this block: legacy "fire now".
+                    release = true;
+                    g_timed_untimed.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    const int64_t fireAtNs = head.dueNs - leadNs;
+                    const int64_t waitNs = fireAtNs - releaseNowNs;
+                    if (waitNs > kMaxHoldNs) {
+                        // Implausible anchor (clock mix-up or a stalled track):
+                        // never go silent because of it, fire immediately.
+                        release = true;
+                        g_timed_untimed.fetch_add(1, std::memory_order_relaxed);
+                    } else if (waitNs > 0) {
+                        break;  // not due yet; everything behind it is later
+                    } else if (-waitNs > kLateDropNs) {
+                        ++consumed;  // missed its moment; skip, look at the next
+                        g_timed_late_dropped.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    } else {
+                        release = true;
+                        g_timed_fired.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+                if (release) {
+                    onsetFrames[0].kick = head.frame[0];
+                    onsetFrames[0].snare = head.frame[1];
+                    onsetFrames[0].vocal = head.frame[2];
+                    onsetFrames[0].body = head.frame[3];
+                    onsetN = 1;
+                    ++consumed;
+                }
+            }
+            if (consumed > 0) {
+                for (int i = consumed; i < pendingCount; ++i) pending[i - consumed] = pending[i];
+                pendingCount -= consumed;
             }
         } else {
             onsetN = engine->getOnsetFrames(onsetFrames, 1);
@@ -811,7 +932,7 @@ static void* scheduler_thread_func(void* arg) {
                     // alone only captures the momentary spike, not the overall
                     // volume of the music at that point.
                     haptic::SemanticHapticFrame semFr[1] = {};
-                    const int semN = read_semantic_frame(engine, semFr, 1);
+                    const int semN = read_latest_semantic(engine, semFr);
                     float rmsEnergy = 0.0f;
                     if (semN > 0) {
                         rmsEnergy = std::clamp(
@@ -923,7 +1044,7 @@ static void* scheduler_thread_func(void* arg) {
             g_direct_driver_kind.load(std::memory_order_acquire) == static_cast<int>(DirectDriverKind::StrikeOnly) &&
             !strikeEnvelopeActive && (schedulerFrameCounter % 4) == 0) {
             haptic::SemanticHapticFrame texFrames[1];
-            const int texN = read_semantic_frame(engine, texFrames, 1);
+            const int texN = read_latest_semantic(engine, texFrames);
             if (texN > 0) {
                 const float texEnergy =
                       texFrames[0].kickAmp  * 0.45f
@@ -999,7 +1120,7 @@ static void* scheduler_thread_func(void* arg) {
 
             if (!strikeOnlyDriver) {
                 haptic::SemanticHapticFrame semFrames[1];
-                const int semN = read_semantic_frame(engine, semFrames, 1);
+                const int semN = read_latest_semantic(engine, semFrames);
 
                 float continuous = 0.0f;
                 if (semN > 0) {
@@ -1075,6 +1196,19 @@ static void* scheduler_thread_func(void* arg) {
         if (nextWake.tv_nsec >= 1000000000L) {
             nextWake.tv_sec++;
             nextWake.tv_nsec -= 1000000000L;
+        }
+        // If the thread was descheduled for long, an absolute-time sleep returns
+        // immediately for every missed tick and the strike envelope (which counts
+        // ticks, not time) would play back compressed. Resynchronise instead.
+        {
+            struct timespec nowTs;
+            clock_gettime(CLOCK_MONOTONIC, &nowTs);
+            const int64_t behindNs =
+                (static_cast<int64_t>(nowTs.tv_sec) - nextWake.tv_sec) * 1000000000LL +
+                (static_cast<int64_t>(nowTs.tv_nsec) - nextWake.tv_nsec);
+            if (behindNs > 20000000LL) {
+                nextWake = nowTs;
+            }
         }
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &nextWake, nullptr);
     }
@@ -1285,7 +1419,7 @@ Java_com_mouya_musichaptics_NativeBridge_nativeConfigureProfile(
 JNIEXPORT void JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
     JNIEnv* env, jobject thiz, jlong ptr, jobject directInputBuffer, jint size,
-    jfloat sampleRateHz, jfloatArray outTelemetry) {
+    jfloat sampleRateHz, jfloatArray outTelemetry, jlong audibleNs) {
 
     auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
     if (!engine || !directInputBuffer || !outTelemetry) return;
@@ -1300,8 +1434,13 @@ Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
     std::unique_lock<std::mutex> rustLock(slot->rustProducerMutex, std::defer_lock);
     if (useRust) rustLock.lock();
 
-    jfloat* telemetry = static_cast<jfloat*>(env->GetPrimitiveArrayCritical(outTelemetry, nullptr));
-    if (!telemetry) return;
+    // Work in a local buffer and publish with SetFloatArrayRegion. The previous
+    // code held GetPrimitiveArrayCritical (which suspends GC and forbids other JNI
+    // calls) across the whole DSP call, GetArrayLength and logging.
+    const jsize outLength = env->GetArrayLength(outTelemetry);
+    float localTelemetry[64];
+    std::fill_n(localTelemetry, 64, 0.0f);
+    float* telemetry = localTelemetry;
     const float safeRate = std::clamp(
         std::isfinite(sampleRateHz) ? sampleRateHz : 48000.0f,
         8000.0f, 384000.0f);
@@ -1326,10 +1465,12 @@ Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
         // the Rust indices masquerade as the C++ indices (which left onsets
         // 20..23 stuck at zero in the dashboard).
         float rustTelemetry[MHX_TELEMETRY_LEN] = {};
+        // Playback anchor for the first sample of this block (0 = unknown). Must
+        // precede process() so the onsets found in this block are stamped.
+        mhx_engine_set_block_time(slot->rust, static_cast<int64_t>(audibleNs));
         mhx_engine_process(slot->rust, inputPtr, size, rustTelemetry);
 
-        const jsize outLength = env->GetArrayLength(outTelemetry);
-        std::fill_n(telemetry, outLength, 0.0f);
+        std::fill_n(telemetry, 64, 0.0f);
         const float kick = rustTelemetry[7];
         const float snare = rustTelemetry[8];
         const float vocal = rustTelemetry[9];
@@ -1361,7 +1502,8 @@ Java_com_mouya_musichaptics_NativeBridge_nativeProcessAudioDirect(
         engine->processAudioBlock(inputPtr, size, telemetry);
     }
 
-    env->ReleasePrimitiveArrayCritical(outTelemetry, telemetry, 0);
+    const jsize publishCount = std::min<jsize>(outLength, 64);
+    if (publishCount > 0) env->SetFloatArrayRegion(outTelemetry, 0, publishCount, localTelemetry);
     g_last_audio_block_ms.store(monotonic_ms(), std::memory_order_release);
 }
 
@@ -1382,6 +1524,7 @@ JNIEXPORT void JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeClearHapticBuffer(
     JNIEnv* env, jobject thiz, jlong ptr) {
     auto* engine = reinterpret_cast<haptic::HapticEngine*>(ptr);
+    g_pending_clear_gen.fetch_add(1, std::memory_order_acq_rel);
     if (engine) {
         engine->clearHapticBuffer();
         auto* slot = static_cast<EngineSlot*>(engine);
@@ -1391,6 +1534,28 @@ Java_com_mouya_musichaptics_NativeBridge_nativeClearHapticBuffer(
         }
     }
 }
+// User sync trim in milliseconds (positive = haptic earlier). Clamped so a bad
+// preference cannot push events minutes into the future or past.
+JNIEXPORT void JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeSetSyncOffsetMs(
+    JNIEnv*, jobject, jint offsetMs) {
+    g_sync_offset_ms.store(std::clamp<int>(static_cast<int>(offsetMs), -150, 250),
+                           std::memory_order_relaxed);
+}
+
+// out[0]=fired on time, out[1]=dropped late, out[2]=fired without an anchor.
+JNIEXPORT void JNICALL
+Java_com_mouya_musichaptics_NativeBridge_nativeSyncStats(
+    JNIEnv* env, jobject, jlongArray out) {
+    if (!out || env->GetArrayLength(out) < 3) return;
+    const jlong values[3] = {
+        static_cast<jlong>(g_timed_fired.load(std::memory_order_relaxed)),
+        static_cast<jlong>(g_timed_late_dropped.load(std::memory_order_relaxed)),
+        static_cast<jlong>(g_timed_untimed.load(std::memory_order_relaxed)),
+    };
+    env->SetLongArrayRegion(out, 0, 3, values);
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeStartScheduler(
     JNIEnv* env, jobject thiz, jlong ptr) {

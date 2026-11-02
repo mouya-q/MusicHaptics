@@ -8,9 +8,20 @@
     native <methods>;
 }
 # Callbacks invoked from native code via cached jmethodIDs
+# The signatures must match the descriptors C++ passes to GetMethodID exactly:
+#   onBeatTrigger      "(Ljava/lang/String;IZ)V"
+#   onRootPipeTrigger  "(II)V"
+# A stale rule here lets R8 delete the (otherwise unreferenced) method, GetMethodID
+# then fails and the native scheduler silently disables all event output in
+# release builds. scripts/repo_check.py enforces this.
 -keepclassmembers class com.mouya.musichaptics.NativeBridge {
-    void onBeatTrigger(java.lang.String, int);
+    void onBeatTrigger(java.lang.String, int, boolean);
     void onRootPipeTrigger(int, int);
+}
+
+# ── Root haptic server: launched by `su -c app_process ... RootHapticServer` ──
+-keep class com.mouya.musichaptics.RootHapticServer {
+    public static void main(java.lang.String[]);
 }
 
 # ── Xposed / LSPosed APIs (compileOnly + bundled AARs) ──

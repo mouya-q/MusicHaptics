@@ -158,6 +158,8 @@ static struct sockaddr_in g_udp_daemon_addr;
 // a single ECONNREFUSED is enough to condemn it.
 static std::atomic<int> g_udp_peer_state{0};
 static std::atomic<int> g_udp_probe_count{0};
+// When the receiver was last condemned; lets a restarted daemon be rediscovered.
+static std::atomic<int64_t> g_udp_dead_since_ns{0};
 
 
 #pragma pack(push, 1)
@@ -318,6 +320,7 @@ static bool send_haptic_udp(uint8_t amplitude, uint16_t durationMs, uint8_t flag
         // the engine stops believing direct drive works and falls back to its
         // own vibration path instead of going silent.
         if (errno == ECONNREFUSED || errno == EPIPE || errno == ENOTCONN) {
+            g_udp_dead_since_ns.store(monotonic_ns(), std::memory_order_release);
             g_udp_peer_state.store(2, std::memory_order_release);
         }
         return false;
@@ -515,6 +518,61 @@ static float onset_intensity_curve(float normalized) {
     if (!std::isfinite(normalized)) return 0.0f;
     const float expanded = std::clamp((normalized - 0.08f) / (0.70f - 0.08f), 0.0f, 1.0f);
     return std::pow(expanded, 0.80f);
+}
+
+// One verification step for the UDP transport. Reports a *verified* receiver, not
+// merely a live socket.
+//
+// A connect()ed loopback UDP socket cannot be validated with a single send: the
+// first sendto always succeeds and the ICMP port-unreachable raised when nothing
+// is bound to the daemon port only surfaces on the *following* call. Two clean
+// probes are therefore required before the transport is trusted.
+//
+// Condemnation used to be permanent ("a dead daemon never comes back without a
+// re-init"), so one beat sent while the old nc-based daemon was between packets
+// disabled direct drive until the player was restarted. A condemned transport is
+// now re-probed after two seconds, which also covers the server being started
+// after the hooked app (it is launched by the module process, not by the app).
+// Probes carry duration 0 / amplitude 0, which the server ignores.
+static bool udp_probe_step() {
+    if (!g_use_udp_haptic.load(std::memory_order_acquire)) return false;
+    const int fd = g_udp_sock_fd.load(std::memory_order_acquire);
+    if (fd < 0) return false;
+
+    if (g_udp_peer_state.load(std::memory_order_acquire) == 2) {
+        const int64_t deadSince = g_udp_dead_since_ns.load(std::memory_order_acquire);
+        if (monotonic_ns() - deadSince < 2000000000LL) return false;
+        g_udp_probe_count.store(0, std::memory_order_relaxed);
+        g_udp_peer_state.store(0, std::memory_order_release);
+    }
+
+    HapticUdpPacket probe{};
+    probe.magic = MHX_UDP_MAGIC;
+    probe.version = MHX_UDP_VERSION;
+    probe.durationMs = 0;
+    probe.amplitude = 0;
+    probe.flags = 0;
+
+    errno = 0;
+    const ssize_t written = sendto(
+        fd, &probe, sizeof(probe), MSG_DONTWAIT,
+        reinterpret_cast<const sockaddr*>(&g_udp_daemon_addr), sizeof(g_udp_daemon_addr));
+    const int err = errno;
+
+    if (written != static_cast<ssize_t>(sizeof(probe)) ||
+        err == ECONNREFUSED || err == EPIPE || err == ENOTCONN) {
+        g_udp_dead_since_ns.store(monotonic_ns(), std::memory_order_release);
+        g_udp_peer_state.store(2, std::memory_order_release);
+        LOGI("[UDP] peer probe failed (errno=%d) -> transport marked dead, will re-probe", err);
+        return false;
+    }
+
+    const int probes = g_udp_probe_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (probes >= 2) {
+        const int prev = g_udp_peer_state.exchange(1, std::memory_order_acq_rel);
+        if (prev != 1) LOGI("[UDP] peer verified alive after %d probes", probes);
+    }
+    return g_udp_peer_state.load(std::memory_order_acquire) == 1;
 }
 
 // Whether the UDP transport is initialised and its receiver has been verified.
@@ -810,6 +868,15 @@ static void* scheduler_thread_func(void* arg) {
 
     while (g_scheduler_running.load(std::memory_order_acquire)) {
         ++schedulerFrameCounter;
+
+        // Keep looking for the root haptic server while it is unverified or lost.
+        // It is started by the module process, possibly after this app, and may be
+        // restarted at any time; a fixed one-shot probe at init missed all of that.
+        if ((schedulerFrameCounter % 50) == 0 &&
+            g_use_udp_haptic.load(std::memory_order_acquire) &&
+            g_udp_peer_state.load(std::memory_order_acquire) != 1) {
+            udp_probe_step();
+        }
 
         {
             const uint32_t gen = g_pending_clear_gen.load(std::memory_order_acquire);
@@ -1762,45 +1829,7 @@ Java_com_mouya_musichaptics_NativeBridge_nativeTestUdpHaptic(JNIEnv*, jobject) {
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeIsUdpHapticReady(JNIEnv*, jobject) {
-    // Reports a transport with a *verified* receiver, not merely a live socket.
-    //
-    // A connect()ed loopback UDP socket cannot be validated with a single send:
-    // the first sendto always succeeds and the ICMP port-unreachable raised when
-    // nothing is bound to the daemon port only surfaces on the *following* call.
-    // Two clean probes are therefore required before the transport is trusted,
-    // which is exactly the difference between "a socket exists" (always true,
-    // even with su refused and no daemon) and "someone is reading the packets".
-    if (!g_use_udp_haptic.load(std::memory_order_acquire)) return JNI_FALSE;
-    const int fd = g_udp_sock_fd.load(std::memory_order_acquire);
-    if (fd < 0) return JNI_FALSE;
-    // 2 = already condemned; a dead daemon never comes back without a re-init.
-    if (g_udp_peer_state.load(std::memory_order_acquire) == 2) return JNI_FALSE;
-
-    HapticUdpPacket probe{};
-    probe.magic = MHX_UDP_MAGIC;
-    probe.version = MHX_UDP_VERSION;
-    probe.durationMs = 0;
-    probe.amplitude = 0;
-    probe.flags = 0;
-
-    errno = 0;
-    const ssize_t written = sendto(
-        fd, &probe, sizeof(probe), MSG_DONTWAIT,
-        reinterpret_cast<const sockaddr*>(&g_udp_daemon_addr), sizeof(g_udp_daemon_addr));
-
-    if (written != sizeof(probe) ||
-        errno == ECONNREFUSED || errno == EPIPE || errno == ENOTCONN) {
-        g_udp_peer_state.store(2, std::memory_order_release);
-        LOGI("[UDP] peer probe failed (errno=%d) -> transport confirmed dead", errno);
-        return JNI_FALSE;
-    }
-
-    const int probes = g_udp_probe_count.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (probes >= 2) {
-        const int prev = g_udp_peer_state.exchange(1, std::memory_order_acq_rel);
-        if (prev != 1) LOGI("[UDP] peer verified alive after %d probes", probes);
-    }
-    return g_udp_peer_state.load(std::memory_order_acquire) == 1 ? JNI_TRUE : JNI_FALSE;
+    return udp_probe_step() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL

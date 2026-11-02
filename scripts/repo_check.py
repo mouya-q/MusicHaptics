@@ -163,6 +163,26 @@ if workflow.exists():
     if "cargo test" not in wf:
         errors.append("CI workflow does not run the Rust tests")
 
+# R8 must keep every Kotlin method the native code looks up by name. A stale
+# signature in the keep rule lets R8 delete the method and GetMethodID then fails
+# at runtime, which silently disabled all haptic events in release builds.
+_cpp = (ROOT / "app/src/main/cpp/jni/NativeBridge.cpp").read_text(encoding="utf-8", errors="ignore")
+_pro = (ROOT / "app/proguard-rules.pro").read_text(encoding="utf-8", errors="ignore")
+_jtypes = {"V": "void", "I": "int", "Z": "boolean", "J": "long", "F": "float", "D": "double"}
+def _java_sig(desc):
+    args, ret = re.match(r"\((.*)\)(.*)", desc).groups()
+    out, i = [], 0
+    while i < len(args):
+        if args[i] == "L":
+            j = args.index(";", i); out.append(args[i + 1:j].replace("/", ".")); i = j + 1
+        else:
+            out.append(_jtypes[args[i]]); i += 1
+    return _jtypes.get(ret, ret), ", ".join(out)
+for name, desc in re.findall(r'GetMethodID\([^,]+,\s*"(\w+)",\s*"([^"]+)"\)', _cpp):
+    ret, params = _java_sig(desc)
+    if f"{ret} {name}({params});" not in _pro:
+        errors.append(f"proguard-rules.pro lacks a keep rule for JNI callback: {ret} {name}({params});")
+
 if errors:
     print("repository check failed")
     for error in errors: print("-", error)

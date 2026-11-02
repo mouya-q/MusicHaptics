@@ -31,7 +31,13 @@ class ConfigProvider : ContentProvider() {
         )
     }
 
-    override fun onCreate(): Boolean = true
+    override fun onCreate(): Boolean {
+        // Providers are created with the module process. Hooked apps reach this
+        // process through the provider, so playback starting is what brings the
+        // root haptic server up (root is granted to the module, not to the player).
+        context?.let { RootHapticDaemon.ensureRunningAsync(it) }
+        return true
+    }
 
     private fun isModuleCaller(caller: String?): Boolean {
         if (caller == null) return false
@@ -56,6 +62,9 @@ class ConfigProvider : ContentProvider() {
             if (caller != targetPackage) return null
             if (!WhitelistManager().isPackageAllowed(caller)) return null
         }
+
+        // Cheap when the server is already up; throttled retry otherwise.
+        RootHapticDaemon.ensureRunningAsync(ctx)
 
         val globalPrefs = ctx.getSharedPreferences("haptics_config", Context.MODE_PRIVATE)
         return when (method) {

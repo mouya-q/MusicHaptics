@@ -1,6 +1,21 @@
 # Changes
 
-Current source version: **6.2.2**
+Current source version: **6.3.0**
+
+## 6.3.0
+
+### Root direct drive that actually runs; release-build beat callback
+
+See `docs/ROOT_DIRECT_DRIVE.md`.
+
+- R8 keep rule for `onBeatTrigger` had the old 2-argument signature; release
+  builds could delete the method the native scheduler calls, disabling every
+  haptic event. Rule fixed and enforced by `scripts/repo_check.py`.
+- New persistent `RootHapticServer` (via `su -c app_process`) replaces the
+  per-packet `nc | dd | od | expr` shell loop. It is started from the module
+  process when a hooked app reads its config, not only when the UI is opened.
+- Native UDP transport re-probes a lost receiver instead of giving up for good.
+- Untested on device: no Android/Rust toolchain was available for this change.
 
 ## 6.2.2
 

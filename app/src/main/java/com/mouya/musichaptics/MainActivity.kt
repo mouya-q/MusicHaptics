@@ -32,43 +32,11 @@ class MainActivity : ComponentActivity() {
             // silently fell back to DEFAULT and the actuator matching work was
             // effectively dead code.
             runCatching { RootHardwareProbe.probeAndPersist(this) }
-            if (runCatching { RootHardwareProbe.hasRootAccess() }.getOrDefault(false)) {
-                runCatching { startRootHapticDaemon() }
-            }
+            runCatching { RootHapticDaemon.ensureRunning(this) }
             runCatching { NativeBridge.preloadLibrary(this) }
         }.start()
 
         startActivity(Intent(this, HapticDashboardActivity::class.java))
         finish()
-    }
-
-
-    private fun startRootHapticDaemon() {
-        try {
-            
-            val nodes = getSharedPreferences("haptics_config", Context.MODE_PRIVATE).getString(RootHardwareProbe.PREF_DIRECT_DRIVE_NODES, null)
-            if (nodes.isNullOrBlank()) {
-                Log.w("MainActivity", "No cached direct drive nodes, skipping daemon start")
-                return
-            }
-
-            val paths = nodes.split(",").filter { it.isNotBlank() }
-            val activatePath = paths.firstOrNull()?.trim() ?: return
-            val dirPath = activatePath.substringBeforeLast('/')
-            var amplitudePath: String? = null
-            for (ampName in listOf("gain", "amplitude", "index_value")) {
-                val candidate = "$dirPath/$ampName"
-                if (java.io.File(candidate).exists()) {
-                    amplitudePath = candidate
-                    break
-                }
-            }
-
-            Log.i("MainActivity", "Starting RootHapticDaemon: activate=$activatePath amp=$amplitudePath")
-            val started = RootHapticDaemon.start(this, activatePath, amplitudePath)
-            Log.i("MainActivity", "RootHapticDaemon started: $started")
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Failed to start RootHapticDaemon: ${e.message}", e)
-        }
     }
 }

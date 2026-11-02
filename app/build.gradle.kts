@@ -30,8 +30,8 @@ android {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
         targetSdk = 35
-        versionCode = 60202
-        versionName = "6.2.2"
+        versionCode = 60300
+        versionName = "6.3.0"
         ndkVersion = "27.0.12077973"
 
 

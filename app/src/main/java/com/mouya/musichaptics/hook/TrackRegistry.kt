@@ -36,7 +36,9 @@ class TrackRegistry {
          * flushed. Lines up with [AudioTrack.getTimestamp]'s frame position, which
          * counts frames presented since the same events.
          */
-        @Volatile var writtenFrames: Long = 0L
+        @Volatile var writtenFrames: Long = 0L,
+        /** Audible time of frame [writtenFrames], sampled when write() was entered. */
+        @Volatile var pendingAudibleNs: Long = 0L
     ) {
         /** Reused for every [AudioTrack.getTimestamp] call; one writer thread per track. */
         internal val timestamp = android.media.AudioTimestamp()
@@ -72,27 +74,25 @@ class TrackRegistry {
     fun state(track: AudioTrack): TrackState? = states[track]
 
     /**
-     * CLOCK_MONOTONIC nanoseconds at which the first of the [frames] frames the
-     * track has just accepted becomes audible, or 0 when it cannot be determined.
+     * Sample the audible time of the next frame the track will accept, BEFORE
+     * `write()` runs, and remember it in [TrackState.pendingAudibleNs].
      *
-     * `AudioTrack.write` returns as soon as the frames are copied into the track
-     * buffer, which can be tens of milliseconds (small buffers) or seconds (large
-     * float writes) before they are heard. Firing a haptic when the PCM is
-     * analysed therefore leads the sound by exactly that queue depth. The
-     * timestamp pair (frame position, nano time) the audio HAL reports already
-     * includes the buffer and the output pipeline, so
+     * It has to be sampled on entry. A blocking write of a large block (Kugou
+     * writes 1 s of float PCM) returns only after the whole block was copied into
+     * the track buffer, i.e. after most of it has already been played; computing
+     * the anchor on return puts the block start hundreds of ms in the past and
+     * every onset in it looks late. On entry, the queue depth is what it really
+     * is for the first frame, and the rest follows at the sample rate.
      *
-     *     audible(F) = ts.nanoTime + (F - ts.framePosition) / sampleRate
-     *
-     * for any later frame F. The result is checked for plausibility; any
-     * inconsistency returns 0 so the native side falls back to the old
-     * fire-immediately behaviour instead of scheduling garbage.
+     * Audible time of frame F: `ts.nanoTime + (F - ts.framePosition) / rate`.
+     * Implausible results become 0 ("unknown"), which makes the native scheduler
+     * fall back to firing immediately.
      */
-    fun audibleNsForWrite(track: AudioTrack, state: TrackState, frames: Int): Long {
+    fun anchorBeforeWrite(track: AudioTrack, state: TrackState) {
+        state.pendingAudibleNs = 0L
         val rate = state.sampleRate
-        if (rate <= 0 || frames <= 0) return 0L
+        if (rate <= 0) return
         val firstFrame = state.writtenFrames
-        state.writtenFrames = firstFrame + frames
         val nowNs = System.nanoTime()
 
         val ts = state.timestamp
@@ -103,23 +103,29 @@ class TrackRegistry {
             audible = ts.nanoTime + (firstFrame - ts.framePosition) * 1_000_000_000L / rate
             presentedNow = ts.framePosition + (nowNs - ts.nanoTime) * rate / 1_000_000_000L
         } else {
-            // No timestamp yet (start-up, some offload paths): use the playback
-            // head and an assumed fast-mixer + HAL latency. Coarser, but far
-            // closer to the truth than "now".
-            val head = try { track.playbackHeadPosition.toLong() and 0xFFFFFFFFL } catch (_: Throwable) { return 0L }
+            // No timestamp yet (start-up, some offload paths): playback head plus
+            // an assumed fast-mixer + HAL latency. Coarser, still far better than "now".
+            val head = try { track.playbackHeadPosition.toLong() and 0xFFFFFFFFL } catch (_: Throwable) { return }
             presentedNow = head
             audible = nowNs + (firstFrame - head) * 1_000_000_000L / rate + ASSUMED_OUTPUT_LATENCY_NS
         }
 
-        // Plausibility: the first frame of a write cannot be audible more than a
-        // few seconds before or after "now". Anything else means our frame counter
-        // and the track's disagree (flush/stop re-basing, a restarted track).
         val leadNs = audible - nowNs
         if (leadNs < -MAX_PAST_LEAD_NS || leadNs > MAX_FUTURE_LEAD_NS) {
-            state.writtenFrames = (presentedNow + frames).coerceAtLeast(frames.toLong())
-            return 0L
+            // Our frame counter and the track's disagree (flush/stop re-basing, a
+            // restarted track). Re-base on the track's own position.
+            state.writtenFrames = presentedNow.coerceAtLeast(0L)
+            return
         }
-        return audible
+        state.pendingAudibleNs = audible
+    }
+
+    /** Account for [frames] accepted by the write and return its audible-time anchor (0 = unknown). */
+    fun commitWrite(state: TrackState, frames: Int): Long {
+        val anchor = state.pendingAudibleNs
+        state.pendingAudibleNs = 0L
+        if (frames > 0) state.writtenFrames += frames
+        return if (frames > 0) anchor else 0L
     }
 
     fun remove(track: AudioTrack) {

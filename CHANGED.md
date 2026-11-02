@@ -1,6 +1,14 @@
 # Changes
 
-Current source version: **6.2.0**
+Current source version: **6.2.2**
+
+## 6.2.2
+
+- Beat intensity: the continuous-energy term (45% of the mix) was clamped from a
+  0..255-scaled value and therefore always 1.0; it is normalised now, so loud
+  passages are actually stronger than quiet ones.
+- Confirm the `[System Ready]` line shows v6.2.2 and a `[CHAIN]` line appears
+  every 2 s; logs without it come from an older build.
 
 ## 6.2.0
 
@@ -18,6 +26,14 @@ See `docs/SYNC_AND_TIMING.md`.
 - JNI critical section no longer wraps DSP work; Hann table precomputed; scheduler
   priority boost and stall resync; `flush()` clears pending haptics.
 - DSP ABI version 2 (`set_block_time`, `pop_onset_timed`, `latest_semantic`).
+- Anchor is sampled when `write()` is entered, not when it returns: a blocking
+  1 s write returns after most of the block was played, which made every onset
+  look hundreds of ms late. Late-drop failsafe: 6 consecutive late onsets switch
+  the scheduler to fire-immediately for 2 s.
+- Onset activation is weighted by the ratio to the band's recent peak; it was
+  saturating at 0.93-0.99 on nearly every hit.
+- New `[CHAIN]` log line every 2 s (timed fired / late-dropped / untimed, Kotlin
+  beat count, paused/enabled flags).
 - Untested on device: no Android/Rust toolchain was available for this change.
 
 ## 6.1.4

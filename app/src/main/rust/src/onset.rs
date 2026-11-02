@@ -321,7 +321,15 @@ impl OnsetDetector {
         // which is what flattened every strike to peak=255 before.
         let value = raw[band];
         let excess = (value - threshold).max(0.0);
-        let activation = (excess / (threshold.max(1e-6) + excess)).clamp(0.0, 1.0);
+        let squash = excess / (threshold.max(1e-6) + excess);
+        // The squash alone saturates: the adaptive gate sits near the noise floor
+        // (0.01-0.03) while real flux is 0.05-0.3, so nearly every hit reported
+        // 0.93-0.99 (see the 6.2.0 Kugou trace) and loud/soft hits felt identical.
+        // Weight the hit by its ratio to the band's recent peak so a ghost note
+        // really is weaker than the downbeat.
+        let peak = self.stats[band].peak;
+        let relative = if peak > 1.0e-6 { (value / peak).clamp(0.0, 1.0) } else { 1.0 };
+        let activation = (0.25 * squash + 0.75 * relative).clamp(0.0, 1.0);
 
         Some(Onset { event, activation, threshold })
     }

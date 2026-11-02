@@ -249,6 +249,8 @@ class HookCoordinator(
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val track = param.thisObject as? AudioTrack ?: return
                     val state = tracks.state(track) ?: return
+                    // Sample the playback clock before write() blocks (see TrackRegistry).
+                    runCatching { tracks.anchorBeforeWrite(track, state) }
                     val input = param.args.firstOrNull() as? ByteBuffer ?: run {
                         state.initialByteBufferPosition = -1
                         state.pendingByteSnapshot = null
@@ -283,23 +285,9 @@ class HookCoordinator(
                     state.lastWriteBytes = result
                     lastAudioWriteAtMs = now
 
-                    if (!packageAllowed) return
-                    // P1: never run DSP on the host audio thread. Snapshot args
-                    // and hand off to the Hook HandlerThread; AudioIngress queues.
-                    val snapshot: Any? = when (val input = param.args.firstOrNull()) {
-                        is ShortArray -> input.clone()
-                        is FloatArray -> input.clone()
-                        is ByteArray -> input.clone()
-                        // ByteBuffer: use the copy taken in beforeHookedMethod.
-                        // Re-reading it here is useless because write() has
-                        // already advanced the position to its limit.
-                        is ByteBuffer -> state.pendingByteSnapshot
-                        else -> null
-                    } ?: return
-                    val offsetArg = (param.args.getOrNull(1) as? Int) ?: 0
-                    // When will the first frame of THIS write be heard? Computed on the
-                    // host audio thread, right after write() returned, because that is
-                    // where the track's timestamp and queue depth are meaningful.
+                    // Account for this write and pick up the audible-time anchor sampled when
+                    // write() was entered (see TrackRegistry.anchorBeforeWrite). Done here, before
+                    // any early return, so the frame counter never drifts.
                     val writtenFrames = when (param.args.firstOrNull()) {
                         is FloatArray, is ShortArray -> result / state.channels.coerceAtLeast(1)
                         is ByteArray, is ByteBuffer -> {
@@ -315,8 +303,22 @@ class HookCoordinator(
                         }
                         else -> 0
                     }
-                    val audibleNs = runCatching { tracks.audibleNsForWrite(track, state, writtenFrames) }
+                    val audibleNs = runCatching { tracks.commitWrite(state, writtenFrames) }
                         .getOrDefault(0L)
+                    if (!packageAllowed) return
+                    // P1: never run DSP on the host audio thread. Snapshot args
+                    // and hand off to the Hook HandlerThread; AudioIngress queues.
+                    val snapshot: Any? = when (val input = param.args.firstOrNull()) {
+                        is ShortArray -> input.clone()
+                        is FloatArray -> input.clone()
+                        is ByteArray -> input.clone()
+                        // ByteBuffer: use the copy taken in beforeHookedMethod.
+                        // Re-reading it here is useless because write() has
+                        // already advanced the position to its limit.
+                        is ByteBuffer -> state.pendingByteSnapshot
+                        else -> null
+                    } ?: return
+                    val offsetArg = (param.args.getOrNull(1) as? Int) ?: 0
                     handler.post {
                         val target = engineOrNull() ?: return@post
                         target.markHookAudioArrival(now)

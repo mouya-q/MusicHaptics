@@ -803,6 +803,10 @@ static void* scheduler_thread_func(void* arg) {
     PendingOnset pending[kPendingCap];
     int pendingCount = 0;
     uint32_t seenClearGen = g_pending_clear_gen.load(std::memory_order_acquire);
+    // Failsafe: if anchors are systematically wrong (every onset "late") the
+    // haptics would go silent. After a run of late drops, ignore anchors for 2 s.
+    int consecutiveLate = 0;
+    int64_t ignoreAnchorsUntilNs = 0;
 
     while (g_scheduler_running.load(std::memory_order_acquire)) {
         ++schedulerFrameCounter;
@@ -859,8 +863,8 @@ static void* scheduler_thread_func(void* arg) {
             while (consumed < pendingCount && onsetN == 0) {
                 const PendingOnset& head = pending[consumed];
                 bool release = false;
-                if (head.dueNs <= 0) {
-                    // No playback anchor for this block: legacy "fire now".
+                if (head.dueNs <= 0 || releaseNowNs < ignoreAnchorsUntilNs) {
+                    // No (or distrusted) playback anchor: legacy "fire now".
                     release = true;
                     g_timed_untimed.fetch_add(1, std::memory_order_relaxed);
                 } else {
@@ -876,8 +880,14 @@ static void* scheduler_thread_func(void* arg) {
                     } else if (-waitNs > kLateDropNs) {
                         ++consumed;  // missed its moment; skip, look at the next
                         g_timed_late_dropped.fetch_add(1, std::memory_order_relaxed);
+                        if (++consecutiveLate >= 6) {
+                            ignoreAnchorsUntilNs = releaseNowNs + 2000000000LL;
+                            consecutiveLate = 0;
+                            LOGW("[SYNC] 6 consecutive late onsets; ignoring playback anchors for 2 s");
+                        }
                         continue;
                     } else {
+                        consecutiveLate = 0;
                         release = true;
                         g_timed_fired.fetch_add(1, std::memory_order_relaxed);
                     }
@@ -935,11 +945,17 @@ static void* scheduler_thread_func(void* arg) {
                     const int semN = read_latest_semantic(engine, semFr);
                     float rmsEnergy = 0.0f;
                     if (semN > 0) {
-                        rmsEnergy = std::clamp(
+                        // The amplitudes are on the 0..255 scale. Clamping their
+                        // weighted sum straight to 0..1 made this term 1.0 for any
+                        // audible signal, so loudness never influenced intensity.
+                        // Normalise first; x3 maps a typical loud mix (~0.33 in
+                        // the weighted band energy) to full scale.
+                        const float weighted =
                             semFr[0].kickAmp * 0.45f
                             + semFr[0].snareAmp * 0.25f
                             + semFr[0].vocalAmp * 0.10f
-                            + semFr[0].bodyAmp * 0.35f, 0.0f, 1.0f);
+                            + semFr[0].bodyAmp * 0.35f;
+                        rmsEnergy = std::clamp(weighted / 255.0f * 3.0f, 0.0f, 1.0f);
                     }
 
                     // Character scale per event type, shared by both the

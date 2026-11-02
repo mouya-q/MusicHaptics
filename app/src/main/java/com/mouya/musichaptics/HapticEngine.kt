@@ -1083,6 +1083,12 @@ class HapticEngine(
                         telemetryData.vocalOnset, telemetryData.bodyOnset)
             Log.i(TAG, msg)
             LogBroadcaster.sendLog(context, msg)
+            // One line that shows where the onset -> motor chain stops: the native
+            // scheduler's timed-queue counters, then what reached Kotlin.
+            val st = nativeBridge.syncStats()
+            val chain = "[CHAIN] timed fired=${st?.get(0)} lateDropped=${st?.get(1)} untimed=${st?.get(2)} | kotlinBeats=${beatLogCounter.get()} paused=$hapticPaused enabled=${isEngineEnabled.get()} trimMs=$activeSyncOffsetMs"
+            Log.i(TAG, chain)
+            LogBroadcaster.sendLog(context, chain)
         }
     }
 

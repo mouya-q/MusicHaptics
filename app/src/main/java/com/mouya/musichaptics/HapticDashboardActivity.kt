@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
+import android.app.Application
 import android.widget.ImageView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.PredictiveBackHandler
@@ -585,7 +586,8 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
              val wm = WhitelistManager()
              val snap = wm.snapshot()
              val targets = if (snap.mode == WhitelistManager.MODE_ALL) {
-                 LsposedScopeState.packages.value?.filter { it != context.packageName }.orEmpty()
+                 LsposedScopeState.packages.value
+                     ?.filter { it != context.packageName && !LsposedScopeState.isFramework(it) }.orEmpty()
              } else {
                  snap.packages.toList()
              }
@@ -905,14 +907,41 @@ private fun ScopedAppsScreen() {
         }
     }
     val scopedPackages by LsposedScopeState.packages
-    val apps by produceState<List<LaunchableApp>>(emptyList(), scopedPackages, context) {
+    val scopeSource by LsposedScopeState.source
+    val frameworkLabel = stringResource(R.string.scope_framework_label)
+    val frameworkNote = stringResource(R.string.scope_framework_note)
+    val writeFailed = stringResource(R.string.whitelist_write_failed)
+    var scopeRefreshing by remember { mutableStateOf(false) }
+    val refreshScope: () -> Unit = {
+        if (!scopeRefreshing) {
+            scopeRefreshing = true
+            scope.launch {
+                withContext(Dispatchers.IO) {
+                    (context.applicationContext as? Application)?.let { LsposedScopeState.refreshFromRoot(it) }
+                }
+                scopeRefreshing = false
+            }
+        }
+    }
+    // Re-read the real scope whenever this tab opens: it may have changed in LSPosed.
+    LaunchedEffect(Unit) { refreshScope() }
+    val apps by produceState<List<LaunchableApp>>(emptyList(), scopedPackages, context, frameworkLabel) {
         value = withContext(Dispatchers.IO) {
-            scopedPackages.orEmpty().filter { it != context.packageName }.mapNotNull { packageName ->
-                try {
+            scopedPackages.orEmpty().filter { it != context.packageName }.map { packageName ->
+                if (LsposedScopeState.isFramework(packageName)) {
+                    LaunchableApp(packageName, frameworkLabel, null)
+                } else try {
                     val info = context.packageManager.getApplicationInfo(packageName, 0)
                     LaunchableApp(packageName, context.packageManager.getApplicationLabel(info).toString(), context.packageManager.getApplicationIcon(info))
-                } catch (_: PackageManager.NameNotFoundException) { null }
-            }.sortedBy { it.label.lowercase(Locale.getDefault()) }
+                } catch (_: PackageManager.NameNotFoundException) {
+                    // Still in the LSPosed scope (another user profile, or hidden from the
+                    // package manager): show it by package name instead of dropping it.
+                    LaunchableApp(packageName, packageName, null)
+                }
+            }.distinctBy { it.packageName }.sortedWith(
+                compareBy<LaunchableApp> { LsposedScopeState.isFramework(it.packageName) }
+                    .thenBy { it.label.lowercase(Locale.getDefault()) }
+            )
         }
     }
     
@@ -927,25 +956,67 @@ private fun ScopedAppsScreen() {
                     mode = whitelistMode,
                     enabledCount = enabledPackages.size,
                     onModeChange = { mode ->
+                        val previous = whitelistMode
                         whitelistMode = mode
-                        scope.launch { withContext(Dispatchers.IO) { manager.setMode(mode) } }
+                        scope.launch {
+                            val saved = withContext(Dispatchers.IO) { manager.setMode(mode) }
+                            if (!saved) {
+                                whitelistMode = previous
+                                Toast.makeText(context, writeFailed, Toast.LENGTH_LONG).show()
+                            }
+                        }
                     },
                     onClear = {
+                        val previousMode = whitelistMode
+                        val previousPackages = enabledPackages
                         whitelistMode = WhitelistManager.MODE_WHITELIST
                         enabledPackages = emptySet()
-                        scope.launch { withContext(Dispatchers.IO) { manager.replacePackages(emptySet()) } }
+                        scope.launch {
+                            val saved = withContext(Dispatchers.IO) { manager.replacePackages(emptySet()) }
+                            if (!saved) {
+                                whitelistMode = previousMode
+                                enabledPackages = previousPackages
+                                Toast.makeText(context, writeFailed, Toast.LENGTH_LONG).show()
+                            }
+                        }
                     }
                 )
+            }
+            item {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        when (scopeSource) {
+                            LsposedScopeState.Source.SERVICE -> stringResource(R.string.scope_source_service)
+                            LsposedScopeState.Source.LSPOSED_DB -> stringResource(R.string.scope_source_db)
+                            else -> stringResource(R.string.scope_source_fallback)
+                        },
+                        color = textSecondary(), fontSize = 12.sp, modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = refreshScope, enabled = !scopeRefreshing) { Text(stringResource(R.string.scope_refresh)) }
+                }
             }
             if (scopedPackages == null) item { Text(stringResource(R.string.scope_not_found), color = textSecondary(), modifier = Modifier.padding(20.dp)) }
             else if (apps.isEmpty()) item { Text(stringResource(R.string.scope_empty), color = textSecondary(), modifier = Modifier.padding(20.dp)) }
             items(apps, key = { it.packageName }) { app ->
+                if (LsposedScopeState.isFramework(app.packageName)) {
+                    ScopedFrameworkRow(app.label, frameworkNote)
+                    return@items
+                }
                 val whitelisted = whitelistMode == WhitelistManager.MODE_ALL || app.packageName in enabledPackages
                 ScopedAppRow(app, whitelisted, onToggleWhitelist = { allowed ->
+                    val previousPackages = enabledPackages
+                    val previousMode = whitelistMode
                     enabledPackages = if (allowed) enabledPackages + app.packageName else enabledPackages - app.packageName
                     if (whitelistMode != WhitelistManager.MODE_WHITELIST) whitelistMode = WhitelistManager.MODE_WHITELIST
                     scope.launch {
-                        withContext(Dispatchers.IO) { manager.setPackageAllowed(app.packageName, allowed) }
+                        val saved = withContext(Dispatchers.IO) { manager.setPackageAllowed(app.packageName, allowed) }
+                        if (!saved) {
+                            // The root write failed: show the truth instead of a switch that
+                            // would silently flip back the next time this page is opened.
+                            enabledPackages = previousPackages
+                            whitelistMode = previousMode
+                            Toast.makeText(context, writeFailed, Toast.LENGTH_LONG).show()
+                        }
                     }
                 }) { selected = app.packageName }
             }
@@ -1003,6 +1074,13 @@ private fun WhitelistPanel(
             onSelect = onModeChange,
             label = { it -> if (it == WhitelistManager.MODE_WHITELIST) whitelistOnlyLabel else allScopeLabel }
         )
+    }
+}
+
+@Composable private fun ScopedFrameworkRow(label: String, note: String) {
+    Column(Modifier.fillMaxWidth().liquidGlass(20.dp).padding(14.dp)) {
+        Text(label, color = textPrimary(), fontWeight = FontWeight.SemiBold)
+        Text(note, color = textSecondary(), fontSize = 12.sp, modifier = Modifier.padding(top = 3.dp))
     }
 }
 
@@ -1602,9 +1680,14 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
 }
 
 private fun forceStopSelectedAppsWithRoot(packages: List<String>): Boolean {
-    if (packages.isEmpty()) return false
+    // Package names reach a root shell: accept only well-formed ones (scope entries now
+    // come from LSPosed's database as well) and never the framework pseudo-packages.
+    val safe = packages.filter {
+        Regex("^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+$").matches(it) && !LsposedScopeState.isFramework(it)
+    }
+    if (safe.isEmpty()) return false
     return try {
-        val command = packages.joinToString("; ") { "am force-stop ${it}" }
+        val command = safe.joinToString("; ") { "am force-stop ${it}" }
         val process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
         process.waitFor() == 0
     } catch (_: Exception) { false }

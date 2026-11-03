@@ -37,4 +37,11 @@
     <string name="whitelist_only">화이트리스트만</string>
     <string name="scope_all_desc">스코프 내 모든 앱을 처리합니다</string>
     <string name="scope_whitelist_desc">활성화된 앱만 처리 · %1$d</string>
+    <string name="scope_source_service">범위 출처: LSPosed 서비스</string>
+    <string name="scope_source_db">범위 출처: LSPosed 데이터베이스(root)</string>
+    <string name="scope_source_fallback">LSPosed 범위를 읽을 수 없어 설치된 추천 앱을 표시합니다, root 권한을 허용한 뒤 새로고침하세요</string>
+    <string name="scope_refresh">새로고침</string>
+    <string name="scope_framework_label">시스템 프레임워크</string>
+    <string name="scope_framework_note">활성화할 필요 없음, 오디오는 각 앱 프로세스에서 재생되며 모듈은 시스템 프레임워크에 주입되지 않습니다</string>
+    <string name="whitelist_write_failed">저장하지 못했습니다, root 권한을 허용한 뒤 다시 시도하세요</string>
 </resources>

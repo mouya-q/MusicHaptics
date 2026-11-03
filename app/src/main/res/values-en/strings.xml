@@ -37,4 +37,11 @@
     <string name="whitelist_only">Whitelist Only</string>
     <string name="scope_all_desc">All scoped apps will be processed</string>
     <string name="scope_whitelist_desc">Only enabled apps processed · %1$d</string>
+    <string name="scope_source_service">Scope source: LSPosed service</string>
+    <string name="scope_source_db">Scope source: LSPosed database (root)</string>
+    <string name="scope_source_fallback">Cannot read the LSPosed scope; showing installed recommended apps, grant root and refresh</string>
+    <string name="scope_refresh">Refresh</string>
+    <string name="scope_framework_label">System framework</string>
+    <string name="scope_framework_note">Not needed: audio plays inside each app process and the module never injects into the system framework</string>
+    <string name="whitelist_write_failed">Could not save, grant root access and try again</string>
 </resources>

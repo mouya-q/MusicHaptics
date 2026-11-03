@@ -175,10 +175,14 @@ class NativeBridge {
         }
     }
 
-    /** [fired on time, dropped late, fired without playback anchor], or null. */
+    /**
+     * [fired on time, dropped late, fired without anchor, udp state, udp sent,
+     * udp send failures, udp alive transitions, udp dead transitions, last errno],
+     * or null.
+     */
     fun syncStats(): LongArray? {
         if (!isLoaded) return null
-        return try { LongArray(3).also { nativeSyncStats(it) } } catch (_: Throwable) { null }
+        return try { LongArray(9).also { nativeSyncStats(it) } } catch (_: Throwable) { null }
     }
 
     fun getSemanticFrames(outFrames: FloatArray, maxFrames: Int): Int {

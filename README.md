@@ -12,6 +12,9 @@
 
 > 一个面向 Android 的 LSPosed 音乐触觉模块。  
 > 从播放器获取 PCM 音频，提取瞬态、频段与节奏信息，再结合设备执行器特性生成短促、动态的触觉反馈。
+
+MusicHapticsX 的目标不是让手机“跟着音乐一直震”，而是让真正有意义的音乐事件落在触觉上：鼓点更有冲击，人声保持轻柔，低频形成身体感，同时避免连续轰鸣。
+
 > MusicHapticsX 是独立开源项目，与 Xiaomi、HyperOS、Apple、LSPosed 或任何音乐服务提供商不存在官方隶属或背书关系。
 
 ---
@@ -332,7 +335,8 @@ MusicHapticsX 主体采用 **MIT License**。
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — runtime architecture
 - [`docs/SYNC_AND_TIMING.md`](docs/SYNC_AND_TIMING.md) — 播放时钟同步与起音定位
 - [`docs/ROOT_DIRECT_DRIVE.md`](docs/ROOT_DIRECT_DRIVE.md) — Root 直驱服务
-- [`docs/RELEASE_NOTES_6.3.0.md`](docs/RELEASE_NOTES_6.3.0.md) — 6.3.0 发布说明
+- [`docs/APP_SCOPE.md`](docs/APP_SCOPE.md) — 应用作用域与白名单
+- [`docs/RELEASE_NOTES_6.3.1.md`](docs/RELEASE_NOTES_6.3.1.md) — 6.3.1 发布说明
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — contribution guide
 - [`SECURITY.md`](SECURITY.md) — security notes
 - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — third-party licenses

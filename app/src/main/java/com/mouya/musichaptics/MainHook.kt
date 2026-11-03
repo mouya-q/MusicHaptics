@@ -37,10 +37,14 @@ class MainHook : IXposedHookLoadPackage {
         coordinator.install(lpparam)
         Log.i(TAG, "HookCoordinator installed for $pkg")
 
-        if (pkg == PHIRA_PACKAGE) {
+        if (isPhira(pkg)) {
             installPhiraController(loader, coordinator)
         }
     }
+
+    /** Phira ships under more than one package id (mirrors, forks), so match by name too. */
+    private fun isPhira(pkg: String): Boolean =
+        pkg == PHIRA_PACKAGE || pkg.contains("phira", ignoreCase = true)
 
     private fun installPhiraController(
         classLoader: ClassLoader,

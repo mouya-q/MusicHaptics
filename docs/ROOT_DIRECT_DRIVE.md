@@ -1,4 +1,4 @@
-# Root Direct Drive (6.3.0)
+# Root Direct Drive (6.3.2)
 
 Root is granted to the module app, never to the hooked music player. A hooked
 process therefore cannot run `su` (`Cannot run program "su": error=13`), cannot
@@ -38,10 +38,27 @@ scheduler then logs "beat callback method unavailable; event output disabled" an
 no haptic is ever produced. `scripts/repo_check.py` now compares every
 `GetMethodID` descriptor with the keep rules.
 
+## Field result (6.3.0 release build, Xiaomi 10, Kugou Lite and Bilibili)
+
+The server came up on its own and the first beats went out as `NativeDD`
+(`[OUTPUT] active route=NATIVE_DIRECT_DRIVE`), so the module-side launch and the
+UDP path work. Afterwards the route fell back to the Android Vibrator and flipped a
+few more times; the cause was not established from the log. 6.3.1 therefore adds:
+
+- the `[CHAIN]` line carries `udp state / sent / fail / up / down / errno`, which
+  says whether the receiver was lost (`down` and errno 111) or the transport was
+  re-created;
+- the server writes `/data/local/tmp/mhx_haptic.log` (start, packet counters every
+  5 s while active, any exception), readable with `su -c cat`;
+- a lost receiver is re-probed after 0.4 s instead of 2 s;
+- hooked players no longer try `su` at all. The old in-process root pipe is kept
+  for the module's own process only.
+
 ## Verify on device
 
     su -c "pidof mhx_haptic"            # server process exists
     su -c "ss -lun | grep 27042"        # bound on loopback (or netstat -lun)
+    su -c "tail -n 20 /data/local/tmp/mhx_haptic.log"
 
 Logs to expect: `[UDP] peer verified alive`, `[OUTPUT] active route=NATIVE_DIRECT_DRIVE`,
 `[CHAIN] ... kotlinBeats=N`. Not verified: no Android toolchain was available.

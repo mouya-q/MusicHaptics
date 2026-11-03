@@ -336,7 +336,8 @@ Credits:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — runtime architecture
 - [`docs/SYNC_AND_TIMING.md`](docs/SYNC_AND_TIMING.md) — playback-clock sync and onset localisation
 - [`docs/ROOT_DIRECT_DRIVE.md`](docs/ROOT_DIRECT_DRIVE.md) — root direct-drive service
-- [`docs/RELEASE_NOTES_6.3.0.md`](docs/RELEASE_NOTES_6.3.0.md) — 6.3.0 release notes
+- [`docs/APP_SCOPE.md`](docs/APP_SCOPE.md) — app scope and whitelist
+- [`docs/RELEASE_NOTES_6.3.1.md`](docs/RELEASE_NOTES_6.3.1.md) — 6.3.1 release notes
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — contribution guide
 - [`SECURITY.md`](SECURITY.md) — security notes
 - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — third-party notices

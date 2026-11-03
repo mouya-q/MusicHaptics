@@ -33,6 +33,7 @@ class MainActivity : ComponentActivity() {
             // effectively dead code.
             runCatching { RootHardwareProbe.probeAndPersist(this) }
             runCatching { RootHapticDaemon.ensureRunning(this) }
+            runCatching { LsposedScopeState.refreshFromRoot(application) }
             runCatching { NativeBridge.preloadLibrary(this) }
         }.start()
 

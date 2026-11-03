@@ -37,4 +37,11 @@
     <string name="whitelist_only">Solo lista blanca</string>
     <string name="scope_all_desc">Se procesarán todas las apps del ámbito</string>
     <string name="scope_whitelist_desc">Solo apps habilitadas · %1$d</string>
+    <string name="scope_source_service">Origen del ámbito: servicio de LSPosed</string>
+    <string name="scope_source_db">Origen del ámbito: base de datos de LSPosed (root)</string>
+    <string name="scope_source_fallback">No se puede leer el ámbito de LSPosed; se muestran las apps recomendadas instaladas, conceda root y actualice</string>
+    <string name="scope_refresh">Actualizar</string>
+    <string name="scope_framework_label">Framework del sistema</string>
+    <string name="scope_framework_note">No es necesario: el audio se reproduce en el proceso de cada app y el módulo nunca se inyecta en el framework del sistema</string>
+    <string name="whitelist_write_failed">No se pudo guardar, conceda acceso root e inténtelo de nuevo</string>
 </resources>

@@ -160,6 +160,12 @@ static std::atomic<int> g_udp_peer_state{0};
 static std::atomic<int> g_udp_probe_count{0};
 // When the receiver was last condemned; lets a restarted daemon be rediscovered.
 static std::atomic<int64_t> g_udp_dead_since_ns{0};
+// Transport diagnostics, surfaced in the [CHAIN] log line.
+static std::atomic<uint64_t> g_udp_sent{0};
+static std::atomic<uint64_t> g_udp_send_fail{0};
+static std::atomic<uint64_t> g_udp_alive_events{0};
+static std::atomic<uint64_t> g_udp_dead_events{0};
+static std::atomic<int> g_udp_last_errno{0};
 
 
 #pragma pack(push, 1)
@@ -313,7 +319,12 @@ static bool send_haptic_udp(uint8_t amplitude, uint16_t durationMs, uint8_t flag
         sizeof(g_udp_daemon_addr)
     );
 
+    if (written == sizeof(packet)) {
+        g_udp_sent.fetch_add(1, std::memory_order_relaxed);
+    }
     if (written != sizeof(packet)) {
+        g_udp_send_fail.fetch_add(1, std::memory_order_relaxed);
+        g_udp_last_errno.store(errno, std::memory_order_relaxed);
         // The socket is connect()ed to loopback: when nothing is bound to the
         // daemon port the kernel reports ECONNREFUSED here, which is the only
         // reliable evidence that the receiver is gone. Demote the transport so
@@ -321,7 +332,9 @@ static bool send_haptic_udp(uint8_t amplitude, uint16_t durationMs, uint8_t flag
         // own vibration path instead of going silent.
         if (errno == ECONNREFUSED || errno == EPIPE || errno == ENOTCONN) {
             g_udp_dead_since_ns.store(monotonic_ns(), std::memory_order_release);
-            g_udp_peer_state.store(2, std::memory_order_release);
+            if (g_udp_peer_state.exchange(2, std::memory_order_acq_rel) != 2) {
+                g_udp_dead_events.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         return false;
     }
@@ -541,7 +554,9 @@ static bool udp_probe_step() {
 
     if (g_udp_peer_state.load(std::memory_order_acquire) == 2) {
         const int64_t deadSince = g_udp_dead_since_ns.load(std::memory_order_acquire);
-        if (monotonic_ns() - deadSince < 2000000000LL) return false;
+        // A restarted server is rediscovered within about a second; a longer wait
+        // only prolongs the stretch spent on the weaker waveform path.
+        if (monotonic_ns() - deadSince < 400000000LL) return false;
         g_udp_probe_count.store(0, std::memory_order_relaxed);
         g_udp_peer_state.store(0, std::memory_order_release);
     }
@@ -562,7 +577,10 @@ static bool udp_probe_step() {
     if (written != static_cast<ssize_t>(sizeof(probe)) ||
         err == ECONNREFUSED || err == EPIPE || err == ENOTCONN) {
         g_udp_dead_since_ns.store(monotonic_ns(), std::memory_order_release);
-        g_udp_peer_state.store(2, std::memory_order_release);
+        g_udp_last_errno.store(err, std::memory_order_relaxed);
+        if (g_udp_peer_state.exchange(2, std::memory_order_acq_rel) != 2) {
+            g_udp_dead_events.fetch_add(1, std::memory_order_relaxed);
+        }
         LOGI("[UDP] peer probe failed (errno=%d) -> transport marked dead, will re-probe", err);
         return false;
     }
@@ -570,7 +588,10 @@ static bool udp_probe_step() {
     const int probes = g_udp_probe_count.fetch_add(1, std::memory_order_relaxed) + 1;
     if (probes >= 2) {
         const int prev = g_udp_peer_state.exchange(1, std::memory_order_acq_rel);
-        if (prev != 1) LOGI("[UDP] peer verified alive after %d probes", probes);
+        if (prev != 1) {
+            g_udp_alive_events.fetch_add(1, std::memory_order_relaxed);
+            LOGI("[UDP] peer verified alive after %d probes", probes);
+        }
     }
     return g_udp_peer_state.load(std::memory_order_acquire) == 1;
 }
@@ -1626,17 +1647,27 @@ Java_com_mouya_musichaptics_NativeBridge_nativeSetSyncOffsetMs(
                            std::memory_order_relaxed);
 }
 
-// out[0]=fired on time, out[1]=dropped late, out[2]=fired without an anchor.
+// out[0]=fired on time, out[1]=dropped late, out[2]=fired without an anchor,
+// out[3]=UDP peer state (0 unverified, 1 alive, 2 dead), out[4]=packets sent,
+// out[5]=send failures, out[6]=alive transitions, out[7]=dead transitions,
+// out[8]=last UDP errno.
 JNIEXPORT void JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeSyncStats(
     JNIEnv* env, jobject, jlongArray out) {
-    if (!out || env->GetArrayLength(out) < 3) return;
-    const jlong values[3] = {
+    if (!out) return;
+    const jsize length = env->GetArrayLength(out);
+    const jlong values[9] = {
         static_cast<jlong>(g_timed_fired.load(std::memory_order_relaxed)),
         static_cast<jlong>(g_timed_late_dropped.load(std::memory_order_relaxed)),
         static_cast<jlong>(g_timed_untimed.load(std::memory_order_relaxed)),
+        static_cast<jlong>(g_udp_peer_state.load(std::memory_order_relaxed)),
+        static_cast<jlong>(g_udp_sent.load(std::memory_order_relaxed)),
+        static_cast<jlong>(g_udp_send_fail.load(std::memory_order_relaxed)),
+        static_cast<jlong>(g_udp_alive_events.load(std::memory_order_relaxed)),
+        static_cast<jlong>(g_udp_dead_events.load(std::memory_order_relaxed)),
+        static_cast<jlong>(g_udp_last_errno.load(std::memory_order_relaxed)),
     };
-    env->SetLongArrayRegion(out, 0, 3, values);
+    env->SetLongArrayRegion(out, 0, std::min<jsize>(length, 9), values);
 }
 
 JNIEXPORT jboolean JNICALL

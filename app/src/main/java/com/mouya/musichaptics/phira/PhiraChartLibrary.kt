@@ -30,6 +30,12 @@ object PhiraChartLibrary {
         return dirs.mapNotNull { entryOf(it) }
     }
 
+    /** The chart folder of the running game: its own files directory, not a fixed package id. */
+    fun rootFor(context: android.content.Context): String {
+        val own = File(context.filesDir, "data")
+        return if (File(own, "charts/download").isDirectory) own.absolutePath else DEFAULT_ROOT
+    }
+
     fun entryOf(dir: File): Entry? {
         val info = parseInfoYml(File(dir, "info.yml"))
         

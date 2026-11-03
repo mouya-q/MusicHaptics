@@ -37,4 +37,11 @@
     <string name="whitelist_only">仅白名单</string>
     <string name="scope_all_desc">当前作用域内的应用都会处理</string>
     <string name="scope_whitelist_desc">仅处理已启用的应用 · %1$d 个</string>
+    <string name="scope_source_service">作用域来源：LSPosed 服务</string>
+    <string name="scope_source_db">作用域来源：LSPosed 数据库（Root）</string>
+    <string name="scope_source_fallback">无法读取 LSPosed 作用域，当前显示推荐列表中已安装的应用，授予 Root 权限后可刷新</string>
+    <string name="scope_refresh">刷新</string>
+    <string name="scope_framework_label">系统框架</string>
+    <string name="scope_framework_note">无需启用，音频由各应用自身进程播放，模块不会注入系统框架</string>
+    <string name="whitelist_write_failed">保存失败，请确认已授予 Root 权限后重试</string>
 </resources>

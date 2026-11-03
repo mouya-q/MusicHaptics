@@ -112,7 +112,7 @@ class PhiraController(
 
         
         if (!libraryScanned) {
-            library = PhiraChartLibrary.scan()
+            library = PhiraChartLibrary.scan(PhiraChartLibrary.rootFor(context))
             libraryScanned = true
             Log.i(TAG, "Library scanned: ${library.size} charts")
             LogBroadcaster.sendLog(context, "[Phira] Library scanned: ${library.size} charts")

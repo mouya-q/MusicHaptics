@@ -12,6 +12,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
 
+    <!-- The app list shows every package in the LSPosed scope, including ones without a
+         launcher activity, which package visibility filtering would otherwise hide. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission"/>
+
     <!-- Declare launcher package visibility. -->
     <queries>
         <intent>

@@ -1,6 +1,38 @@
 # Changes
 
-Current source version: **6.3.0**
+Current source version: **6.3.2**
+
+## 6.3.2
+
+### App list, scope and whitelist
+
+See `docs/APP_SCOPE.md`.
+
+- The app list now reads the real LSPosed scope from LSPosed's database (root),
+  because the libxposed service never binds for this legacy-API module. Apps ticked
+  in LSPosed but missing from the hard-coded recommended list were invisible.
+  Unresolvable entries are listed by package name; `QUERY_ALL_PACKAGES` added.
+- Added a source line and a Refresh button to the app list.
+- "System framework" is an information row now. The old switch could never stay on
+  (the whitelist rejects names without a dot) and the module never injects there
+  anyway. Removed `android` from the recommended scope list.
+- A failed root write of the whitelist undoes the switch and shows a message.
+- Phira: matched by package name pattern; chart folder from the game's own files dir.
+- Package names reaching `am force-stop` are validated.
+
+## 6.3.1
+
+Field feedback from a 6.3.0 release build (Xiaomi 10, Kugou Lite, Bilibili).
+
+- Root direct drive started by itself and drove the actuator for the first beats,
+  then the route fell back to the Android Vibrator and flipped; cause unknown.
+  Added `[CHAIN] udp state/sent/fail/up/down/errno`, a server log at
+  `/data/local/tmp/mhx_haptic.log`, a catch-all around packet handling in the
+  server, and a 0.4 s re-probe (was 2 s).
+- Hooked players no longer try `su`; the old in-process root pipe runs only in the
+  module's own process.
+- Bilibili (20 ms writes): 500+ timed onsets, 0 late, 0 untimed. Kugou (1 s
+  writes): ~10% late and ~15% untimed, clustered at track start and resume.
 
 ## 6.3.0
 

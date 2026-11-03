@@ -65,25 +65,26 @@ class WhitelistManager {
 
     fun getMode(): String = snapshot().mode
 
-    fun setMode(mode: String) {
+    /** All writers return whether the file was really updated, so the UI can undo a toggle that did not stick. */
+    fun setMode(mode: String): Boolean {
         val normalized = when (mode.lowercase()) {
             MODE_ALL -> MODE_ALL
             else -> MODE_WHITELIST
         }
         val current = snapshot()
-        writeConfig(normalized, current.packages)
+        return writeConfig(normalized, current.packages)
     }
 
-    fun setPackageAllowed(packageName: String, allowed: Boolean) {
-        if (!PACKAGE_RE.matches(packageName)) return
+    fun setPackageAllowed(packageName: String, allowed: Boolean): Boolean {
+        if (!PACKAGE_RE.matches(packageName)) return false
         val next = LinkedHashSet(snapshot().packages)
         if (allowed) next += packageName else next -= packageName
-        writeConfig(MODE_WHITELIST, next)
+        return writeConfig(MODE_WHITELIST, next)
     }
 
-    fun replacePackages(packages: Set<String>) {
+    fun replacePackages(packages: Set<String>): Boolean {
         val safe = packages.filterTo(LinkedHashSet(), PACKAGE_RE::matches)
-        writeConfig(MODE_WHITELIST, safe)
+        return writeConfig(MODE_WHITELIST, safe)
     }
 
     private fun parse(file: File): Snapshot {
@@ -110,7 +111,7 @@ class WhitelistManager {
         }
     }
 
-    private fun writeConfig(mode: String, packages: Set<String>) {
+    private fun writeConfig(mode: String, packages: Set<String>): Boolean {
         val safeMode = if (mode == MODE_ALL) MODE_ALL else MODE_WHITELIST
         val safePkgs = packages.filter(PACKAGE_RE::matches).toSortedSet()
         val content = buildString {
@@ -120,7 +121,7 @@ class WhitelistManager {
             appendLine("$MODE_KEY=$safeMode")
             safePkgs.forEach(::appendLine)
         }
-        synchronized(writeLock) {
+        return synchronized(writeLock) {
             runCatching {
                 val encoded = android.util.Base64.encodeToString(content.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
                 // P0: no string interpolation of paths into shell; pass via env + single-quoted constants.
@@ -138,7 +139,7 @@ class WhitelistManager {
                 Log.i(TAG, "Whitelist updated: mode=$safeMode packages=${safePkgs.size}")
             }.onFailure {
                 Log.w(TAG, "Failed to update whitelist with root shell: ${it.message}")
-            }
+            }.isSuccess
         }
     }
 }

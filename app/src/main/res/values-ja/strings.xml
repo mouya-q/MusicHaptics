@@ -37,4 +37,11 @@
     <string name="whitelist_only">ホワイトリストのみ</string>
     <string name="scope_all_desc">スコープ内の全アプリを処理します</string>
     <string name="scope_whitelist_desc">有効なアプリのみ処理 · %1$d</string>
+    <string name="scope_source_service">スコープの取得元：LSPosed サービス</string>
+    <string name="scope_source_db">スコープの取得元：LSPosed データベース（root）</string>
+    <string name="scope_source_fallback">LSPosed のスコープを読み取れないため、インストール済みの推奨アプリを表示しています、root を許可して更新してください</string>
+    <string name="scope_refresh">更新</string>
+    <string name="scope_framework_label">システムフレームワーク</string>
+    <string name="scope_framework_note">有効化は不要です、音声は各アプリのプロセス内で再生され、モジュールはシステムフレームワークに注入しません</string>
+    <string name="whitelist_write_failed">保存できませんでした、root を許可して再試行してください</string>
 </resources>

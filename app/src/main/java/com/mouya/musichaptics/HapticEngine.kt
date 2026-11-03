@@ -280,8 +280,15 @@ class HapticEngine(
                 if (!available) {
                     
                     
-                    LogBroadcaster.sendLog(context, "[DirectDrive] open() failed, trying root-assisted fd...")
-                    tryRootAssistedDirectDrive(context, nodes)
+                    if (context.packageName == BuildConfig.APPLICATION_ID) {
+                        LogBroadcaster.sendLog(context, "[DirectDrive] open() failed, trying root-assisted fd...")
+                        tryRootAssistedDirectDrive(context, nodes)
+                    } else {
+                        // A hooked music player never has root and must not be made to ask
+                        // for it: the module process runs the root helper (UDP), see
+                        // RootHapticDaemon.
+                        LogBroadcaster.sendLog(context, "[DirectDrive] node not writable from the player process; root helper is provided by the module (UDP)")
+                    }
                 }
             } else {
                 LogBroadcaster.sendLog(context, "[DirectDrive] WARNING: no nodes found by RootHardwareProbe!")
@@ -1086,7 +1093,7 @@ class HapticEngine(
             // One line that shows where the onset -> motor chain stops: the native
             // scheduler's timed-queue counters, then what reached Kotlin.
             val st = nativeBridge.syncStats()
-            val chain = "[CHAIN] timed fired=${st?.get(0)} lateDropped=${st?.get(1)} untimed=${st?.get(2)} | kotlinBeats=${beatLogCounter.get()} paused=$hapticPaused enabled=${isEngineEnabled.get()} trimMs=$activeSyncOffsetMs"
+            val chain = "[CHAIN] timed fired=${st?.get(0)} lateDropped=${st?.get(1)} untimed=${st?.get(2)} | udp state=${st?.get(3)} sent=${st?.get(4)} fail=${st?.get(5)} up=${st?.get(6)} down=${st?.get(7)} errno=${st?.get(8)} | kotlinBeats=${beatLogCounter.get()} paused=$hapticPaused enabled=${isEngineEnabled.get()} trimMs=$activeSyncOffsetMs"
             Log.i(TAG, chain)
             LogBroadcaster.sendLog(context, chain)
         }

@@ -1,4 +1,4 @@
-# MusicHapticsX 6.3.0
+# MusicHapticsX 6.3.1
 
 ## What changed
 
@@ -37,6 +37,13 @@ a minified build could delete the method the native scheduler calls. Fixed, and
 - `flush()` on the host track (seek, track change) clears queued haptics.
 - UI text no longer ends with full stops.
 
+## Since the first 6.3.0 build
+
+Release build, Xiaomi 10: beats flow, so the R8 fix holds, and the root server came
+up by itself and drove the actuator for the first beats. It then dropped back to the
+Android Vibrator and flipped a few times; 6.3.1 re-probes after 0.4 s and logs why
+(`[CHAIN] udp ...`, `/data/local/tmp/mhx_haptic.log`). Players no longer run `su`.
+
 ## Diagnostics
 
 `[CHAIN]` is logged every 2 seconds: timed onsets fired, dropped late, fired without
@@ -44,7 +51,7 @@ an anchor, and how many reached Kotlin. `[SYNC]` repeats it every 40 beats.
 
 ## Verified and not verified
 
-Verified on a Xiaomi 10 (Kugou Lite, debug build, Android Vibrator path): playback
-clock scheduling, intensity changes, the sync slider. Not verified on a device:
-the root direct-drive service, the release-build keep rule, the Rust unit tests.
-Build a release APK and check that `[CHAIN] kotlinBeats` increases before publishing.
+Verified on a Xiaomi 10 (Kugou Lite and Bilibili): playback-clock scheduling,
+intensity changes, the sync slider, the release build (beats reach the actuator),
+and the root server starting and driving the actuator at first. Not verified:
+that direct drive stays up for a whole session (see above), the Rust unit tests.

@@ -48,6 +48,9 @@ The goal is not to make the phone vibrate continuously with the music. It is to 
 - **Strike-only support** — one-shot nodes such as AW8697 / AW86224 are not incorrectly treated as continuous amplitude interfaces.
 - **Application whitelist** — LSPosed controls injection scope; MusicHapticsX independently controls which injected applications are processed.
 - **LiquidGlass UI** — settings, app lists and the console use a dedicated `:liquidglass` module with a normal translucent fallback.
+- **Playback-clock sync** — each onset is scheduled for the moment it is actually heard (from `AudioTrack.getTimestamp()`), not for the moment its PCM was analysed; a "Sync compensation" slider trims it globally or per app.
+- **Onset localisation** — the attack is placed within about 1 ms inside the 21 ms analysis window.
+- **Root direct-drive service** — the module process keeps a root receiver on loopback UDP, so the player process needs no root; a lost receiver is re-probed and the engine falls back to the Android Vibrator meanwhile.
 - **ARM64 Native** — release Native binaries target modern ARM64 Android devices.
 
 ---
@@ -303,6 +306,8 @@ Recommended checks:
 - Vendor `/sys` haptic nodes do not share a universal semantic contract; unknown devices prefer Android Vibrator fallback.
 - Visualizer is a compatibility path, not equivalent to direct PCM hooking; latency and dynamic range differ.
 - Root direct-drive paths depend on vendor nodes and SELinux policy and may change after system updates.
+- Sync needs a usable `AudioTrack` timestamp from the player's output path; without one it falls back to a playback-head estimate, then to the old fire-immediately behaviour.
+- Default path latencies (direct drive 10 ms, Android Vibrator 25 ms) are estimates; use "Sync compensation" to trim per device.
 - Device tuning is based partly on real-device testing and does not imply that the same parameters are correct for every device in a family.
 - Native release binaries currently target `arm64-v8a` only.
 
@@ -329,6 +334,9 @@ Credits:
 - [`README.md`](README.md) — 简体中文
 - [`CHANGED.md`](CHANGED.md) — release changes
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — runtime architecture
+- [`docs/SYNC_AND_TIMING.md`](docs/SYNC_AND_TIMING.md) — playback-clock sync and onset localisation
+- [`docs/ROOT_DIRECT_DRIVE.md`](docs/ROOT_DIRECT_DRIVE.md) — root direct-drive service
+- [`docs/RELEASE_NOTES_6.3.0.md`](docs/RELEASE_NOTES_6.3.0.md) — 6.3.0 release notes
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — contribution guide
 - [`SECURITY.md`](SECURITY.md) — security notes
 - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — third-party notices

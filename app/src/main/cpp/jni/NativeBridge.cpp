@@ -923,7 +923,7 @@ static void* scheduler_thread_func(void* arg) {
 
             // Release at most one due onset per 5 ms tick, oldest first.
             const int64_t releaseNowNs = monotonic_ns();
-            const int64_t pathLatencyNs = (use_direct_drive ? 10LL : 35LL) * 1000000LL;
+            const int64_t pathLatencyNs = (use_direct_drive ? 10LL : 25LL) * 1000000LL;
             const int64_t leadNs = pathLatencyNs +
                 static_cast<int64_t>(g_sync_offset_ms.load(std::memory_order_relaxed)) * 1000000LL;
             int consumed = 0;

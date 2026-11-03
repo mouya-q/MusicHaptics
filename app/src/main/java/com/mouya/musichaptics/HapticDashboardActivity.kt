@@ -721,7 +721,7 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
                 val message = if (rootGranted) {
                     "已通过 Root 重启 ${selected.size} 个 App"
                 } else {
-                    "未获取 Root 权限，请手动结束并重新打开已勾选 App，或授予 Root 权限后重试。"
+                    "未获取 Root 权限，请手动结束并重新打开已勾选 App，或授予 Root 权限后重试"
                 }
                 Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                 showRestartDialog = false
@@ -1226,11 +1226,11 @@ fun IOSHardwareProfileCard(
                     color = textTertiary(), fontSize = 11.sp
                 )
                 Text(
-                    "机型上限仅在可控幅度或已建立的直驱通道中可强制执行；系统默认幅度路径无法由 Android API 保证逐段限幅。",
+                    "机型上限仅在可控幅度或已建立的直驱通道中可强制执行，系统默认幅度路径无法由 Android API 保证逐段限幅",
                     color = textTertiary(), fontSize = 11.sp
                 )
                 Text(
-                    "频响与热参数为机型调校初始估算，不代表实时测量；设备上限仍以系统实际能力为准。",
+                    "频响与热参数为机型调校初始估算，不代表实时测量；设备上限仍以系统实际能力为准",
                     color = textTertiary(), fontSize = 11.sp
                 )
                 Text(compactFingerprint, color = textTertiary(), fontSize = 11.sp, maxLines = 2)
@@ -1280,8 +1280,8 @@ fun IOSControlPanel(
             IOSSettingSliderRow("低频权重", customBassBoost, 1.0f..2.5f, "x", onBassBoostChange)
             IOSSettingSliderRow("同步补偿", syncOffsetMs, -100f..200f, "ms", onSyncOffsetChange)
             Text(
-                "力度采用软限幅保留强弱层次；风格预设控制起音、释放与频段。硬件上限按机型单独约束。" +
-                    "同步补偿为正时振动更早触发（振动慢于声音就调大），为负则更晚。",
+                "力度采用软限幅保留强弱层次；风格预设控制起音、释放与频段；硬件上限按机型单独约束；" +
+                    "同步补偿为正时振动更早触发（振动慢于声音就调大），为负则更晚",
                 color = textTertiary(), fontSize = 11.sp
             )
             
@@ -1335,7 +1335,7 @@ fun IOSControlPanel(
         ) {
             Column(Modifier.fillMaxWidth().liquidGlass().padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text(stringResource(R.string.advanced_settings), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                Text("高级调校仅建议在了解当前执行器特性的情况下修改。", color = textTertiary(), fontSize = 11.sp)
+                Text("高级调校仅建议在了解当前执行器特性的情况下修改", color = textTertiary(), fontSize = 11.sp)
                 HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
                 
                 
@@ -1360,7 +1360,7 @@ fun IOSControlPanel(
                 IOSSettingSliderRow("维持电平", synthSustainLevel, 0.1f..0.8f, "", onSynthSustainLevelChange)
                 HorizontalDivider(color = separatorColor(), thickness = 0.5.dp)
                 Text(stringResource(R.string.thermal_params), color = textSecondary(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                Text("软件热负载模型参数，不是手机提供的真实马达温度传感器读数。", color = textTertiary(), fontSize = 11.sp)
+                Text("软件热负载模型参数，不是手机提供的真实马达温度传感器读数", color = textTertiary(), fontSize = 11.sp)
                 IOSSettingSliderRow("热警告温度", synthThermalWarn, 50f..85f, "°C", onSynthThermalWarnChange)
                 IOSSettingSliderRow("热临界温度", synthThermalCrit, 80f..110f, "°C", onSynthThermalCritChange)
                 IOSSettingSliderRow("热阻 Rth", synthThermalRth, 10f..50f, "°C/W", onSynthThermalRthChange)
@@ -1523,7 +1523,7 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
                 Text(stringResource(R.string.restart_scope_apps), color = textPrimary(), fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Text(stringResource(R.string.restart_scope_hint), color = textSecondary(), fontSize = 14.sp)
                 Text(
-                    "将尝试通过 Root 执行 force-stop；未获取 Root 权限时，请手动结束并重新打开所选 App。",
+                    "将尝试通过 Root 执行 force-stop；未获取 Root 权限时，请手动结束并重新打开所选 App",
                     color = IOSColors.orange, fontSize = 12.sp,
                 )
                 Spacer(Modifier.height(2.dp))

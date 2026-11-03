@@ -12,9 +12,6 @@
 
 > 一个面向 Android 的 LSPosed 音乐触觉模块。  
 > 从播放器获取 PCM 音频，提取瞬态、频段与节奏信息，再结合设备执行器特性生成短促、动态的触觉反馈。
-
-MusicHapticsX 的目标不是让手机“跟着音乐一直震”，而是让真正有意义的音乐事件落在触觉上：鼓点更有冲击，人声保持轻柔，低频形成身体感，同时避免连续轰鸣。
-
 > MusicHapticsX 是独立开源项目，与 Xiaomi、HyperOS、Apple、LSPosed 或任何音乐服务提供商不存在官方隶属或背书关系。
 
 ---
@@ -45,6 +42,9 @@ MusicHapticsX 的目标不是让手机“跟着音乐一直震”，而是让真
 - **动态触觉** — 事件强度会影响振幅、持续时间与 envelope，不再让所有鼓点变成同一个力度。
 - **执行器感知** — 根据设备档案调整增益、时长、冷却、频段权重和输出策略。
 - **Strike-only 支持** — 对 AW8697 / AW86224 等 one-shot 节点避免错误地当作连续幅值接口使用。
+- **播放时钟同步** — 用 `AudioTrack.getTimestamp()` 估算每个起音实际被听到的时刻，振动在声音出现时触发，而不是在 PCM 被分析时触发；设置页提供“同步补偿”微调（全局与分应用）。
+- **起音定位** — 在 21 ms 分析窗口内把攻击点定位到约 1 ms，而不是只知道“窗口里某处”。
+- **Root 直驱服务** — 模块进程以 root 常驻一个本机 UDP 接收端，播放器进程不需要 root 也能走直驱；失联后自动重新探测并回退到 Android Vibrator。
 - **应用白名单** — LSPosed 负责注入范围，MusicHapticsX 再通过独立白名单决定实际处理哪些应用。
 - **LiquidGlass UI** — 设置、应用列表和控制台采用独立 `:liquidglass` 模块，并提供普通半透明降级路径。
 - **ARM64 Native** — 发布目标集中于现代 ARM64 Android 设备。
@@ -300,6 +300,8 @@ arm64-v8a
 ## 已知限制
 
 - 不同厂商 `/sys` 触觉节点没有统一语义；未知设备优先使用 Android Vibrator fallback。
+- 同步依赖播放器输出路径提供可用的 `AudioTrack` 时间戳；拿不到时退回播放头估算，仍不可用则按旧方式即时触发。
+- 默认路径延迟（直驱 10 ms，Android Vibrator 25 ms）是估算值，不同机型请用“同步补偿”微调。
 - Visualizer 是兼容路径，不等价于直接 PCM Hook，延迟和动态范围会不同。
 - Root direct-drive 依赖厂商节点与 SELinux 策略，系统升级后可能变化。
 - 设备调音来自项目实机测试，不意味着同一参数适用于同厂商所有设备。
@@ -328,6 +330,9 @@ MusicHapticsX 主体采用 **MIT License**。
 - [`README_EN.md`](README_EN.md) — English documentation
 - [`CHANGED.md`](CHANGED.md) — version changes
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — runtime architecture
+- [`docs/SYNC_AND_TIMING.md`](docs/SYNC_AND_TIMING.md) — 播放时钟同步与起音定位
+- [`docs/ROOT_DIRECT_DRIVE.md`](docs/ROOT_DIRECT_DRIVE.md) — Root 直驱服务
+- [`docs/RELEASE_NOTES_6.3.0.md`](docs/RELEASE_NOTES_6.3.0.md) — 6.3.0 发布说明
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — contribution guide
 - [`SECURITY.md`](SECURITY.md) — security notes
 - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — third-party licenses

@@ -15,7 +15,12 @@ See `docs/ROOT_DIRECT_DRIVE.md`.
   per-packet `nc | dd | od | expr` shell loop. It is started from the module
   process when a hooked app reads its config, not only when the UI is opened.
 - Native UDP transport re-probes a lost receiver instead of giving up for good.
-- Untested on device: no Android/Rust toolchain was available for this change.
+- Everything in 6.2.0 to 6.2.2 below is part of this release; see
+  `docs/RELEASE_NOTES_6.3.0.md`.
+- Android Vibrator path latency default 35 ms -> 25 ms (a field trim of -11 ms).
+- UI strings no longer end with full stops (all locales).
+- Untested on device: the root server, the release-build keep rule and the Rust
+  unit tests (no Android/Rust toolchain was available for this change).
 
 ## 6.2.2
 

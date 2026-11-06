@@ -13,7 +13,7 @@ class ConfigProvider : ContentProvider() {
         private val PACKAGE_RE = Regex("^[a-zA-Z0-9_]+(\\.[a-zA-Z0-9_]+)+$")
         private val SAFE_KEYS = setOf(
             "master_switch", "haptic_amplitude", "selected_preset",
-            "style_preset", "haptic_bass_boost", "sync_offset_ms", "force_default_amplitude", "visualizer_fallback_enabled",
+            "style_preset", "haptic_bass_boost", "sync_offset_ms", "dynamics_contrast", "force_default_amplitude", "visualizer_fallback_enabled",
             "synth_rate_hz", "synth_lra_f0", "synth_lra_q",
             "synth_attack_impact", "synth_decay_impact", "synth_attack_continuous",
             "synth_decay_continuous", "synth_release", "synth_sustain",

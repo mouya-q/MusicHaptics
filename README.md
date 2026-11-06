@@ -48,6 +48,7 @@ MusicHapticsX 的目标不是让手机“跟着音乐一直震”，而是让真
 - **播放时钟同步** — 用 `AudioTrack.getTimestamp()` 估算每个起音实际被听到的时刻，振动在声音出现时触发，而不是在 PCM 被分析时触发；设置页提供“同步补偿”微调（全局与分应用）。
 - **起音定位** — 在 21 ms 分析窗口内把攻击点定位到约 1 ms，而不是只知道“窗口里某处”。
 - **Root 直驱服务** — 模块进程以 root 常驻一个本机 UDP 接收端，播放器进程不需要 root 也能走直驱；失联后自动重新探测并回退到 Android Vibrator。
+- **轻重表达** — 新的“拟真”风格与“轻重对比”滑块：轻、中、重三类打击按设备能力表达（振幅包络、触觉原语，或在无法控制振幅的设备上用脉冲个数和时长），时长随马达的上升/下降时间缩放。
 - **应用白名单** — LSPosed 负责注入范围，MusicHapticsX 再通过独立白名单决定实际处理哪些应用。
 - **LiquidGlass UI** — 设置、应用列表和控制台采用独立 `:liquidglass` 模块，并提供普通半透明降级路径。
 - **ARM64 Native** — 发布目标集中于现代 ARM64 Android 设备。
@@ -336,6 +337,7 @@ MusicHapticsX 主体采用 **MIT License**。
 - [`docs/SYNC_AND_TIMING.md`](docs/SYNC_AND_TIMING.md) — 播放时钟同步与起音定位
 - [`docs/ROOT_DIRECT_DRIVE.md`](docs/ROOT_DIRECT_DRIVE.md) — Root 直驱服务
 - [`docs/APP_SCOPE.md`](docs/APP_SCOPE.md) — 应用作用域与白名单
+- [`docs/HAPTIC_EXPRESSION.md`](docs/HAPTIC_EXPRESSION.md) — 轻重表达与多设备适配
 - [`docs/RELEASE_NOTES_6.3.1.md`](docs/RELEASE_NOTES_6.3.1.md) — 6.3.1 发布说明
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — contribution guide
 - [`SECURITY.md`](SECURITY.md) — security notes

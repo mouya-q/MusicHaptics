@@ -10,7 +10,7 @@ CPP = APP / "cpp"
 errors = []
 
 required = [
-    ROOT / "README.md", ROOT / "CHANGED.md",
+    ROOT / "README.md", ROOT / "CHANGED.md", ROOT / "CONTRIBUTING.md",
     ROOT / "SECURITY.md", ROOT / "THIRD_PARTY_NOTICES.md", ROOT / "docs" / "ARCHITECTURE.md",
     ROOT / "LICENSE", CPP / "jni" / "NativeBridge.cpp",
 ]
@@ -52,7 +52,7 @@ tuning = set(re.findall(r"DeviceProfile\.([A-Z0-9_]+)\s*->\s*DeviceTuning", tuni
 for name in sorted(profiles - tuning): errors.append(f"device tuning missing: {name}")
 
 settings = [
-    "master_switch", "selected_preset", "haptic_amplitude", "haptic_bass_boost", "sync_offset_ms", "style_preset",
+    "master_switch", "selected_preset", "haptic_amplitude", "haptic_bass_boost", "sync_offset_ms", "dynamics_contrast", "style_preset",
     "force_default_amplitude", "synth_lra_f0", "synth_lra_q", "synth_rate_hz",
     "synth_attack_impact", "synth_decay_impact", "synth_attack_continuous",
     "synth_decay_continuous", "synth_release", "synth_sustain", "synth_thermal_warn",
@@ -71,7 +71,7 @@ for key in settings:
 
 # Per-app settings must share keys with the engine.
 scoped = dash[dash.find("private fun ScopedAppSettings"):]
-for key in ("master_switch", "haptic_amplitude", "haptic_bass_boost", "sync_offset_ms"):
+for key in ("master_switch", "haptic_amplitude", "haptic_bass_boost", "sync_offset_ms", "dynamics_contrast"):
     if key not in scoped: errors.append(f"scoped setting missing: {key}")
 
 if "点击复制" in kt_text: errors.append("QQ copy hint remains")

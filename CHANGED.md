@@ -1,6 +1,24 @@
 # Changes
 
-Current source version: **6.3.2**
+Current source version: **6.2.0**
+
+## 6.4.0
+
+### Light and heavy hits on every kind of device
+
+See `docs/HAPTIC_EXPRESSION.md`.
+
+- New style **Taptic (拟真)** and a **Light/heavy contrast** slider (`dynamics_contrast`).
+- For outputs that cannot take an amplitude (HAL-owned amplitude, or no amplitude
+  control), a hit is now a weight-classed pulse pattern: one short pulse, a firmer pulse,
+  or a long pulse with a short echo. Lengths scale with the actuator's rise and fall time,
+  never exceed the time budget, and the echo is dropped first when it does not fit.
+- Primitive-composition outputs get TICK / CLICK / THUD by weight class.
+- Amplitude-capable outputs keep their envelope; the Taptic style adds a soft rumble tail
+  to heavy kicks there.
+- Pure-JVM unit tests for the generator (`HapticExpressionTest`), run in CI without
+  blocking the build for now.
+- Not measured on hardware; defaults and class boundaries are a first design.
 
 ## 6.3.2
 

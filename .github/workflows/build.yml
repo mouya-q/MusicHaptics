@@ -119,6 +119,14 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      # Pure-JVM tests of the haptic pattern generator. Not blocking yet: they were written
+      # without a toolchain, so a first failure should not hide the APKs.
+      - name: Unit tests (Kotlin)
+        run: ./gradlew testDebugUnitTest --stacktrace
+        continue-on-error: true
+        env:
+          GRADLE_OPTS: "-Xmx4096m"
+
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
         env:

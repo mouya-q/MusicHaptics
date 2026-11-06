@@ -508,6 +508,10 @@ fun HapticDashboard() {
     var customBassBoost by remember {
         mutableStateOf(prefs.getFloat("haptic_bass_boost", 1.6f).let { if (it.isFinite()) it.coerceIn(1.0f, 2.5f) else 1.6f })
     }
+    // Light/heavy contrast: above 1 widens the gap between soft and hard hits.
+    var dynamicsContrast by remember {
+        mutableStateOf(prefs.getFloat("dynamics_contrast", 1.0f).let { if (it.isFinite()) it.coerceIn(0.5f, 2.0f) else 1.0f })
+    }
     // Haptic lead (+) / lag (-) against the computed audible time, in ms.
     var syncOffsetMs by remember {
         mutableStateOf(prefs.getFloat("sync_offset_ms", 0f).let { if (it.isFinite()) it.coerceIn(-100f, 200f) else 0f })
@@ -548,7 +552,7 @@ fun HapticDashboard() {
     var dashboardTab by rememberSaveable { mutableStateOf(DashboardTab.CONSOLE) }
     val liquidGlassBackdrop = rememberLayerBackdrop()
  
-LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoost, syncOffsetMs,
+LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoost, syncOffsetMs, dynamicsContrast,
                   stylePreset,
                   isForceDefaultAmpActive,
                  synthLraF0, synthLraQ, synthRateHz, synthAttackImpact, synthDecayImpact, synthAttackContinuous, synthDecayContinuous,
@@ -561,6 +565,7 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
              putFloat("haptic_amplitude", customAmplitude)
              putFloat("haptic_bass_boost", customBassBoost)
              putFloat("sync_offset_ms", syncOffsetMs)
+             putFloat("dynamics_contrast", dynamicsContrast)
              putString("style_preset", stylePreset.key)
              putFloat("synth_lra_f0", synthLraF0)
              putFloat("synth_lra_q", synthLraQ)
@@ -698,6 +703,7 @@ LaunchedEffect(isMasterSwitchOn, selectedPreset, customAmplitude, customBassBoos
 
                 isForceDefaultAmpActive, { isForceDefaultAmpActive = !isForceDefaultAmpActive },
                 syncOffsetMs = syncOffsetMs, onSyncOffsetChange = { syncOffsetMs = it },
+                dynamicsContrast = dynamicsContrast, onDynamicsContrastChange = { dynamicsContrast = it },
             )
             IOSConsole(
                 modifier = Modifier.fillMaxWidth(), isExpanded = consoleExpanded,
@@ -1112,8 +1118,11 @@ private fun WhitelistPanel(
     var syncMs by remember(packageName) {
         mutableStateOf(scopedPrefs.getFloat("sync_offset_ms", global.getFloat("sync_offset_ms", 0f)).let { if (it.isFinite()) it.coerceIn(-100f, 200f) else 0f })
     }
-    LaunchedEffect(enabled, amp, boost, syncMs) {
-        scopedPrefs.edit().putBoolean("master_switch", enabled).putFloat("haptic_amplitude", amp).putFloat("haptic_bass_boost", boost).putFloat("sync_offset_ms", syncMs).apply()
+    var contrast by remember(packageName) {
+        mutableStateOf(scopedPrefs.getFloat("dynamics_contrast", global.getFloat("dynamics_contrast", 1.0f)).let { if (it.isFinite()) it.coerceIn(0.5f, 2.0f) else 1.0f })
+    }
+    LaunchedEffect(enabled, amp, boost, syncMs, contrast) {
+        scopedPrefs.edit().putBoolean("master_switch", enabled).putFloat("haptic_amplitude", amp).putFloat("haptic_bass_boost", boost).putFloat("sync_offset_ms", syncMs).putFloat("dynamics_contrast", contrast).apply()
         // P1: Deliver to current package only; no global broadcast.
         runCatching { ConfigRefreshReceiver.sendRefresh(context, listOf(packageName)) }
             .onFailure { Log.w("HapticDashboard", "scoped refresh failed", it) }
@@ -1130,6 +1139,7 @@ private fun WhitelistPanel(
             Text(stringResource(R.string.dedicated_intensity), color=textPrimary(), fontWeight=FontWeight.SemiBold)
             IOSSettingSliderRow(stringResource(R.string.total_intensity), amp, .5f..3.5f, "x") { amp = it }
             IOSSettingSliderRow(stringResource(R.string.bass_boost), boost, 1f..2.5f, "x") { boost = it }
+            IOSSettingSliderRow("轻重对比", contrast, 0.5f..2.0f, "x") { contrast = it }
             IOSSettingSliderRow("同步补偿", syncMs, -100f..200f, "ms") { syncMs = it }
         }
     }
@@ -1345,6 +1355,7 @@ fun IOSControlPanel(
     stylePreset: StylePreset, onStylePresetChange: (StylePreset) -> Unit,
     isForceDefaultAmpActive: Boolean = false, onForceDefaultAmpClick: () -> Unit = {},
     syncOffsetMs: Float = 0f, onSyncOffsetChange: (Float) -> Unit = {},
+    dynamicsContrast: Float = 1.0f, onDynamicsContrastChange: (Float) -> Unit = {},
 ) {
     val context = LocalContext.current
     val hapticEngine = remember { HapticFeedbackEngine.create(context) }
@@ -1356,10 +1367,11 @@ fun IOSControlPanel(
             IOSSegmentedControl(items = Preset.entries.toList(), selected = selectedPreset, onSelect = onPresetChange, label = { it.label })
             IOSSettingSliderRow("整体力度", customAmplitude, 0.5f..3.5f, "x", onAmplitudeChange)
             IOSSettingSliderRow("低频权重", customBassBoost, 1.0f..2.5f, "x", onBassBoostChange)
+            IOSSettingSliderRow("轻重对比", dynamicsContrast, 0.5f..2.0f, "x", onDynamicsContrastChange)
             IOSSettingSliderRow("同步补偿", syncOffsetMs, -100f..200f, "ms", onSyncOffsetChange)
             Text(
                 "力度采用软限幅保留强弱层次；风格预设控制起音、释放与频段；硬件上限按机型单独约束；" +
-                    "同步补偿为正时振动更早触发（振动慢于声音就调大），为负则更晚",
+                    "轻重对比大于 1 时轻拍更轻、重拍更重；同步补偿为正时振动更早触发（振动慢于声音就调大），为负则更晚",
                 color = textTertiary(), fontSize = 11.sp
             )
             

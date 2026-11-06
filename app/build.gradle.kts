@@ -30,8 +30,8 @@ android {
         applicationId = "com.mouya.musichaptics"
         minSdk = 28
         targetSdk = 35
-        versionCode = 60302
-        versionName = "6.3.2"
+        versionCode = 60400
+        versionName = "6.4.0"
         ndkVersion = "27.0.12077973"
 
 
@@ -134,6 +134,7 @@ android {
 
 dependencies {
     compileOnly("de.robv.android.xposed:api:82")
+    testImplementation("junit:junit:4.13.2")
     implementation(files("libs/libxposed-interface-101.0.0.aar"))
     implementation(files("libs/libxposed-service-101.0.0.aar"))
     implementation("androidx.core:core-ktx:1.13.1")

@@ -1,4 +1,4 @@
-# Root Direct Drive (6.3.2)
+# Root Direct Drive (6.4.0)
 
 Root is granted to the module app, never to the hooked music player. A hooked
 process therefore cannot run `su` (`Cannot run program "su": error=13`), cannot

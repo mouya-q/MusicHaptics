@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.SystemClock
 import com.mouya.musichaptics.BuildConfig
+import com.mouya.musichaptics.haptic.ExpressionActuator
+import com.mouya.musichaptics.haptic.HapticExpression
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -100,7 +102,18 @@ enum class StylePreset(
     PURE(
         "pure", "纯净", "Pure",
         120L, 1.12f, 0.74f, 0.42f, 120f, 2200f, 0.19f, 1.25f
+    ),
+    TAPTIC(
+        "taptic", "拟真", "Taptic",
+        62L, 1.15f, 0.34f, 0.95f, 40f, 700f, 0.07f, 1.20f
     );
+
+    /**
+     * Light / medium / heavy hits are made different by pulse patterns instead of by
+     * amplitude (see HapticExpression). Only meaningful, and only used, on actuators
+     * whose amplitude cannot be driven; amplitude-capable outputs keep their envelope.
+     */
+    val tiered: Boolean get() = this == TAPTIC
 
     companion object {
         fun fromKey(key: String?): StylePreset =
@@ -228,6 +241,7 @@ class HapticEngine(
     @Volatile private var activeOutputLevel: Float = 1.0f
     @Volatile private var activeBassBoost: Float = 1.0f
     @Volatile private var activeSyncOffsetMs: Int = 0
+    @Volatile private var activeDynamicsContrast: Float = 1.0f
     private val beatLogCounter = java.util.concurrent.atomic.AtomicLong(0L)
 
     private var udpSocket: DatagramSocket? = null
@@ -671,19 +685,63 @@ class HapticEngine(
         // current envelope shorter than the event gate so it finishes cleanly
         // and leaves a deliberate silent interval before the next onset.
         val maxEnvelopeMs = (effectiveCooldown - 8L).coerceAtLeast(12L).coerceAtMost(80L)
-        val duration = (planFloor * (0.48f + 0.92f * normalizedIntensity) * styleTime)
+        // Light/heavy contrast applies to every output that reads the intensity.
+        val tunedIntensity = HapticExpression.contrast(normalizedIntensity, activeDynamicsContrast)
+        val duration = (planFloor * (0.48f + 0.92f * tunedIntensity) * styleTime)
             .toLong().coerceIn(12L, maxEnvelopeMs)
-        val shaped = hapticSynthesizer.sculptImpact(
-            event = plan.event,
-            intensity = normalizedIntensity,
-            levelScale = level,
-            durationMs = duration,
-            sharpness = style.sharpness,
-            bassBoost = eventBass,
-            ampScale = style.ampScale,
-            accentScale = style.accentScale,
-            thermalInput = 1f,
-        )
+
+        // Outputs that cannot take an amplitude envelope (HAL-owned amplitude, or no
+        // amplitude control at all) express weight through pulse patterns instead.
+        val patternOnly = vibrateProxy.forceDefaultAmplitude || !vibrateProxy.hasAmplitudeControl
+        val tiered = style.tiered && patternOnly && !nativeDrivingDirect
+        var tierLabel = ""
+        val shapedBase = if (tiered) {
+            val pattern = HapticExpression.tieredPattern(
+                event = plan.event,
+                intensity = tunedIntensity,
+                actuator = ExpressionActuator(
+                    riseTimeMs = deviceProfile.actuator.riseTimeMs,
+                    fallTimeMs = deviceProfile.actuator.fallTimeMs
+                ),
+                maxTotalMs = maxEnvelopeMs,
+                // Without amplitude control the composition fallback reads amplitudes to pick
+                // TICK / CLICK / THUD; with a forced default amplitude they are ignored.
+                pulseAmplitudes = !vibrateProxy.forceDefaultAmplitude
+            )
+            tierLabel = pattern.weight.name
+            HapticSynthesizer.SculptedImpact(pattern.timings, pattern.amplitudes, pattern.peakAmplitude, pattern.totalMs)
+        } else {
+            hapticSynthesizer.sculptImpact(
+                event = plan.event,
+                intensity = tunedIntensity,
+                levelScale = level,
+                durationMs = duration,
+                sharpness = style.sharpness,
+                bassBoost = eventBass,
+                ampScale = style.ampScale,
+                accentScale = style.accentScale,
+                thermalInput = 1f,
+            )
+        }
+        // Amplitude-capable outputs keep their envelope; the Taptic style adds a soft
+        // rumble tail to heavy kicks there, which is what a bass hit is missing on them.
+        val shaped = if (style.tiered && !patternOnly && !nativeDrivingDirect) {
+            val tail = HapticExpression.withBassAfterglow(
+                event = plan.event,
+                intensity = tunedIntensity,
+                timings = shapedBase.timings,
+                amplitudes = shapedBase.amplitudes,
+                actuator = ExpressionActuator(
+                    riseTimeMs = deviceProfile.actuator.riseTimeMs,
+                    fallTimeMs = deviceProfile.actuator.fallTimeMs
+                ),
+                maxTotalMs = maxEnvelopeMs
+            )
+            if (tail != null) {
+                tierLabel = "HEAVY+TAIL"
+                HapticSynthesizer.SculptedImpact(tail.first, tail.second, shapedBase.peakAmplitude, tail.first.sum())
+            } else shapedBase
+        } else shapedBase
 
         val useDynamic = !vibrateProxy.forceDefaultAmplitude
         val usedDynamic = if (nativeDrivingDirect) {
@@ -709,7 +767,7 @@ class HapticEngine(
         val beatCounter = beatLogCounter.incrementAndGet()
         if (beatCounter <= 12 || beatCounter % 40 == 0L) {
             val pathLabel = if (nativeDrivingDirect) "NativeDD" else if (usedDynamic) "DynamicEffect" else "Waveform"
-            val msg = "[BEAT] #$beatCounter ${plan.event} raw=$intensity style=${style.key} level=${"%.2f".format(level)} peak=${shaped.peakAmplitude} duration=${shaped.totalDurationMs}ms cooldown=${effectiveCooldown}ms path=$pathLabel"
+            val msg = "[BEAT] #$beatCounter ${plan.event} raw=$intensity style=${style.key} level=${"%.2f".format(level)} peak=${shaped.peakAmplitude} duration=${shaped.totalDurationMs}ms cooldown=${effectiveCooldown}ms path=$pathLabel${if (tierLabel.isNotEmpty()) " tier=$tierLabel pulses=${shaped.timings.size}" else ""}"
             Log.i(TAG, msg)
             LogBroadcaster.sendLog(context, msg)
         }
@@ -893,6 +951,9 @@ class HapticEngine(
             .getOrDefault(0f).let { if (it.isFinite()) it.coerceIn(-150f, 250f) else 0f }
         activeSyncOffsetMs = syncOffsetMs.toInt()
         nativeBridge.setSyncOffsetMs(activeSyncOffsetMs)
+        // Light/heavy contrast: 1.0 leaves intensities untouched.
+        activeDynamicsContrast = runCatching { prefs.getFloat("dynamics_contrast", 1.0f) }
+            .getOrDefault(1.0f).let { if (it.isFinite()) it.coerceIn(0.5f, 2.0f) else 1.0f }
 
         nativeBridge.configure(
             sampleRate = sampleRate.toFloat(),

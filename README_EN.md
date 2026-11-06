@@ -51,6 +51,7 @@ The goal is not to make the phone vibrate continuously with the music. It is to 
 - **Playback-clock sync** — each onset is scheduled for the moment it is actually heard (from `AudioTrack.getTimestamp()`), not for the moment its PCM was analysed; a "Sync compensation" slider trims it globally or per app.
 - **Onset localisation** — the attack is placed within about 1 ms inside the 21 ms analysis window.
 - **Root direct-drive service** — the module process keeps a root receiver on loopback UDP, so the player process needs no root; a lost receiver is re-probed and the engine falls back to the Android Vibrator meanwhile.
+- **Light/heavy expression** — a new "Taptic" style and a "Light/heavy contrast" slider: hits are classed light, medium or heavy and expressed by what the device can do (amplitude envelope, haptic primitives, or on outputs with no amplitude control, pulse count and length scaled by the motor's rise and fall time).
 - **ARM64 Native** — release Native binaries target modern ARM64 Android devices.
 
 ---
@@ -337,6 +338,7 @@ Credits:
 - [`docs/SYNC_AND_TIMING.md`](docs/SYNC_AND_TIMING.md) — playback-clock sync and onset localisation
 - [`docs/ROOT_DIRECT_DRIVE.md`](docs/ROOT_DIRECT_DRIVE.md) — root direct-drive service
 - [`docs/APP_SCOPE.md`](docs/APP_SCOPE.md) — app scope and whitelist
+- [`docs/HAPTIC_EXPRESSION.md`](docs/HAPTIC_EXPRESSION.md) — light/heavy expression across devices
 - [`docs/RELEASE_NOTES_6.3.1.md`](docs/RELEASE_NOTES_6.3.1.md) — 6.3.1 release notes
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — contribution guide
 - [`SECURITY.md`](SECURITY.md) — security notes

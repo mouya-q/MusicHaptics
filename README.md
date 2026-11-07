@@ -10,12 +10,9 @@
 
 **简体中文** | [English](README_EN.md)
 
-> 一个面向 Android 的 LSPosed 音乐触觉模块。  
-> 从播放器获取 PCM 音频，提取瞬态、频段与节奏信息，再结合设备执行器特性生成短促、动态的触觉反馈。
-
-MusicHapticsX 的目标不是让手机“跟着音乐一直震”，而是让真正有意义的音乐事件落在触觉上：鼓点更有冲击，人声保持轻柔，低频形成身体感，同时避免连续轰鸣。
-
-> MusicHapticsX 是独立开源项目，与 Xiaomi、HyperOS、Apple、LSPosed 或任何音乐服务提供商不存在官方隶属或背书关系。
+> 一个面向 Android 的 LSPosed 音乐触觉模块
+> 从播放器获取 PCM 音频，提取瞬态、频段与节奏信息，再结合设备执行器特性生成短促、动态的触觉反馈
+> MusicHapticsX 是独立开源项目，与 Xiaomi、HyperOS、Apple、LSPosed 或任何音乐服务提供商不存在官方隶属或背书关系
 
 ---
 
@@ -38,20 +35,20 @@ MusicHapticsX 的目标不是让手机“跟着音乐一直震”，而是让真
 
 ## 特性
 
-- **AudioTrack Hook** — 覆盖常见 `write(ByteArray / ShortArray / FloatArray / ByteBuffer, …)` 路径，并跟踪播放生命周期。
+- **AudioTrack Hook** — 覆盖常见 `write(ByteArray / ShortArray / FloatArray / ByteBuffer, …)` 路径，并跟踪播放生命周期
 - **PCM 优先** — 直接处理播放器 PCM；没有可用 PCM 时可延迟启用 Visualizer 作为兼容回退。
-- **Native DSP** — C++ 固定内存分析核心，包含 RMS、五段频带、512 点 FFT、谱流量、谱质心、自相关基频估计和瞬态检测。
-- **语义事件** — 将音乐拆分为 `KICK / SNARE / VOCAL / BODY`，而不是简单跟随总音量。
-- **动态触觉** — 事件强度会影响振幅、持续时间与 envelope，不再让所有鼓点变成同一个力度。
-- **执行器感知** — 根据设备档案调整增益、时长、冷却、频段权重和输出策略。
+- **Native DSP** — C++ 固定内存分析核心，包含 RMS、五段频带、512 点 FFT、谱流量、谱质心、自相关基频估计和瞬态检测
+- **语义事件** — 将音乐拆分为 `KICK / SNARE / VOCAL / BODY`，而不是简单跟随总音量
+- **动态触觉** — 事件强度会影响振幅、持续时间与 envelope，不再让所有鼓点变成同一个力度
+- **执行器感知** — 根据设备档案调整增益、时长、冷却、频段权重和输出策略
 - **Strike-only 支持** — 对 AW8697 / AW86224 等 one-shot 节点避免错误地当作连续幅值接口使用。
-- **播放时钟同步** — 用 `AudioTrack.getTimestamp()` 估算每个起音实际被听到的时刻，振动在声音出现时触发，而不是在 PCM 被分析时触发；设置页提供“同步补偿”微调（全局与分应用）。
-- **起音定位** — 在 21 ms 分析窗口内把攻击点定位到约 1 ms，而不是只知道“窗口里某处”。
-- **Root 直驱服务** — 模块进程以 root 常驻一个本机 UDP 接收端，播放器进程不需要 root 也能走直驱；失联后自动重新探测并回退到 Android Vibrator。
-- **轻重表达** — 新的“拟真”风格与“轻重对比”滑块：轻、中、重三类打击按设备能力表达（振幅包络、触觉原语，或在无法控制振幅的设备上用脉冲个数和时长），时长随马达的上升/下降时间缩放。
-- **应用白名单** — LSPosed 负责注入范围，MusicHapticsX 再通过独立白名单决定实际处理哪些应用。
-- **LiquidGlass UI** — 设置、应用列表和控制台采用独立 `:liquidglass` 模块，并提供普通半透明降级路径。
-- **ARM64 Native** — 发布目标集中于现代 ARM64 Android 设备。
+- **播放时钟同步** — 用 `AudioTrack.getTimestamp()` 估算每个起音实际被听到的时刻，振动在声音出现时触发，而不是在 PCM 被分析时触发；设置页提供“同步补偿”微调（全局与分应用）
+- **起音定位** — 在 21 ms 分析窗口内把攻击点定位到约 1 ms，而非只知道窗口里某处
+- **Root 直驱服务** — 模块进程以 root 常驻一个本机 UDP 接收端，播放器进程不需要 root 也能走直驱；失联后自动重新探测并回退到 Android Vibrator
+- **轻重表达** — 新的“拟真”风格与“轻重对比”滑块：轻、中、重三类打击按设备能力表达（振幅包络、触觉原语，或在无法控制振幅的设备上用脉冲个数和时长），时长随马达的上升/下降时间缩放
+- **应用白名单** — LSPosed 负责注入范围，MusicHapticsX 再通过独立白名单决定实际处理哪些应用
+- **LiquidGlass UI** — 设置、应用列表和控制台采用独立 `:liquidglass` 模块，并提供普通半透明降级路径
+- **ARM64 Native** — 发布目标集中于现代 ARM64 Android 设备
 
 ---
 
@@ -85,9 +82,9 @@ HapticSynthesizer
 Direct Drive    Android Vibrator
 ```
 
-Hook 线程只负责拦截、轻量参数读取和 PCM 归一化。FFT、滤波、概率更新和触觉合成不会直接运行在宿主播放器的音频写线程上。
+Hook 线程只负责拦截、轻量参数读取和 PCM 归一化。FFT、滤波、概率更新和触觉合成不会直接运行在宿主播放器的音频写线程上
 
-音频入口使用有界 16 槽队列，每槽最多 256 个单声道帧。负载过高时优先丢弃过时数据，而不是让延迟无限增长。
+音频入口使用有界 16 槽队列，每槽最多 256 个单声道帧。负载过高时优先丢弃过时数据，而不是让延迟无限增长
 
 ---
 
@@ -95,21 +92,13 @@ Hook 线程只负责拦截、轻量参数读取和 PCM 归一化。FFT、滤波�
 
 当前 Native DSP 主要包含：
 
-1. **输入整形** — PCM16、Float PCM、ByteBuffer 统一为单声道分析流。
-2. **频段分析** — 约 80–180 Hz、180–500 Hz、500–3000 Hz、3–8 kHz、8 kHz 以上。
-3. **能量特征** — RMS、绝对幅度、零交叉率和动态变化。
-4. **频谱特征** — 512 点窗口 FFT、谱流量、低/高频谱流量和谱质心。
-5. **周期性分析** — 节流后的自相关基频估计。
-6. **瞬态检测** — 关注 attack / onset 变化，而不是简单读取当前音量。
-7. **语义分层** — 将结果转换成 KICK、SNARE、VOCAL、BODY。
-
-### 为什么不用“整首歌跟随音量”
-
-单纯 RMS → vibration 会产生一个明显问题：音乐越响，手机越一直震；鼓点、声乐和背景低频没有区别。
-
-MusicHapticsX 使用瞬态和频段信息先判断“发生了什么”，再决定“应该怎么震”。
-
----
+1. **输入整形** — PCM16、Float PCM、ByteBuffer 统一为单声道分析流
+2. **频段分析** — 约 80–180 Hz、180–500 Hz、500–3000 Hz、3–8 kHz、8 kHz 以上
+3. **能量特征** — RMS、绝对幅度、零交叉率和动态变化
+4. **频谱特征** — 512 点窗口 FFT、谱流量、低/高频谱流量和谱质心
+5. **周期性分析** — 节流后的自相关基频估计
+6. **瞬态检测** — 关注 attack / onset 变化
+7. **语义分层** — 将结果转换成 KICK、SNARE、VOCAL、BODY
 
 ## 触觉合成
 
@@ -132,16 +121,7 @@ Actuator-aware Sculpting
       ├─ calibrated primitive
       └─ multi-segment waveform
 ```
-
-核心原则：
-
-- attack 要短；
-- body 要比 tail 更重要；
-- tail 不能覆盖下一拍；
-- 连续层只能增加存在感，不能抢走瞬态；
-- 快歌优先保持事件新鲜度，而不是积压旧事件。
-
-5.4.x 进一步修正了动态强度和持续时间：强弱拍不再全部撞到同一个振幅上，事件持续时间也会随强度变化。
+5.4.x 进一步修正了动态强度和持续时间：强弱拍不再全部撞到同一个振幅上，事件持续时间也会随强度变化
 
 ---
 
@@ -171,9 +151,9 @@ HapticImpactPolicy
 VibrateProxy / direct drive
 ```
 
-当前源码包含 Xiaomi、Redmi、OnePlus、OPPO、Lenovo、Samsung、vivo / iQOO 等设备家族的命名档案，并为未知设备保留通用 fallback。
+当前源码包含 Xiaomi、Redmi、OnePlus、OPPO、Lenovo、Samsung、vivo / iQOO 等设备家族的命名档案，并为未知设备保留通用 fallback
 
-> “深度适配”表示档案参数实际参与渲染决策，不代表所有执行器参数都是厂商公开规格。部分曲线属于项目的实机经验模型。
+> “深度适配”表示档案参数实际参与渲染决策，不代表所有执行器参数都是厂商公开规格，部分曲线属于项目的实机经验模型
 
 ---
 
@@ -188,14 +168,14 @@ VibrateProxy / direct drive
 
 ### 步骤
 
-1. 安装 MusicHapticsX APK。
-2. 在 LSPosed 中启用模块。
-3. 将需要处理的音乐应用加入 LSPosed scope。
-4. 在 MusicHapticsX 中启用对应应用的白名单。
-5. 强制停止目标应用并重新打开。
-6. 播放音乐并观察控制台日志。
+1. 安装 MusicHapticsX APK
+2. 在 LSPosed 中启用模块
+3. 将需要处理的音乐应用加入 LSPosed scope
+4. 在 MusicHapticsX 中启用对应应用的白名单
+5. 强制停止目标应用并重新打开
+6. 播放音乐并观察控制台日志
 
-正式使用建议保持 `whitelist` 模式，不要使用 `mode=all`。
+正式使用建议保持 `whitelist` 模式，不要使用 `mode=all`
 
 ---
 
@@ -218,7 +198,7 @@ com.spotify.music
 
 `mode=all` 仅用于调试。
 
-运行时配置通过只读 `ContentProvider` 同步到目标进程。Provider 会检查调用方包名、目标包名格式和白名单状态。
+运行时配置通过只读 `ContentProvider` 同步到目标进程，Provider 会检查调用方包名、目标包名格式和白名单状态
 
 ---
 
@@ -275,7 +255,7 @@ MusicHapticsX/
 python3 scripts/repo_check.py
 ```
 
-Release 构建在 CI 中使用固定签名密钥；本地或没有 CI secrets 的构建会回退到 debug signing。
+Release 构建在 CI 中使用固定签名密钥；本地或没有 CI secrets 的构建会回退到 debug signing
 
 当前 Native 发布目标为：
 
@@ -289,44 +269,43 @@ arm64-v8a
 
 建议至少验证以下场景：
 
-1. 模块关闭时目标播放器正常播放。
-2. 只启用一个播放器，确认只有白名单应用被处理。
-3. 测试静音、人声、鼓点和密集电子音乐。
-4. 测试连续 8 分音符 / 16 分音符，确认不会变成持续电机声。
-5. 对不同设备 profile 检查时长和 cooldown 是否确实发生变化。
-6. 分别验证 direct-drive 和 Android Vibrator fallback。
-7. 暂停、切歌、退出后台后确认触觉及时释放。
-8. 没有 AudioTrack PCM 的应用验证 Visualizer fallback。
-9. 长时间播放后检查温升模型与实际触感是否稳定。
+1. 模块关闭时目标播放器正常播放
+2. 只启用一个播放器，确认只有白名单应用被处理
+3. 测试静音、人声、鼓点和密集电子音乐
+4. 测试连续 8 分音符 / 16 分音符，确认不会变成持续电机声
+5. 对不同设备 profile 检查时长和 cooldown 是否确实发生变化
+6. 分别验证 direct-drive 和 Android Vibrator fallback
+7. 暂停、切歌、退出后台后确认触觉及时释放
+8. 没有 AudioTrack PCM 的应用验证 Visualizer fallback
+9. 长时间播放后检查温升模型与实际触感是否稳定
 
 ---
 
 ## 已知限制
 
-- 不同厂商 `/sys` 触觉节点没有统一语义；未知设备优先使用 Android Vibrator fallback。
-- 同步依赖播放器输出路径提供可用的 `AudioTrack` 时间戳；拿不到时退回播放头估算，仍不可用则按旧方式即时触发。
-- 默认路径延迟（直驱 10 ms，Android Vibrator 25 ms）是估算值，不同机型请用“同步补偿”微调。
-- Visualizer 是兼容路径，不等价于直接 PCM Hook，延迟和动态范围会不同。
-- Root direct-drive 依赖厂商节点与 SELinux 策略，系统升级后可能变化。
-- 设备调音来自项目实机测试，不意味着同一参数适用于同厂商所有设备。
-- 当前发布只提供 `arm64-v8a` Native 库。
+- 不同厂商 `/sys` 触觉节点没有统一语义；未知设备优先使用 Android Vibrator fallback
+- 同步依赖播放器输出路径提供可用的 `AudioTrack` 时间戳；拿不到时退回播放头估算，仍不可用则按旧方式即时触发
+- 默认路径延迟（直驱 10 ms，Android Vibrator 25 ms）是估算值，不同机型请用“同步补偿”微调
+- Visualizer 是兼容路径，不等价于直接 PCM Hook，延迟和动态范围会不同
+- Root direct-drive 依赖厂商节点与 SELinux 策略，系统升级后可能变化
+- 设备调音来自项目实机测试，不意味着同一参数适用于同厂商所有设备
+- 当前发布只提供 `arm64-v8a` Native 库
 
 ---
 
 ## 第三方与许可
 
-MusicHapticsX 主体采用 **MIT License**。
+MusicHapticsX 主体采用 **MIT License**
 
-第三方声明见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+第三方声明见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
 
-项目中的 LiquidGlass / Backdrop 源码保留其 Apache-2.0 许可文件。
+项目中的 LiquidGlass / Backdrop 源码保留其 Apache-2.0 许可文件
 
 感谢：
 
-- [AndroidLiquidGlass](https://github.com/Kyant0/AndroidLiquidGlass) — LiquidGlass / Backdrop 实现。
-- [KISS FFT](https://github.com/mborgerding/kissfft) — FFT 方案参考。
-- Android / Jetpack Compose / LSPosed 社区。
-
+- [AndroidLiquidGlass](https://github.com/Kyant0/AndroidLiquidGlass) — LiquidGlass / Backdrop 实现
+- [KISS FFT](https://github.com/mborgerding/kissfft) — FFT 方案参考
+- Android / Jetpack Compose / LSPosed 社区
 ---
 
 ## 文档

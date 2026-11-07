@@ -242,10 +242,15 @@ class HapticEngine(
     @Volatile private var activeBassBoost: Float = 1.0f
     @Volatile private var activeSyncOffsetMs: Int = 0
     @Volatile private var activeDynamicsContrast: Float = 1.0f
+    /** When a kick or snare last played in Taptic style; texture events wait for a gap after it. */
+    private var lastRhythmPlayedMs = 0L
     private val beatLogCounter = java.util.concurrent.atomic.AtomicLong(0L)
 
     private var udpSocket: DatagramSocket? = null
     private var udpParcel: ParcelFileDescriptor? = null
+    @Volatile private var udpInitRequested = false
+    private var udpRecreateAttempts = 0
+    private var udpLastRecreateMs = 0L
 
     @Volatile private var rootPipeProcess: Process? = null
     @Volatile private var rootPipeStream: java.io.OutputStream? = null
@@ -366,7 +371,30 @@ class HapticEngine(
     }
 
     
+    /**
+     * Rebuild the UDP socket when native reports that the descriptor it was handed is not a
+     * socket (ENOTSOCK / EBADF) or failed validation. Called from the 2 s diagnostics tick;
+     * throttled and capped so a device that cannot create the socket does not loop.
+     */
+    private fun recreateUdpTransportIfBroken(stats: LongArray?) {
+        if (!udpInitRequested || stats == null || stats.size < 10) return
+        val broken = (stats[3] == 2L && (stats[8] == 88L || stats[8] == 9L)) || stats[9] != 0L
+        if (!broken || udpRecreateAttempts >= 6) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - udpLastRecreateMs < 3_000L) return
+        udpLastRecreateMs = now
+        udpRecreateAttempts++
+        LogBroadcaster.sendLog(context, "[UDP] descriptor unusable (errno=${stats[8]}/${stats[9]}), recreating socket, attempt $udpRecreateAttempts")
+        try { initUdpRootTransport() } catch (_: Throwable) {}
+    }
+
     private fun initUdpRootTransport() {
+        udpInitRequested = true
+        // Re-initialisation must not leave the previous socket behind.
+        try { udpParcel?.close() } catch (_: Exception) {}
+        try { udpSocket?.close() } catch (_: Exception) {}
+        udpParcel = null
+        udpSocket = null
         try {
             val socket = DatagramSocket()
             socket.connect(java.net.InetAddress.getByName("127.0.0.1"), RootHapticDaemon.DAEMON_PORT)
@@ -673,6 +701,16 @@ class HapticEngine(
 
         val deviceCooldown = DeviceTuningRegistry.current(deviceProfile).minIntervalMs
         val effectiveCooldown = maxOf(plan.cooldownMs, style.cooldownMs, deviceCooldown)
+        // Taptic style is restrained: ghost notes are dropped and vocal/body texture only
+        // fills gaps in the rhythm, so the result is a backbone, not clutter. This runs
+        // before the cooldown claim below, so a dropped note never uses up the slot.
+        if (style.tiered && !HapticExpression.shouldPlay(
+                plan.event,
+                HapticExpression.contrast(normalizedIntensity, activeDynamicsContrast),
+                now - lastRhythmPlayedMs
+            )
+        ) return
+
         val previous = lastVibrationMs.get()
         if (now - previous < effectiveCooldown) return
         if (!lastVibrationMs.compareAndSet(previous, now)) return
@@ -687,6 +725,7 @@ class HapticEngine(
         val maxEnvelopeMs = (effectiveCooldown - 8L).coerceAtLeast(12L).coerceAtMost(80L)
         // Light/heavy contrast applies to every output that reads the intensity.
         val tunedIntensity = HapticExpression.contrast(normalizedIntensity, activeDynamicsContrast)
+
         val duration = (planFloor * (0.48f + 0.92f * tunedIntensity) * styleTime)
             .toLong().coerceIn(12L, maxEnvelopeMs)
 
@@ -764,6 +803,7 @@ class HapticEngine(
         }
 
         lastBeatEvent = plan.event
+        if (style.tiered && HapticExpression.isRhythm(plan.event)) lastRhythmPlayedMs = now
         val beatCounter = beatLogCounter.incrementAndGet()
         if (beatCounter <= 12 || beatCounter % 40 == 0L) {
             val pathLabel = if (nativeDrivingDirect) "NativeDD" else if (usedDynamic) "DynamicEffect" else "Waveform"
@@ -1154,7 +1194,8 @@ class HapticEngine(
             // One line that shows where the onset -> motor chain stops: the native
             // scheduler's timed-queue counters, then what reached Kotlin.
             val st = nativeBridge.syncStats()
-            val chain = "[CHAIN] timed fired=${st?.get(0)} lateDropped=${st?.get(1)} untimed=${st?.get(2)} | udp state=${st?.get(3)} sent=${st?.get(4)} fail=${st?.get(5)} up=${st?.get(6)} down=${st?.get(7)} errno=${st?.get(8)} | kotlinBeats=${beatLogCounter.get()} paused=$hapticPaused enabled=${isEngineEnabled.get()} trimMs=$activeSyncOffsetMs"
+            recreateUdpTransportIfBroken(st)
+            val chain = "[CHAIN] timed fired=${st?.get(0)} lateDropped=${st?.get(1)} untimed=${st?.get(2)} | udp state=${st?.get(3)} sent=${st?.get(4)} fail=${st?.get(5)} up=${st?.get(6)} down=${st?.get(7)} errno=${st?.get(8)}/${st?.get(9)} | kotlinBeats=${beatLogCounter.get()} paused=$hapticPaused enabled=${isEngineEnabled.get()} trimMs=$activeSyncOffsetMs"
             Log.i(TAG, chain)
             LogBroadcaster.sendLog(context, chain)
         }

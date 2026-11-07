@@ -1,4 +1,4 @@
-# Haptic Output Policy (6.4.0)
+# Haptic Output Policy (6.4.1)
 
 ## Processing contract
 

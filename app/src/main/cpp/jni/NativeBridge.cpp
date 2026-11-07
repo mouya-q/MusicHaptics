@@ -166,6 +166,8 @@ static std::atomic<uint64_t> g_udp_send_fail{0};
 static std::atomic<uint64_t> g_udp_alive_events{0};
 static std::atomic<uint64_t> g_udp_dead_events{0};
 static std::atomic<int> g_udp_last_errno{0};
+// errno of the last failed validation of the socket handed over by Java (0 = valid).
+static std::atomic<int> g_udp_init_errno{0};
 
 
 #pragma pack(push, 1)
@@ -257,6 +259,7 @@ static bool init_haptic_udp(int port) {
 
 
 static bool init_haptic_udp_from_fd(int fd, int port) {
+    // The descriptor kept here is always a private duplicate, closed only by us.
     int oldFd = g_udp_sock_fd.exchange(-1, std::memory_order_acquire);
     if (oldFd >= 0) {
         close(oldFd);
@@ -265,8 +268,39 @@ static bool init_haptic_udp_from_fd(int fd, int port) {
 
     if (fd < 0) {
         LOGE("[UDP] init_haptic_udp_from_fd: invalid fd");
+        g_udp_init_errno.store(EBADF, std::memory_order_relaxed);
         return false;
     }
+
+    // Prove it is a datagram socket before trusting it. A trace showed every probe
+    // failing with ENOTSOCK (88): the number Java had handed over did not refer to a
+    // socket (any close on the Java side, or the number being reused, does that),
+    // and nothing noticed, so direct drive never came up.
+    int sockType = 0;
+    socklen_t sockTypeLen = sizeof(sockType);
+    const int sockoptResult = getsockopt(fd, SOL_SOCKET, SO_TYPE, &sockType, &sockTypeLen);
+    const int sockoptErrno = errno;
+    // Only reject on positive evidence. A sandbox that merely refuses getsockopt
+    // (EPERM / ENOSYS) says nothing about the descriptor, so carry on in that case.
+    const bool notASocket = (sockoptResult != 0 && (sockoptErrno == ENOTSOCK || sockoptErrno == EBADF)) ||
+                            (sockoptResult == 0 && sockType != SOCK_DGRAM);
+    if (notASocket) {
+        LOGE("[UDP] fd=%d is not a datagram socket (errno=%d type=%d)", fd, sockoptErrno, sockType);
+        g_udp_init_errno.store(sockoptResult != 0 ? sockoptErrno : ENOTSOCK, std::memory_order_relaxed);
+        return false;
+    }
+    if (sockoptResult != 0) LOGW("[UDP] getsockopt(SO_TYPE) refused (errno=%d); continuing", sockoptErrno);
+    // Own the descriptor: Java keeps and may close its copy independently, and
+    // this side must never close a descriptor owned by a ParcelFileDescriptor.
+    const int owned = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+    if (owned < 0) {
+        const int err = errno;
+        LOGE("[UDP] dup of fd=%d failed: errno=%d", fd, err);
+        g_udp_init_errno.store(err, std::memory_order_relaxed);
+        return false;
+    }
+    g_udp_init_errno.store(0, std::memory_order_relaxed);
+    fd = owned;
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -330,7 +364,8 @@ static bool send_haptic_udp(uint8_t amplitude, uint16_t durationMs, uint8_t flag
         // reliable evidence that the receiver is gone. Demote the transport so
         // the engine stops believing direct drive works and falls back to its
         // own vibration path instead of going silent.
-        if (errno == ECONNREFUSED || errno == EPIPE || errno == ENOTCONN) {
+        if (errno == ECONNREFUSED || errno == EPIPE || errno == ENOTCONN ||
+            errno == EBADF || errno == ENOTSOCK) {
             g_udp_dead_since_ns.store(monotonic_ns(), std::memory_order_release);
             if (g_udp_peer_state.exchange(2, std::memory_order_acq_rel) != 2) {
                 g_udp_dead_events.fetch_add(1, std::memory_order_relaxed);
@@ -1650,13 +1685,13 @@ Java_com_mouya_musichaptics_NativeBridge_nativeSetSyncOffsetMs(
 // out[0]=fired on time, out[1]=dropped late, out[2]=fired without an anchor,
 // out[3]=UDP peer state (0 unverified, 1 alive, 2 dead), out[4]=packets sent,
 // out[5]=send failures, out[6]=alive transitions, out[7]=dead transitions,
-// out[8]=last UDP errno.
+// out[8]=last UDP errno, out[9]=errno of the last socket validation (0 = valid).
 JNIEXPORT void JNICALL
 Java_com_mouya_musichaptics_NativeBridge_nativeSyncStats(
     JNIEnv* env, jobject, jlongArray out) {
     if (!out) return;
     const jsize length = env->GetArrayLength(out);
-    const jlong values[9] = {
+    const jlong values[10] = {
         static_cast<jlong>(g_timed_fired.load(std::memory_order_relaxed)),
         static_cast<jlong>(g_timed_late_dropped.load(std::memory_order_relaxed)),
         static_cast<jlong>(g_timed_untimed.load(std::memory_order_relaxed)),
@@ -1666,8 +1701,9 @@ Java_com_mouya_musichaptics_NativeBridge_nativeSyncStats(
         static_cast<jlong>(g_udp_alive_events.load(std::memory_order_relaxed)),
         static_cast<jlong>(g_udp_dead_events.load(std::memory_order_relaxed)),
         static_cast<jlong>(g_udp_last_errno.load(std::memory_order_relaxed)),
+        static_cast<jlong>(g_udp_init_errno.load(std::memory_order_relaxed)),
     };
-    env->SetLongArrayRegion(out, 0, std::min<jsize>(length, 9), values);
+    env->SetLongArrayRegion(out, 0, std::min<jsize>(length, 10), values);
 }
 
 JNIEXPORT jboolean JNICALL

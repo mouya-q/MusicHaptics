@@ -17,7 +17,9 @@ class TieredPattern(
     val strength: Float
 ) {
     val totalMs: Long get() = timings.sum()
-    val peakAmplitude: Int get() = amplitudes.maxOrNull()?.let { if (it < 0) (strength * 255f).toInt() else it } ?: 0
+    /** Peak for logging: the default-amplitude marker (-1) carries no number, so report the strength. */
+    val peakAmplitude: Int get() =
+        if (amplitudes.any { it < 0 }) (strength * 255f).toInt().coerceIn(1, 255) else (amplitudes.maxOrNull() ?: 0)
 }
 
 /**
@@ -89,25 +91,55 @@ object HapticExpression {
 
     private fun shapeFor(event: String, weight: HitWeight): Shape = when (event.uppercase()) {
         "KICK", "SUB" -> when (weight) {
-            HitWeight.LIGHT -> Shape(10f, 14f)
-            HitWeight.MEDIUM -> Shape(16f, 24f)
+            HitWeight.LIGHT -> Shape(12f, 16f)
+            HitWeight.MEDIUM -> Shape(18f, 24f)
             HitWeight.HEAVY -> Shape(26f, 32f, echoMin = 10f, echoMax = 14f, gap = 6f)
         }
         "SNARE" -> when (weight) {
-            HitWeight.LIGHT -> Shape(6f, 8f)
-            HitWeight.MEDIUM -> Shape(9f, 12f)
-            HitWeight.HEAVY -> Shape(12f, 15f, echoMin = 6f, echoMax = 8f, gap = 5f)
+            HitWeight.LIGHT -> Shape(8f, 10f)
+            HitWeight.MEDIUM -> Shape(11f, 14f)
+            HitWeight.HEAVY -> Shape(14f, 17f, echoMin = 7f, echoMax = 9f, gap = 5f)
         }
         "VOCAL", "TICK" -> when (weight) {
-            HitWeight.LIGHT -> Shape(5f, 7f)
-            HitWeight.MEDIUM -> Shape(8f, 10f)
-            HitWeight.HEAVY -> Shape(11f, 14f)
+            HitWeight.LIGHT -> Shape(8f, 9f)
+            HitWeight.MEDIUM -> Shape(10f, 12f)
+            HitWeight.HEAVY -> Shape(13f, 16f)
         }
         else -> when (weight) {  // BODY and anything unknown: broader, softer
-            HitWeight.LIGHT -> Shape(9f, 12f)
-            HitWeight.MEDIUM -> Shape(14f, 18f)
-            HitWeight.HEAVY -> Shape(20f, 26f)
+            HitWeight.LIGHT -> Shape(10f, 13f)
+            HitWeight.MEDIUM -> Shape(15f, 19f)
+            HitWeight.HEAVY -> Shape(21f, 27f)
         }
+    }
+
+    /** Shortest pulse a hand can feel on a small LRA; a 5 ms tick is noise, not a tap. */
+    private const val MIN_PERCEPTIBLE_PULSE_MS = 8f
+
+    /**
+     * Restraint. A light tap on every little onset reads as clutter, not as music; the
+     * design language is a clear rhythmic backbone with the rest left out. Kick and snare
+     * carry the rhythm and only need to clear a low bar. Vocal and body energy are texture:
+     * they are allowed only when they are strong and the rhythm section is quiet, so they
+     * fill the gaps instead of competing with the beat.
+     *
+     * @param msSinceRhythm time since the last kick or snare was played
+     */
+    fun shouldPlay(event: String, intensity: Float, msSinceRhythm: Long): Boolean {
+        val x = if (intensity.isFinite()) intensity else 0f
+        return when (event.uppercase()) {
+            "KICK", "SUB" -> x >= 0.14f
+            "SNARE" -> x >= 0.16f
+            else -> x >= 0.30f && msSinceRhythm >= TEXTURE_QUIET_MS
+        }
+    }
+
+    /** Texture events wait for this much rhythm silence. */
+    const val TEXTURE_QUIET_MS = 260L
+
+    /** Kick and snare define the rhythm; anything else is texture. */
+    fun isRhythm(event: String): Boolean = when (event.uppercase()) {
+        "KICK", "SUB", "SNARE" -> true
+        else -> false
     }
 
     /** Amplitude classes for devices that read amplitudes (primitive composition): TICK / CLICK / THUD. */
@@ -179,7 +211,7 @@ object HapticExpression {
         val scale = 0.6f + 0.4f * k   // 1.0 on the reference actuator, up to 1.8 on a slow one
 
         // A pulse shorter than the actuator's own rise time never reaches full strength.
-        val minPulse = rise * 1.3f
+        val minPulse = maxOf(rise * 1.3f, MIN_PERCEPTIBLE_PULSE_MS)
         var main = (shape.mainMin + (shape.mainMax - shape.mainMin) * t) * scale
         main = main.coerceAtLeast(minPulse)
         var echo = if (shape.hasEcho) ((shape.echoMin + (shape.echoMax - shape.echoMin) * t) * scale).coerceAtLeast(minPulse) else 0f

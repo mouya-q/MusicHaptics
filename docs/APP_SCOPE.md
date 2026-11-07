@@ -1,4 +1,4 @@
-# App Scope and Whitelist (6.4.0)
+# App Scope and Whitelist (6.4.1)
 
 Two separate lists decide what the module touches:
 

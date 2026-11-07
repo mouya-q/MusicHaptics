@@ -1,4 +1,4 @@
-# Root Direct Drive (6.4.0)
+# Root Direct Drive (6.4.1)
 
 Root is granted to the module app, never to the hooked music player. A hooked
 process therefore cannot run `su` (`Cannot run program "su": error=13`), cannot
@@ -53,6 +53,22 @@ few more times; the cause was not established from the log. 6.3.1 therefore adds
 - a lost receiver is re-probed after 0.4 s instead of 2 s;
 - hooked players no longer try `su` at all. The old in-process root pipe is kept
   for the module's own process only.
+
+## Why direct drive never came up in 6.4.0 (fixed in 6.4.1)
+
+The 6.4.0 trace shows `udp state=2 ... errno=88` with `down` rising every 0.25 s and
+`sent=0`: errno 88 is ENOTSOCK, so every probe failed because the descriptor native
+code was using did not refer to a socket. Native took the number from Java's
+`ParcelFileDescriptor` without duplicating or checking it, so anything that closed or
+reused that number on the Java side silently broke it, and it also closed a descriptor
+Java owned. Now:
+
+- native checks `SO_TYPE` is a datagram socket before accepting the descriptor and
+  keeps a private duplicate that only it closes;
+- `[CHAIN]` shows `errno=<last>/<validation>`; if native reports ENOTSOCK / EBADF or a
+  failed validation, the Kotlin side rebuilds the socket (every 3 s, at most 6 times).
+
+This also explains the earlier "works for a few beats, then falls back" trace.
 
 ## Verify on device
 

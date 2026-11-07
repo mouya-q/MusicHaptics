@@ -1,4 +1,4 @@
-# Haptic Expression (6.4.0)
+# Haptic Expression (6.4.1)
 
 How a hit is made to feel light, medium or heavy, on every kind of device rather than
 on one phone.
@@ -39,6 +39,19 @@ time (`ActuatorProfile`): a slow ERM-class motor gets longer pulses and wider ga
 fast X-axis LRA, a pulse is never shorter than the rise time (it would not develop), the gap
 always outlasts the fall time (or two pulses merge into one), and the whole pattern is fitted
 into the time left before the next onset. If it does not fit, the echo is dropped first.
+
+## Restraint (Taptic style)
+
+A tap on every onset is clutter, not music. Field trace (Xiaomi 10): most Taptic hits were
+5 to 8 ms vocal and body ticks at intensity 0.1 to 0.2, which are below what a small LRA can
+make felt and made the output feel messy. The style now leaves things out:
+
+- kick and snare are the rhythmic backbone and only need to clear a low bar
+  (0.14 and 0.16 intensity);
+- vocal and body energy are texture: they play only when strong (0.30) and only after
+  260 ms without a kick or snare, so they fill gaps instead of competing with the beat;
+- no pulse is shorter than 8 ms, the shortest a hand can feel on a small LRA;
+- a note that is dropped does not use up the cooldown slot, so the next real hit is not delayed.
 
 ## Settings
 

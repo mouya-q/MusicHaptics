@@ -134,6 +134,7 @@ fun Modifier.liquidGlass(corner: Dp = 22.dp): Modifier {
     
     
     val glass = glassColor()
+    val glassShadowAlpha = if (isDark()) 0.28f else 0.12f
     return if (backdrop != null) {
         this.then(Modifier.drawBackdrop(
             backdrop = backdrop,
@@ -144,7 +145,9 @@ fun Modifier.liquidGlass(corner: Dp = 22.dp): Modifier {
                 lens(8f, 18f, depthEffect = true, chromaticAberration = false)
             },
             highlight = { Highlight.Default },
-            shadow = { Shadow(radius = 22.dp, alpha = 0.42f) },
+            // A soft, tight shadow. The previous 22 dp / 0.42 alpha drop shadow read as a dark
+            // halo around every card, and doubled up wherever glass sat on glass.
+            shadow = { Shadow(radius = 16.dp, alpha = glassShadowAlpha) },
             onDrawSurface = {
                 drawRoundRect(glass, cornerRadius = CornerRadius(corner.toPx()))
             }
@@ -152,6 +155,26 @@ fun Modifier.liquidGlass(corner: Dp = 22.dp): Modifier {
     } else {
         this.then(Modifier.clip(shape).background(glassColor()).border(0.5.dp, if (isDark()) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f), shape))
     }
+}
+
+/**
+ * Surface for modal sheets and dialogs. It is opaque on purpose: the glass effect samples whatever is
+ * behind it, and over a dimmed page that showed through as ghost text and a heavy halo. One soft
+ * shadow and a hairline edge give the lift without either.
+ */
+@Composable
+private fun Modifier.sheetSurface(corner: Dp = 28.dp): Modifier {
+    val shape = RoundedCornerShape(corner)
+    val dark = isDark()
+    return this
+        .shadow(
+            elevation = 20.dp, shape = shape, clip = false,
+            ambientColor = Color.Black.copy(alpha = if (dark) 0.40f else 0.08f),
+            spotColor = Color.Black.copy(alpha = if (dark) 0.45f else 0.14f),
+        )
+        .clip(shape)
+        .background(if (dark) IOSColors.darkCard else IOSColors.lightCard)
+        .border(0.5.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.06f), shape)
 }
 
 @Composable
@@ -322,7 +345,11 @@ fun IOSSettingSliderRow(
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(label, fontSize = 15.sp, color = textPrimary())
-            Text("${String.format(Locale.ROOT, "%.1f", value)} $unit", fontSize = 15.sp, color = IOSColors.blue, fontWeight = FontWeight.Medium)
+            Text(
+                // Milliseconds are whole numbers; "-0.1 ms" meant nothing to anyone.
+                if (unit == "ms") "${value.roundToInt()} $unit" else "${String.format(Locale.ROOT, "%.1f", value)} $unit",
+                fontSize = 15.sp, color = IOSColors.blue, fontWeight = FontWeight.Medium
+            )
         }
         BoxWithConstraints(
             modifier = Modifier
@@ -332,7 +359,8 @@ fun IOSSettingSliderRow(
                     val widthPx = size.width.toFloat()
                     fun xToValue(x: Float): Float {
                         val progress = (x / widthPx).coerceIn(0f, 1f)
-                        return range.start + progress * (range.endInclusive - range.start)
+                        val raw = range.start + progress * (range.endInclusive - range.start)
+                        return if (unit == "ms") raw.roundToInt().toFloat() else raw
                     }
                     detectDragGestures(
                         onDragStart = { offset ->
@@ -1571,13 +1599,13 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.32f))
+            .background(Color.Black.copy(alpha = 0.40f))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = onDismiss,
             ),
-        contentAlignment = Alignment.TopCenter,
+        contentAlignment = Alignment.Center,
     ) {
         val enterSpec = if (reducedMotion) tween(180) else spring<Float>(dampingRatio = 0.85f, stiffness = 320f)
         AnimatedVisibility(
@@ -1585,18 +1613,18 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
             enter = (if (reducedMotion) fadeIn(tween(180)) else fadeIn(tween(180)) + scaleIn(
                 initialScale = 0.92f,
                 animationSpec = enterSpec,
-                transformOrigin = TransformOrigin(0.5f, 0f),
+                transformOrigin = TransformOrigin(0.5f, 0.5f),
             )),
             
             exit = if (reducedMotion) fadeOut(tween(140)) else fadeOut(tween(150)) + scaleOut(
                 targetScale = 0.94f,
                 animationSpec = tween(150),
-                transformOrigin = TransformOrigin(0.5f, 0f),
+                transformOrigin = TransformOrigin(0.5f, 0.5f),
             ),
         ) {
             Column(
                 Modifier
-                    .padding(top = 96.dp, start = 16.dp, end = 16.dp)
+                    .padding(horizontal = 20.dp, vertical = 24.dp)
                     .widthIn(max = 520.dp)
                     .fillMaxWidth()
                     
@@ -1606,8 +1634,8 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
                         indication = null,
                         onClick = {},
                     )
-                    .liquidGlass(26.dp)
-                    .padding(20.dp),
+                    .sheetSurface(28.dp)
+                    .padding(22.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(stringResource(R.string.restart_scope_apps), color = textPrimary(), fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -1635,8 +1663,8 @@ private fun ScopedAppsRestartDialog(show: Boolean, onDismiss: () -> Unit, onConf
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(14.dp))
                                 .background(
-                                    if (isChecked) IOSColors.blue.copy(alpha = 0.12f)
-                                    else Color.White.copy(alpha = 0.05f)
+                                    if (isChecked) IOSColors.blue.copy(alpha = if (isDark()) 0.20f else 0.10f)
+                                    else if (isDark()) Color.White.copy(alpha = 0.06f) else IOSColors.lightCardAlt
                                 )
                                 .clickable(
                                     interactionSource = rowInteraction,

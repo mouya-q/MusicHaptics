@@ -122,6 +122,42 @@ class HapticExpressionTest {
         assertTrue(HapticExpression.withBassAfterglow("KICK", 0.65f, t, a, reference, 56L) == null)
     }
 
+    @Test fun ghostNotesAreLeftOut() {
+        assertTrue(!HapticExpression.shouldPlay("KICK", 0.09f, 1000L))
+        assertTrue(HapticExpression.shouldPlay("KICK", 0.20f, 0L))
+        assertTrue(!HapticExpression.shouldPlay("SNARE", 0.10f, 1000L))
+        assertTrue(HapticExpression.shouldPlay("SNARE", 0.25f, 0L))
+    }
+
+    @Test fun textureOnlyFillsRhythmGaps() {
+        assertTrue(!HapticExpression.shouldPlay("VOCAL", 0.50f, 100L))
+        assertTrue(HapticExpression.shouldPlay("VOCAL", 0.50f, 400L))
+        assertTrue(!HapticExpression.shouldPlay("BODY", 0.20f, 5000L))
+        assertTrue(!HapticExpression.shouldPlay("VOCAL", Float.NaN, 5000L))
+    }
+
+    @Test fun rhythmEventsAreKickAndSnare() {
+        assertTrue(HapticExpression.isRhythm("KICK"))
+        assertTrue(HapticExpression.isRhythm("snare"))
+        assertTrue(!HapticExpression.isRhythm("VOCAL"))
+        assertTrue(!HapticExpression.isRhythm("BODY"))
+    }
+
+    @Test fun everyPulseIsLongEnoughToFeel() {
+        for (event in listOf("KICK", "SNARE", "VOCAL", "BODY")) {
+            for (i in 0..20) {
+                val p = pattern(event, i / 20f, fast, budget = 60L)
+                // rests are amplitude 0; every real pulse must clear the perceptibility floor
+                for (j in p.timings.indices) if (p.amplitudes[j] != 0) assertTrue("$event i=$i ${p.timings[j]}", p.timings[j] >= 8L)
+            }
+        }
+    }
+
+    @Test fun loggedPeakIsNeverZeroForARealHit() {
+        assertTrue(pattern("KICK", 0.65f).peakAmplitude > 0)
+        assertTrue(pattern("SNARE", 0.20f).peakAmplitude > 0)
+    }
+
     @Test fun weightIsMonotonicInIntensity() {
         var last = -1
         for (i in 0..100) {

@@ -2,6 +2,22 @@
 
 Current source version: **6.2.0**
 
+## 6.4.1
+
+### Direct drive fix, calmer Taptic, dialog polish
+
+- **UDP descriptor** (`docs/ROOT_DIRECT_DRIVE.md`): the 6.4.0 trace had `errno=88`
+  (ENOTSOCK) on every probe. Native now validates the socket (`SO_TYPE`), keeps a private
+  duplicate, and Kotlin rebuilds the socket when native reports it unusable.
+- **Taptic is restrained** (`docs/HAPTIC_EXPRESSION.md`): ghost notes are dropped, vocal/body
+  texture only fills rhythm gaps, no pulse is shorter than 8 ms, and a dropped note no
+  longer consumes the cooldown slot.
+- Logged `peak` for default-amplitude hits was 0; it reports the hit strength now.
+- Restart-scope dialog: opaque sheet surface instead of the glass effect (which showed the
+  page through it as ghost text), one soft shadow, centred. Global glass shadow softened
+  (radius 22 dp / alpha 0.42 to 16 dp / 0.12 light, 0.28 dark).
+- Millisecond sliders show and snap to whole milliseconds.
+
 ## 6.4.0
 
 ### Light and heavy hits on every kind of device

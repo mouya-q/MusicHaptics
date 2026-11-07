@@ -10,7 +10,7 @@ CPP = APP / "cpp"
 errors = []
 
 required = [
-    ROOT / "README.md", ROOT / "CHANGED.md",
+    ROOT / "README.md", ROOT / "CHANGED.md", ROOT / "CONTRIBUTING.md",
     ROOT / "SECURITY.md", ROOT / "THIRD_PARTY_NOTICES.md", ROOT / "docs" / "ARCHITECTURE.md",
     ROOT / "LICENSE", CPP / "jni" / "NativeBridge.cpp",
 ]
